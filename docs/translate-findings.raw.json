@@ -1,0 +1,203 @@
+{
+  "executionMode": "TEMPLATE_NOT_RUN",
+  "environment": {
+    "checkedAt": "2026-10-18T09:39:46.558Z",
+    "region": "ap-southeast-1",
+    "accountPlan": "Chưa khai báo (chạy ở chế độ --template)",
+    "translateAvailable": false,
+    "errorCode": "TEMPLATE_MODE",
+    "errorMessage": "Báo cáo được tạo ở chế độ mẫu (--template), chưa gọi AWS API thật."
+  },
+  "exp2": {
+    "items": [
+      {
+        "sentenceId": "S01",
+        "category": "Câu thường (1 thẻ đơn)",
+        "analysis": {
+          "plainText": "Chào mừng quý khách đến với dịch vụ đặt phòng trực tuyến của chúng tôi.",
+          "taggedHtml": "Chào mừng quý khách đến với <span data-i=\"1\">dịch vụ đặt phòng trực tuyến</span> của chúng tôi.",
+          "codePointsWithoutTags": 71,
+          "codePointsWithTags": 95,
+          "tagOverheadCodePoints": 24,
+          "overheadPercent": 33.8,
+          "utf8BytesWithTags": 121
+        },
+        "billedCodePointsFor3LangsWithTags": 285,
+        "billedCodePointsFor3LangsWithoutTags": 213
+      },
+      {
+        "sentenceId": "S02",
+        "category": "Chữ đậm (strong/b)",
+        "analysis": {
+          "plainText": "Quý khách được miễn phí hủy phòng trước 48 giờ so với giờ nhận phòng.",
+          "taggedHtml": "Quý khách được <span data-i=\"1\">miễn phí hủy phòng</span> trước 48 giờ so với giờ nhận phòng.",
+          "codePointsWithoutTags": 69,
+          "codePointsWithTags": 93,
+          "tagOverheadCodePoints": 24,
+          "overheadPercent": 34.78,
+          "utf8BytesWithTags": 117
+        },
+        "billedCodePointsFor3LangsWithTags": 279,
+        "billedCodePointsFor3LangsWithoutTags": 207
+      },
+      {
+        "sentenceId": "S03",
+        "category": "Liên kết (anchor link)",
+        "analysis": {
+          "plainText": "Vui lòng xem chi tiết tại trang điều khoản sử dụng hoặc liên hệ bộ phận hỗ trợ.",
+          "taggedHtml": "Vui lòng xem chi tiết tại <span data-i=\"1\">trang điều khoản sử dụng</span> hoặc liên hệ bộ phận hỗ trợ.",
+          "codePointsWithoutTags": 79,
+          "codePointsWithTags": 103,
+          "tagOverheadCodePoints": 24,
+          "overheadPercent": 30.38,
+          "utf8BytesWithTags": 130
+        },
+        "billedCodePointsFor3LangsWithTags": 309,
+        "billedCodePointsFor3LangsWithoutTags": 237
+      },
+      {
+        "sentenceId": "S04",
+        "category": "Nhiều thẻ liên tiếp (3 thẻ)",
+        "analysis": {
+          "plainText": "Giá phòng đã bao gồm bữa sáng tự chọn, xe đưa đón sân bay và thuế giá trị gia tăng.",
+          "taggedHtml": "Giá phòng đã bao gồm <span data-i=\"1\">bữa sáng tự chọn</span>, <span data-i=\"2\">xe đưa đón sân bay</span> và <span data-i=\"3\">thuế giá trị gia tăng</span>.",
+          "codePointsWithoutTags": 83,
+          "codePointsWithTags": 155,
+          "tagOverheadCodePoints": 72,
+          "overheadPercent": 86.75,
+          "utf8BytesWithTags": 180
+        },
+        "billedCodePointsFor3LangsWithTags": 465,
+        "billedCodePointsFor3LangsWithoutTags": 249
+      },
+      {
+        "sentenceId": "S05",
+        "category": "Thẻ lồng nhau (2 cấp)",
+        "analysis": {
+          "plainText": "Chương trình ưu đãi mùa hè giảm ngay 30% giá phòng cho khách đặt sớm áp dụng đến hết tháng này.",
+          "taggedHtml": "Chương trình <span data-i=\"1\">ưu đãi mùa hè giảm ngay <span data-i=\"2\">30% giá phòng</span> cho khách đặt sớm</span> áp dụng đến hết tháng này.",
+          "codePointsWithoutTags": 95,
+          "codePointsWithTags": 143,
+          "tagOverheadCodePoints": 48,
+          "overheadPercent": 50.53,
+          "utf8BytesWithTags": 171
+        },
+        "billedCodePointsFor3LangsWithTags": 429,
+        "billedCodePointsFor3LangsWithoutTags": 285
+      },
+      {
+        "sentenceId": "S06",
+        "category": "Thẻ lồng nhau + thẻ rời",
+        "analysis": {
+          "plainText": "Nhấn vào nút Xác nhận đặt chỗ ở góc phải để nhận mã giảm giá tức thì.",
+          "taggedHtml": "Nhấn vào <span data-i=\"1\">nút <span data-i=\"2\">Xác nhận đặt chỗ</span> ở góc phải</span> để nhận <span data-i=\"3\">mã giảm giá tức thì</span>.",
+          "codePointsWithoutTags": 69,
+          "codePointsWithTags": 141,
+          "tagOverheadCodePoints": 72,
+          "overheadPercent": 104.35,
+          "utf8BytesWithTags": 170
+        },
+        "billedCodePointsFor3LangsWithTags": 423,
+        "billedCodePointsFor3LangsWithoutTags": 207
+      },
+      {
+        "sentenceId": "S07",
+        "category": "Số và dấu chấm thập phân",
+        "analysis": {
+          "plainText": "Khách sạn đạt điểm đánh giá 9.4/10 từ 1.250 lượt khách và chỉ cách biển 0.5 km.",
+          "taggedHtml": "Khách sạn đạt điểm đánh giá <span data-i=\"1\">9.4/10</span> từ 1.250 lượt khách và chỉ cách biển <span data-i=\"2\">0.5 km</span>.",
+          "codePointsWithoutTags": 79,
+          "codePointsWithTags": 127,
+          "tagOverheadCodePoints": 48,
+          "overheadPercent": 60.76,
+          "utf8BytesWithTags": 151
+        },
+        "billedCodePointsFor3LangsWithTags": 381,
+        "billedCodePointsFor3LangsWithoutTags": 237
+      },
+      {
+        "sentenceId": "S08",
+        "category": "Câu rất ngắn (nút bấm / nhãn UI)",
+        "analysis": {
+          "plainText": "Đặt phòng ngay",
+          "taggedHtml": "<span data-i=\"1\">Đặt phòng ngay</span>",
+          "codePointsWithoutTags": 14,
+          "codePointsWithTags": 38,
+          "tagOverheadCodePoints": 24,
+          "overheadPercent": 171.43,
+          "utf8BytesWithTags": 42
+        },
+        "billedCodePointsFor3LangsWithTags": 114,
+        "billedCodePointsFor3LangsWithoutTags": 42
+      },
+      {
+        "sentenceId": "S09",
+        "category": "Câu dài nhiều mệnh đề",
+        "analysis": {
+          "plainText": "Nếu quý khách có nhu cầu nhận phòng sớm hơn 14:00 hoặc trả phòng muộn sau 12:00 trưa, vui lòng thông báo trước cho quầy lễ tân trực 24/7 để chúng tôi sắp xếp phòng phù hợp nhất.",
+          "taggedHtml": "Nếu quý khách có nhu cầu <span data-i=\"1\">nhận phòng sớm hơn 14:00</span> hoặc <span data-i=\"2\">trả phòng muộn sau 12:00 trưa</span>, vui lòng thông báo trước cho <span data-i=\"3\">quầy lễ tân trực 24/7</span> để chúng tôi sắp xếp phòng phù hợp nhất.",
+          "codePointsWithoutTags": 177,
+          "codePointsWithTags": 249,
+          "tagOverheadCodePoints": 72,
+          "overheadPercent": 40.68,
+          "utf8BytesWithTags": 298
+        },
+        "billedCodePointsFor3LangsWithTags": 747,
+        "billedCodePointsFor3LangsWithoutTags": 531
+      },
+      {
+        "sentenceId": "S10",
+        "category": "Tên riêng (Homestay ABC)",
+        "analysis": {
+          "plainText": "Homestay ABC nằm yên bình ngay cạnh khu vực phố cổ Hội An.",
+          "taggedHtml": "<span data-i=\"1\">Homestay ABC</span> nằm yên bình ngay cạnh khu vực <span data-i=\"2\">phố cổ Hội An</span>.",
+          "codePointsWithoutTags": 58,
+          "codePointsWithTags": 106,
+          "tagOverheadCodePoints": 48,
+          "overheadPercent": 82.76,
+          "utf8BytesWithTags": 120
+        },
+        "billedCodePointsFor3LangsWithTags": 318,
+        "billedCodePointsFor3LangsWithoutTags": 174
+      },
+      {
+        "sentenceId": "S11",
+        "category": "Tên riêng + ẩm thực địa phương",
+        "analysis": {
+          "plainText": "Từ Homestay ABC, du khách có thể đi bộ thưởng thức cao lầu bên bờ sông Hoài.",
+          "taggedHtml": "Từ <span data-i=\"1\">Homestay ABC</span>, du khách có thể đi bộ thưởng thức <span data-i=\"2\">cao lầu</span> bên bờ <span data-i=\"3\">sông Hoài</span>.",
+          "codePointsWithoutTags": 76,
+          "codePointsWithTags": 148,
+          "tagOverheadCodePoints": 72,
+          "overheadPercent": 94.74,
+          "utf8BytesWithTags": 169
+        },
+        "billedCodePointsFor3LangsWithTags": 444,
+        "billedCodePointsFor3LangsWithoutTags": 228
+      },
+      {
+        "sentenceId": "S12",
+        "category": "Ký hiệu tiền tệ, giờ giấc và phần trăm",
+        "analysis": {
+          "plainText": "Phụ thu 15.5% phí dịch vụ cho các đơn đặt ăn đêm từ 22:30 đến 05:00 sáng.",
+          "taggedHtml": "Phụ thu <span data-i=\"1\">15.5% phí dịch vụ</span> cho các đơn đặt ăn đêm từ <span data-i=\"2\">22:30 đến 05:00 sáng</span>.",
+          "codePointsWithoutTags": 73,
+          "codePointsWithTags": 121,
+          "tagOverheadCodePoints": 48,
+          "overheadPercent": 65.75,
+          "utf8BytesWithTags": 143
+        },
+        "billedCodePointsFor3LangsWithTags": 363,
+        "billedCodePointsFor3LangsWithoutTags": 219
+      }
+    ],
+    "totals": {
+      "totalCodePointsWithoutTags": 943,
+      "totalCodePointsWithTags": 1519,
+      "totalOverheadCodePoints": 576,
+      "averageOverheadPercent": 61.08,
+      "totalBilledAcross3LangsWithTags": 4557
+    },
+    "cloudWatchComparisonNote": "LƯU Ý ĐỐI CHIẾU CLOUDWATCH: Amazon Translate tính phí theo mọi Unicode code point gửi trong trường Text (bao gồm cả các ký tự của thẻ <span data-i=\"k\">...</span>). Sau khi chạy Thử nghiệm 1, người chạy mở CloudWatch -> Metrics -> AWS/Translate -> CharacterCount (Sum, Period 1m/5m) để đối chiếu với con số dự kiến. Metric trên CloudWatch có thể trễ từ 3 đến 15 phút."
+  }
+}
