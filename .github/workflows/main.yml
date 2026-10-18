@@ -1,4 +1,4 @@
-name: Deploy Infrastructure via Terraform
+name: Deploy Infrastructure via CloudFormation
 
 on:
   push:
@@ -11,36 +11,28 @@ permissions:
   contents: read
 
 jobs:
-  terraform:
-    name: Terraform Init and Apply
+  cloudformation:
+    name: Deploy CloudFormation Stack
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Debug OIDC token
-        run: |
-          TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
-          echo $TOKEN | cut -d '.' -f2 | base64 -d 2>/dev/null | jq '{sub, aud, iss}'
-          
       - name: Configure AWS Credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::941490574112:role/GitHubActions-TranslateMe-Deployer
           aws-region: ap-southeast-2
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-
-      - name: Terraform Init
+      - name: Validate CloudFormation Template
         run: |
-          cd infra/environments/dev
-          terraform init
+          aws cloudformation validate-template --template-body file://infra/template.yaml
 
-      - name: Terraform Apply
+      - name: Deploy CloudFormation Stack
         run: |
-          cd infra/environments/dev
-          terraform apply -auto-approve
-          
+          aws cloudformation deploy \
+            --template-file infra/template.yaml \
+            --stack-name translateme-dev-stack \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
