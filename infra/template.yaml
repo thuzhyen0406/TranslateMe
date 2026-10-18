@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'TranslateMe Infrastructure - Dev Environment'
+
+Resources:
+  # 1. SNS Topic cảnh báo chi phí
+  BudgetSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: translateme-budget-alerts
+      Subscription:
+        - Protocol: email
+          Endpoint: 24021523@vnu.edu.vn
+        - Protocol: email
+          Endpoint: 24020267@vnu.edu.vn
+        - Protocol: email
+          Endpoint: 24021667@vnu.edu.vn
+        - Protocol: email
+          Endpoint: 24021643@vnu.edu.vn
+
+  # 2. AWS Budget $20 USD
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: TranslateMe-Monthly-Budget
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: 20
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: ACTUAL
+            Threshold: 50
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: SNS
+              Address: !Ref BudgetSNSTopic
+
+  # 3. IAM Role cho Lambda Hello
+  LambdaHelloExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: translateme-hello-lambda-cf-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # 4. Lambda Function Hello
+  HelloLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: translateme-hello-world
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaHelloExecutionRole.Arn
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+              return {
+                  statusCode: 200,
+                  body: JSON.stringify({ message: "Hello from CloudFormation Lambda!" }),
+              };
+          };
