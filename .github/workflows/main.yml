@@ -2,7 +2,7 @@ name: Deploy Infrastructure via Terraform
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, "feat/*", "iac-cicd-pipeline" ]
   pull_request:
     branches: [ main ]
 
