@@ -1,195 +1,135 @@
 # Báo Cáo Thực Nghiệm AWS Translate & Amazon Comprehend (Nhiệm Vụ 1.12)
 
-> **Trạng thái báo cáo:** CHƯA CHẠY TRÊN AWS THẬT (Khung báo cáo tự sinh — số liệu Thử nghiệm 2 đã tính sẵn offline; các mục gọi API sẽ tự điền khi chạy lệnh trên môi trường có AWS credentials)
+> **Trạng thái:** Đã chạy thực nghiệm trên AWS CloudShell. Amazon Translate khả dụng trên tài khoản dùng để chạy.  
+> **Lưu ý:** Lần nạp Custom Terminology ban đầu thất bại. Sau đó, terminology được nạp thành công; tuy nhiên, lệnh truy vấn trạng thái trả về `null`, nên trạng thái chưa được xác minh độc lập. Một lần dịch kiểm tra đã cho đầu ra phù hợp với thuật ngữ mong muốn.
 
 ## (1) Môi trường thực nghiệm
 
 | Thông số | Giá trị |
 | :--- | :--- |
 | **AWS Region** | `ap-southeast-1` |
-| **Gói tài khoản AWS** | Chưa khai báo (chạy ở chế độ --template) |
-| **Ngày giờ kiểm tra** | `2026-10-18T09:39:46.558Z` |
-| **Trạng thái kiểm tra TranslateText ban đầu** | Chưa khả dụng (`TEMPLATE_MODE`: Báo cáo được tạo ở chế độ mẫu (--template), chưa gọi AWS API thật.) |
+| **Môi trường chạy** | AWS CloudShell |
+| **Gói tài khoản AWS** | Không có thông tin trong kết quả |
+| **Ngày giờ kiểm tra** | Không có thông tin trong kết quả |
+| **Trạng thái TranslateText** | Khả dụng |
 
-## (2) Phương pháp và Bộ câu mẫu
+## (2) Phương pháp
 
-1. **Thử nghiệm 1 (Giữ thẻ `<span data-i="k">`):** Dịch 12 câu tiếng Việt (câu thường, chữ đậm, liên kết, 3 thẻ liên tiếp, thẻ lồng nhau 2 cấp, số thập phân `9.4/10`, câu ngắn UI, câu dài nhiều mệnh đề, tên riêng `Homestay ABC`, `phố cổ Hội An`, `cao lầu`, `sông Hoài`) sang 3 ngôn ngữ đích `vi -> en`, `vi -> ko`, `vi -> ja`. Kiểm tra tự động bằng hàm `inspectSpanTags()`.
-2. **Thử nghiệm 2 (Cách tính ký tự):** Đếm Unicode code point (`Array.from(text).length`) của cùng 12 câu khi **không có thẻ** và **có thẻ `<span data-i="k">`** để tính tỷ lệ tăng ký tự tính phí, đối chiếu với CloudWatch metric `CharacterCount`.
-3. **Thử nghiệm 3 (Ký hiệu `{n}...{/n}`):** Dịch 6 câu mẫu có 1 cặp, 2 cặp và cặp lồng nhau `{1}...{2}...{/2}...{/1}` qua 3 cặp ngôn ngữ; kiểm tra bằng hàm `check_markers()` để phát hiện mất marker, thừa marker hoặc biến dạng (`{ 1 }`, `｛1｝`).
-4. **Thử nghiệm 4 (`Comprehend DetectDominantLanguage`):** Thử 8 mẫu đầu vào (câu dài, cụm ngắn 1–3 từ, câu trộn Việt–Anh, chuỗi chỉ gồm tên riêng hoặc số) và đánh dấu các mẫu có điểm tin cậy dưới ngưỡng `0.70`.
-5. **Thử nghiệm 5 (`Custom Terminology`):** Nạp tệp CSV UTF-8 (`vi,en,ko,ja`) bằng `ImportTerminology` (`MergeStrategy = OVERWRITE`), sau đó dịch đối chứng cùng bộ 6 câu (chuẩn, nằm trong thẻ `<span>`, viết hoa khác, biến thể câu) khi **không gắn** và **có gắn** Terminology.
+1. **Thử nghiệm 1:** Dịch 12 câu có thẻ `<span data-i="k">` sang tiếng Anh, Hàn và Nhật; kiểm tra thẻ, thứ tự `data-i` và khoảng trắng.
+2. **Thử nghiệm 2:** Đếm Unicode code point của 12 câu có và không có thẻ. Đây là số liệu tính offline, không phải số đo CloudWatch.
+3. **Thử nghiệm 3:** Dịch 6 câu có marker `{n}...{/n}` và kiểm tra marker.
+4. **Thử nghiệm 4:** Gọi Amazon Comprehend `DetectDominantLanguage` trên 8 mẫu; đối chiếu ngưỡng `0.70`.
+5. **Thử nghiệm 5:** Lần nạp Custom Terminology đầu tiên thất bại. Sau đó, nạp lại thành công và thực hiện một lần dịch kiểm tra với terminology. Lệnh truy vấn trạng thái trả về `null`; chưa có kết quả batch mới để xác nhận tỷ lệ áp dụng trên nhiều mẫu.
 
-## (3) Bảng kết quả theo từng cặp ngôn ngữ (`vi->en`, `vi->ko`, `vi->ja`)
+## (3) Kết quả theo cặp ngôn ngữ
 
-### 3.1. Tỷ lệ giữ nguyên thẻ `<span data-i="k">` (Thử nghiệm 1)
+### 3.1. Thẻ `<span data-i="k">` — Thử nghiệm 1
 
-| Cặp ngôn ngữ | Tổng số câu | Số câu giữ nguyên thẻ | Tỷ lệ giữ nguyên (%) | Số câu đảo thứ tự `data-i` | Số câu thay đổi khoảng trắng |
+| Cặp ngôn ngữ | Tổng số câu | Giữ nguyên thẻ | Tỷ lệ giữ nguyên | Đảo thứ tự `data-i` | Thay đổi khoảng trắng |
 | :---: | :---: | :---: | :---: | :---: | :---: |
-| `vi -> en` | 12 | *chưa chạy* | *chưa chạy* | *chưa chạy* | *chưa chạy* |
-| `vi -> ko` | 12 | *chưa chạy* | *chưa chạy* | *chưa chạy* | *chưa chạy* |
-| `vi -> ja` | 12 | *chưa chạy* | *chưa chạy* | *chưa chạy* | *chưa chạy* |
+| `vi -> en` | 12 | 12 | 100.00% | 0 | 0 |
+| `vi -> ko` | 12 | 7 | 58.33% | 5 | 0 |
+| `vi -> ja` | 12 | 11 | 91.67% | 1 | 0 |
 
-### 3.2. Cách tính ký tự và tỷ lệ tăng do thẻ `<span data-i="k">` (Thử nghiệm 2)
+**Nhận xét:** Kết quả tốt nhất là `vi -> en`. Với tiếng Hàn, 5/12 câu có thứ tự thẻ bị đảo; với tiếng Nhật là 1/12. Không có thay đổi khoảng trắng được ghi nhận. Không nên giả định thứ tự thẻ luôn được giữ nguyên, đặc biệt khi dịch sang tiếng Hàn.
 
-| Mã câu | Loại câu | Ký tự KHÔNG thẻ (code point) | Ký tự CÓ thẻ (code point) | Ký tự tăng thêm | Tỷ lệ tăng do thẻ (%) |
+### 3.2. Cách tính ký tự — Thử nghiệm 2
+
+Các số liệu dưới đây được tính offline bằng Unicode code point, không phải số liệu CloudWatch:
+
+| Mã câu | Loại câu | Không thẻ | Có thẻ | Tăng thêm | Tỷ lệ tăng |
 | :---: | :--- | :---: | :---: | :---: | :---: |
-| `S01` | Câu thường (1 thẻ đơn) | 71 | 95 | +24 | **+33.8%** |
-| `S02` | Chữ đậm (strong/b) | 69 | 93 | +24 | **+34.78%** |
-| `S03` | Liên kết (anchor link) | 79 | 103 | +24 | **+30.38%** |
-| `S04` | Nhiều thẻ liên tiếp (3 thẻ) | 83 | 155 | +72 | **+86.75%** |
-| `S05` | Thẻ lồng nhau (2 cấp) | 95 | 143 | +48 | **+50.53%** |
-| `S06` | Thẻ lồng nhau + thẻ rời | 69 | 141 | +72 | **+104.35%** |
-| `S07` | Số và dấu chấm thập phân | 79 | 127 | +48 | **+60.76%** |
-| `S08` | Câu rất ngắn (nút bấm / nhãn UI) | 14 | 38 | +24 | **+171.43%** |
-| `S09` | Câu dài nhiều mệnh đề | 177 | 249 | +72 | **+40.68%** |
-| `S10` | Tên riêng (Homestay ABC) | 58 | 106 | +48 | **+82.76%** |
-| `S11` | Tên riêng + ẩm thực địa phương | 76 | 148 | +72 | **+94.74%** |
-| `S12` | Ký hiệu tiền tệ, giờ giấc và phần trăm | 73 | 121 | +48 | **+65.75%** |
-| **TỔNG (12 câu)** | — | **943** | **1519** | **+576** | **+61.08%** |
+| `S01` | Câu thường (1 thẻ đơn) | 71 | 95 | +24 | +33.80% |
+| `S02` | Chữ đậm | 69 | 93 | +24 | +34.78% |
+| `S03` | Liên kết | 79 | 103 | +24 | +30.38% |
+| `S04` | Nhiều thẻ liên tiếp (3 thẻ) | 83 | 155 | +72 | +86.75% |
+| `S05` | Thẻ lồng nhau (2 cấp) | 95 | 143 | +48 | +50.53% |
+| `S06` | Thẻ lồng nhau và thẻ rời | 69 | 141 | +72 | +104.35% |
+| `S07` | Số và dấu thập phân | 79 | 127 | +48 | +60.76% |
+| `S08` | Câu ngắn / nhãn UI | 14 | 38 | +24 | +171.43% |
+| `S09` | Câu dài nhiều mệnh đề | 177 | 249 | +72 | +40.68% |
+| `S10` | Tên riêng `Homestay ABC` | 58 | 106 | +48 | +82.76% |
+| `S11` | Tên riêng và ẩm thực địa phương | 76 | 148 | +72 | +94.74% |
+| `S12` | Tiền tệ, giờ giấc và phần trăm | 73 | 121 | +48 | +65.75% |
+| **Tổng** | — | **943** | **1519** | **+576** | **+61.08%** |
 
-- **Tổng ký tự dự kiến bị tính phí khi dịch 12 câu sang cả 3 ngôn ngữ (`en, ko, ja`):** `4557` ký tự (nếu không có thẻ là `2829` ký tự).
-- **Ghi chú đối chiếu CloudWatch:** LƯU Ý ĐỐI CHIẾU CLOUDWATCH: Amazon Translate tính phí theo mọi Unicode code point gửi trong trường Text (bao gồm cả các ký tự của thẻ <span data-i="k">...</span>). Sau khi chạy Thử nghiệm 1, người chạy mở CloudWatch -> Metrics -> AWS/Translate -> CharacterCount (Sum, Period 1m/5m) để đối chiếu với con số dự kiến. Metric trên CloudWatch có thể trễ từ 3 đến 15 phút.
+- Tổng ký tự dự kiến cho 12 câu dịch sang 3 ngôn ngữ: **4.557** khi có thẻ, so với **2.829** khi không có thẻ.
+- Chưa có số đo CloudWatch để đối chiếu. AWS Translate `CharacterCount` cần được kiểm tra riêng sau khi metric cập nhật.
 
-### 3.3. Tỷ lệ sống sót của ký hiệu `{n}...{/n}` (Thử nghiệm 3)
+### 3.3. Marker `{n}...{/n}` — Thử nghiệm 3
 
-| Cặp ngôn ngữ | Tổng số câu thử | Số câu sống sót nguyên vẹn | Tỷ lệ sống sót (%) |
+| Cặp ngôn ngữ | Tổng số câu | Marker sống sót | Tỷ lệ sống sót |
 | :---: | :---: | :---: | :---: |
-| `vi -> en` | 6 | *chưa chạy* | *chưa chạy* |
-| `vi -> ko` | 6 | *chưa chạy* | *chưa chạy* |
-| `vi -> ja` | 6 | *chưa chạy* | *chưa chạy* |
+| `vi -> en` | 6 | 5 | 83.33% |
+| `vi -> ko` | 6 | 3 | 50.00% |
+| `vi -> ja` | 6 | 4 | 66.67% |
 
-### 3.4. Kết quả Custom Terminology (Thử nghiệm 5)
+**Nhận xét:** Marker văn bản thuần không đáng tin cậy bằng HTML span trong kết quả này. Một đầu ra tiếng Anh (`M01`) mất marker mở `{1}`; các đầu ra khác có hiện tượng chèn khoảng trắng quanh nội dung marker. Nên giữ bước hậu kiểm marker trước khi dựng lại HTML.
 
-**Nội dung tệp CSV UTF-8 nạp vào `ImportTerminology`:**
-```csv
-vi,en,ko,ja
-Homestay ABC,Homestay ABC,Homestay ABC,Homestay ABC
-phố cổ Hội An,Hoi An Ancient Town,호이안 구시가지,ホイアン旧市街
-cao lầu,cao lau noodles,까오러우 국수,カオラウ麺
-sông Hoài,Hoai River,호아이 강,ホアイ川
-```
+### 3.4. Custom Terminology — Thử nghiệm 5
 
-- **Trạng thái `ImportTerminology`:** *chưa chạy trên AWS thật*
+Lần nạp đầu tiên báo lỗi `terminologyData` null. Sau đó, lệnh nạp lại hoàn tất thành công:
 
-| Cặp ngôn ngữ | Tổng số ca thử | Số ca áp dụng đúng | Số ca KHÔNG áp dụng đủ (`"Cần xem lại"`) | Ghi chú cơ chế khớp của Amazon Translate |
-| :---: | :---: | :---: | :---: | :--- |
-| `vi -> en` | 6 | *chưa chạy* | *chưa chạy* | Custom Terminology chỉ khớp chính xác chuỗi ký tự và phân biệt hoa/thường (case-sensitive) -> ca `T05` (khác hoa/thường) và `T06` (biến thể từ xen giữa) cần module hậu kiểm F4 gắn cờ **"Cần xem lại"** |
-| `vi -> ko` | 6 | *chưa chạy* | *chưa chạy* | Custom Terminology chỉ khớp chính xác chuỗi ký tự và phân biệt hoa/thường (case-sensitive) -> ca `T05` (khác hoa/thường) và `T06` (biến thể từ xen giữa) cần module hậu kiểm F4 gắn cờ **"Cần xem lại"** |
-| `vi -> ja` | 6 | *chưa chạy* | *chưa chạy* | Custom Terminology chỉ khớp chính xác chuỗi ký tự và phân biệt hoa/thường (case-sensitive) -> ca `T05` (khác hoa/thường) và `T06` (biến thể từ xen giữa) cần module hậu kiểm F4 gắn cờ **"Cần xem lại"** |
+| Thuộc tính | Kết quả |
+| :--- | :--- |
+| Tên | `translateme_custom_glossary` |
+| Region | `ap-southeast-1` |
+| Định dạng | CSV |
+| Ngôn ngữ nguồn | `vi` |
+| Ngôn ngữ đích | `en`, `ko`, `ja` |
+| Số thuật ngữ | 12 |
+| Kích thước | 261 bytes |
+| ARN | `arn:aws:translate:ap-southeast-1:941490574112:terminology/translateme_custom_glossary/LATEST` |
 
-## (4) Kết quả Amazon Comprehend (`DetectDominantLanguage`) và Ngưỡng đề xuất
+Lệnh `get-terminology` truy vấn `TerminologyProperties.Status` trả về `null`. Vì vậy, trạng thái terminology chưa được xác minh qua truy vấn này; kết quả `null` không đủ để kết luận terminology không hoạt động.
 
-- **Ngưỡng độ tin cậy đề xuất:** **`0.70`** (mọi kết quả có `Score < 0.70` hoặc chuỗi quá ngắn/chỉ gồm số & tên riêng được đánh dấu dưới ngưỡng và giữ nguyên ngôn ngữ cấu hình mặc định của website).
+**Lần dịch kiểm tra:**
 
-| Mã mẫu | Phân loại | Chuỗi đầu vào | Ngôn ngữ nhận diện | Điểm tin cậy (`Score`) | Đánh giá so với ngưỡng `0.70` |
-| :---: | :--- | :--- | :---: | :---: | :--- |
-| `C01` | `LONG_SENTENCE` | Homestay ABC nằm yên bình bên bờ sông Hoài, chỉ cách phố cổ Hội An vài phút đi bộ và phục vụ bữa sáng cao lầu truyền thống mỗi ngày. | *chưa chạy* | *chưa chạy* | *chưa chạy* |
-| `C02` | `LONG_SENTENCE` | Welcome to our online booking platform where travelers can easily compare room rates and reserve boutique stays across Vietnam. | *chưa chạy* | *chưa chạy* | *chưa chạy* |
-| `C03` | `SHORT_1_3_WORDS` | Đặt phòng | *chưa chạy* | *chưa chạy* | *chưa chạy* |
-| `C04` | `SHORT_1_3_WORDS` | Trang chủ | *chưa chạy* | *chưa chạy* | *chưa chạy* |
-| `C05` | `MIXED_VI_EN` | Quý khách vui lòng check-in online trước để nhận free Wi-Fi tốc độ cao và voucher giảm giá. | *chưa chạy* | *chưa chạy* | *chưa chạy* |
-| `C06` | `MIXED_VI_EN` | Flash Sale Weekend: Đặt Deluxe Double Room ngay hôm nay with Free Airport Pickup! | *chưa chạy* | *chưa chạy* | *chưa chạy* |
-| `C07` | `PROPER_NOUN_OR_NUMBER` | Homestay ABC | *chưa chạy* | *chưa chạy* | *chưa chạy* |
-| `C08` | `PROPER_NOUN_OR_NUMBER` | 1.250.000 VND / 24.50 USD (9.4/10) | *chưa chạy* | *chưa chạy* | *chưa chạy* |
+- Văn bản nguồn: `Homestay ABC nằm gần phố cổ Hội An.`
+- Đầu ra: `Homestay ABC is located near Hoi An Ancient Town.`
 
-## (5) Trả lời hai câu hỏi Chốt chặn 1 (Gate 1)
+Đầu ra phù hợp với cách viết thuật ngữ mong muốn. Đây là một mẫu kiểm tra đơn lẻ, chưa phải đối chứng đủ để xác định chắc chắn terminology đã tác động đến bản dịch.
 
-1. **Amazon Translate có dùng được trên gói tài khoản AWS hiện tại không?**  
-   - **Trả lời:** **`CHƯA CHẠY`** *(chỉ điền sau khi chạy script với thông tin xác thực AWS thật; tuyệt đối không tự bịa số liệu)*.
-2. **`TranslateText` có giữ nguyên thẻ `<span data-i="k">` ở `vi->en`, `vi->ko`, `vi->ja` không?**  
-   - **Trả lời:** **`CHƯA CHẠY`** *(chỉ điền tỷ lệ % thật sau khi chạy `npm run exp:run` trên tài khoản AWS của nhóm)*.
+Các tỷ lệ batch đã ghi nhận trước đó (`vi -> en`: 4/6, `vi -> ko`: 1/6, `vi -> ja`: 1/6) không được xem là kết quả xác nhận sau lần nạp thành công. Cần chạy lại batch trên cả ba ngôn ngữ và so sánh với bản dịch không dùng terminology trước khi kết luận về hiệu quả.
 
-## (6) Khuyến nghị thiết kế cho Module Dịch Proxy (F2) và Hậu kiểm / Glossary (F4)
+## (4) Amazon Comprehend — `DetectDominantLanguage`
 
-1. **Lựa chọn giữa thẻ `<span data-i="k">` và ký hiệu `{n}...{/n}` cho F2:**
-   - **Khuyến nghị dùng `<span data-i="k">...</span>` (hoặc thẻ HTML nội tuyến)** làm cơ chế chính khi gọi `TranslateText` vì Amazon Translate hỗ trợ dịch tài liệu HTML nguyên bản: engine hiểu ranh giới thẻ đóng/mở và tự động di chuyển toàn bộ cụm `<span data-i="k">...</span>` theo trật tự ngữ pháp SOV của tiếng Hàn (`ko`) và tiếng Nhật (`ja`).
-   - Ngược lại, ký hiệu văn bản thuần `{1}...{/1}` dễ bị bộ dịch máy NMT chèn thêm khoảng trắng (`{ 1 }`), đổi sang ngoặc fullwidth (`｛1｝`) hoặc làm lệch cặp đóng/mở khi câu có cấu trúc đảo ngữ phức tạp. Tuy nhiên, vẫn giữ hàm `check_markers` / `inspectSpanTags` làm lớp hậu kiểm trước khi `rebuild()` HTML.
-2. **Chiến lược giảm chi phí ký tự & chia nhỏ khối khi thẻ bị xáo trộn:**
-   - Qua Thử nghiệm 2, thẻ `<span data-i="k">...</span>` làm tăng trung bình **+61.08%** số ký tự tính phí (mỗi cặp thẻ tốn thêm 23 ký tự code point). Do đó, trong hàm `extract()`: **chỉ bọc `<span data-i="k">` quanh các thẻ nội tuyến thực sự nằm giữa câu**, tuyệt đối không bọc thẻ cho câu thuần văn bản hoặc thẻ bao toàn bộ câu.
-   - Nếu sau khi dịch một câu phức tạp mà `inspectSpanTags()` phát hiện `tagsIntact === false` (mất hoặc hỏng thẻ): F2 thực hiện **fallback an toàn** bằng cách dịch lại văn bản thuần (đã strip thẻ) của câu đó để trang web không bao giờ bị vỡ cấu trúc DOM.
-3. **Ngưỡng nhận diện ngôn ngữ nguồn (Amazon Comprehend):**
-   - Áp dụng ngưỡng **`Score >= 0.70`** và độ dài văn bản tối thiểu **>= 20 ký tự** trước khi tin vào kết quả `DetectDominantLanguage`. Với các chuỗi ngắn 1–3 từ (nút bấm, menu), chuỗi trộn Việt–Anh hoặc chỉ gồm số/tên riêng, dùng trực tiếp ngôn ngữ nguồn mặc định đã khai báo trong cấu hình Tenant.
-4. **Cơ chế hậu kiểm thuật ngữ (F4 - Custom Terminology & "Cần xem lại"):**
-   - Vì `Custom Terminology` của Amazon Translate so khớp chính xác theo chuỗi ký tự và phân biệt chữ hoa/thường (`case-sensitive`), các câu có thuật ngữ viết hoa khác chuẩn hoặc bị biến thể từ vựng sẽ không được áp dụng tự động. Module F4 cần chạy hàm `checkTerminologyApplied()` sau khi dịch: nếu câu gốc có chứa thuật ngữ trong Glossary (so khớp không phân biệt hoa/thường) nhưng bản dịch thiếu thuật ngữ đích tương ứng -> gắn cờ **`needsReview = true` ("Cần xem lại")** cho Reviewer kiểm duyệt trên Console.
+Ngưỡng đánh giá: **`0.70`**.
 
-## (7) Phụ lục: Mẫu đầu vào và đầu ra thô
+| Mã | Phân loại | Ngôn ngữ nhận diện | Score | Đánh giá |
+| :---: | :--- | :---: | :---: | :--- |
+| `C01` | Câu dài tiếng Việt | `vi` | 1.0000 | Đạt |
+| `C02` | Câu dài tiếng Anh | `en` | 0.9873 | Đạt |
+| `C03` | Cụm ngắn `Đặt phòng` | `vi` | 1.0000 | Đạt |
+| `C04` | Cụm ngắn `Trang chủ` | `vi` | 0.9821 | Đạt |
+| `C05` | Câu trộn Việt–Anh | `vi` | 1.0000 | Đạt |
+| `C06` | Câu trộn Anh–Việt | `en` | 0.7491 | Đạt, gần ngưỡng |
+| `C07` | Tên riêng `Homestay ABC` | `en` | 0.3818 | Dưới ngưỡng |
+| `C08` | Chuỗi số và tiền tệ | `de` | 0.2671 | Dưới ngưỡng |
 
-### Mẫu đầu vào chuẩn (Thử nghiệm 1, 3, 5) — Đầu ra sẽ được ghi tự động khi chạy trên AWS
-```json
-{
-  "note": "Chưa có đầu ra từ AWS Translate. Chạy `npm run exp:run` với AWS credentials để ghi đầu ra thực tế.",
-  "sampleSpanInputs": [
-    {
-      "id": "S01",
-      "category": "Câu thường (1 thẻ đơn)",
-      "description": "Câu giới thiệu dịch vụ có 1 cụm nhấn mạnh",
-      "taggedHtml": "Chào mừng quý khách đến với <span data-i=\"1\">dịch vụ đặt phòng trực tuyến</span> của chúng tôi."
-    },
-    {
-      "id": "S02",
-      "category": "Chữ đậm (strong/b)",
-      "description": "Câu thông báo chính sách hoàn tiền có phần chữ đậm",
-      "taggedHtml": "Quý khách được <span data-i=\"1\">miễn phí hủy phòng</span> trước 48 giờ so với giờ nhận phòng."
-    },
-    {
-      "id": "S03",
-      "category": "Liên kết (anchor link)",
-      "description": "Câu hướng dẫn có chứa liên kết nội tuyến",
-      "taggedHtml": "Vui lòng xem chi tiết tại <span data-i=\"1\">trang điều khoản sử dụng</span> hoặc liên hệ bộ phận hỗ trợ."
-    }
-  ],
-  "sampleMarkerInputs": [
-    {
-      "id": "M01",
-      "patternType": "SINGLE_PAIR",
-      "description": "Một cặp {1}...{/1} bao quanh cụm danh từ",
-      "textWithMarkers": "Chào mừng quý khách đến với {1}dịch vụ đặt phòng trực tuyến{/1} của chúng tôi."
-    },
-    {
-      "id": "M02",
-      "patternType": "SINGLE_PAIR",
-      "description": "Một cặp {1}...{/1} chứa số thập phân",
-      "textWithMarkers": "Khách sạn đạt điểm đánh giá {1}9.4/10{/1} từ hơn một nghìn du khách."
-    }
-  ],
-  "sampleTerminologyCases": [
-    {
-      "id": "T01",
-      "caseType": "STANDARD",
-      "description": "Câu mẫu chuẩn 1: Homestay ABC + phố cổ Hội An",
-      "sourceText": "Homestay ABC nằm gần phố cổ Hội An.",
-      "expectedTermsByLang": {
-        "en": [
-          "Homestay ABC",
-          "Hoi An Ancient Town"
-        ],
-        "ko": [
-          "Homestay ABC",
-          "호이안 구시가지"
-        ],
-        "ja": [
-          "Homestay ABC",
-          "ホイアン旧市街"
-        ]
-      }
-    },
-    {
-      "id": "T02",
-      "caseType": "STANDARD",
-      "description": "Câu mẫu chuẩn 2: sông Hoài",
-      "sourceText": "Phòng có ban công nhìn ra sông Hoài.",
-      "expectedTermsByLang": {
-        "en": [
-          "Hoai River"
-        ],
-        "ko": [
-          "호아이 강"
-        ],
-        "ja": [
-          "ホアイ川"
-        ]
-      }
-    }
-  ]
-}
-```
+**Nhận xét:** Hai mẫu chỉ gồm tên riêng hoặc số có điểm tin cậy thấp; `C08` còn bị nhận diện thành tiếng Đức. Dù các cụm ngắn `C03` và `C04` có điểm cao, vẫn nên dùng ngôn ngữ mặc định của Tenant cho chuỗi ngắn theo chính sách sản phẩm, thay vì phụ thuộc hoàn toàn vào nhận diện.
+
+## (5) Trả lời Chốt chặn 1 (Gate 1)
+
+1. **Amazon Translate có dùng được trên tài khoản AWS đã chạy thử nghiệm không?**  
+   **Có — trạng thái Gate 1 là `KHẢ DỤNG`.**
+
+2. **`TranslateText` có giữ nguyên thẻ span không?**  
+   **Không đồng đều giữa các ngôn ngữ:** `vi -> en` đạt 12/12; `vi -> ko` đạt 7/12; `vi -> ja` đạt 11/12. Có đảo thứ tự thẻ ở tiếng Hàn và tiếng Nhật.
+
+## (6) Khuyến nghị cho F2 và F4
+
+1. **F2 — bảo toàn cấu trúc:** Có thể tiếp tục dùng `<span data-i="k">` làm cơ chế chính, nhưng phải kiểm tra cấu trúc và thứ tự thẻ sau dịch. Thử nghiệm này cho thấy không thể coi thẻ luôn được bảo toàn ở mọi ngôn ngữ.
+2. **F2 — fallback an toàn:** Nếu hậu kiểm phát hiện thẻ thiếu, hỏng hoặc bị đảo không chấp nhận được, không dựng lại HTML từ đầu ra lỗi. Dùng fallback đã kiểm thử, chẳng hạn dịch phần văn bản an toàn và giữ nguyên cấu trúc DOM gốc.
+3. **Chi phí:** Thẻ làm tăng trung bình **61.08%** số code point trong bộ mẫu. Chỉ bọc các cụm nội tuyến cần bảo toàn; tránh bọc thẻ cho văn bản thuần hoặc cả câu nếu không cần.
+4. **Marker văn bản thuần:** Không dùng `{n}...{/n}` nếu chưa có bước kiểm tra và xử lý trường hợp mất marker, sai cặp hoặc chèn khoảng trắng.
+5. **Comprehend:** Chỉ tin kết quả khi `Score >= 0.70` và văn bản đủ dài (khuyến nghị tối thiểu 20 ký tự). Với chuỗi ngắn, trộn ngôn ngữ, số hoặc tên riêng, ưu tiên ngôn ngữ nguồn mặc định của Tenant.
+6. **F4 — terminology:** Lần nạp lại đã thành công và trả về 12 thuật ngữ. Một lần dịch kiểm tra cho đầu ra phù hợp, nhưng truy vấn trạng thái trả về `null` và chưa có batch đối chứng mới. Chạy lại toàn bộ mẫu có/không có terminology trên từng ngôn ngữ; xác minh kết quả trước khi dùng cờ `applied` hoặc gắn `needsReview = true`.
+
+## (7) Kết luận
+
+- AWS Translate khả dụng trên tài khoản thực hiện thử nghiệm.
+- Thẻ HTML span hoạt động tốt nhất trong mẫu tiếng Anh, nhưng tỷ lệ giữ nguyên giảm ở tiếng Hàn và Nhật.
+- Marker `{n}...{/n}` có tỷ lệ sống sót thấp hơn và cần hậu kiểm nghiêm ngặt.
+- Comprehend nhận diện tốt phần lớn câu dài, nhưng không đáng tin với tên riêng và chuỗi số.
+- Custom Terminology đã được nạp lại thành công; một mẫu kiểm tra cho kết quả phù hợp, nhưng cần batch đối chứng và xác minh trạng thái để đánh giá hiệu quả chắc chắn.
