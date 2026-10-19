@@ -4,10 +4,13 @@ import { extract } from '../extract.js';
 import { rebuild, rebuildDetailed, type RebuildOptionsExt } from '../rebuild.js';
 
 const ORIGIN = 'https://homestay-abc.vn';
+/** PUBLIC_BASE_URL kiểu domain mặc định của CloudFront (BASE_MODE=path, mục 2.3 báo cáo) */
+const CF = 'https://d1abc.cloudfront.net';
 const opts = (o: Partial<RebuildOptionsExt> = {}): RebuildOptionsExt => ({
   targetLang: 'en',
   originalUrl: `${ORIGIN}/phong-nghi/deluxe?ref=1`,
   slug: 'abc',
+  publicBaseUrl: CF,
   languageSwitcher: false,
   ...o,
 });
@@ -24,7 +27,7 @@ describe('rebuild – điền bản dịch', () => {
     const r = extract(page('<p>Giá gồm <b>bữa sáng</b> và <a href="/xe">xe đưa đón</a>.</p>'));
     assert.deepEqual(r.sentences, ['Giá gồm {1}bữa sáng{/1} và {2}xe đưa đón{/2}.']);
     const html = rebuild(r.skeletonHtml, ['{2}送迎{/2}と{1}朝食{/1}込み。'], r.placeholders, opts({ targetLang: 'ja' }));
-    assert.ok(html.includes('<p><a href="/ja/xe">送迎</a>と<b>朝食</b>込み。</p>'), html);
+    assert.ok(html.includes('<p><a href="/abc/ja/xe">送迎</a>と<b>朝食</b>込み。</p>'), html);
   });
 
   it('câu chưa có bản dịch giữ nguyên gốc (trang dịch dở)', () => {
@@ -52,7 +55,7 @@ describe('rebuild – điền bản dịch', () => {
     const { html } = roundTrip(page('<p>Đi tới <a href="/ban-do" title="Xem bản đồ">bản đồ</a> ngay.</p>'), {}, (s) =>
       s === 'Xem bản đồ' ? 'View map' : 'Go to {1}the map{/1} now.',
     );
-    assert.ok(html.includes('<p>Go to <a href="/en/ban-do" title="View map">the map</a> now.</p>'), html);
+    assert.ok(html.includes('<p>Go to <a href="/abc/en/ban-do" title="View map">the map</a> now.</p>'), html);
   });
 
   it('ngoặc nhọn có thật trong văn bản được trả về đúng', () => {
@@ -71,29 +74,39 @@ describe('rebuild – lang, canonical, hreflang', () => {
 
   it('canonical trỏ về chính trang dịch; bỏ canonical/hreflang cũ', () => {
     assert.equal(html.match(/rel="canonical"/g)?.length, 1);
-    assert.ok(html.includes('<link rel="canonical" href="https://abc.translateme.example/ko/phong-nghi/deluxe?ref=1">'));
+    assert.ok(html.includes(`<link rel="canonical" href="${CF}/abc/ko/phong-nghi/deluxe?ref=1">`));
     assert.ok(!html.includes('hreflang="fr"'));
   });
 
   it('hreflang cho mọi ngôn ngữ đang bật, ngôn ngữ gốc và x-default', () => {
     for (const l of ['en', 'ko', 'ja']) {
-      assert.ok(html.includes(`<link rel="alternate" hreflang="${l}" href="https://abc.translateme.example/${l}/phong-nghi/deluxe?ref=1">`), l);
+      assert.ok(html.includes(`<link rel="alternate" hreflang="${l}" href="${CF}/abc/${l}/phong-nghi/deluxe?ref=1">`), l);
     }
     assert.ok(html.includes(`<link rel="alternate" hreflang="vi" href="${ORIGIN}/phong-nghi/deluxe?ref=1">`));
     assert.ok(html.includes(`<link rel="alternate" hreflang="x-default" href="${ORIGIN}/phong-nghi/deluxe?ref=1">`));
   });
 
-  it('tên miền proxy, ngôn ngữ RTL và website nằm trong thư mục con', () => {
+  it('BASE_MODE=host (khi có tên miền riêng), ngôn ngữ RTL và website nằm trong thư mục con', () => {
     const r = roundTrip(page('<p>Xin chào</p><a href="/blog/bai-1">Bài 1</a><a href="/shop/">Cửa hàng</a>'), {
       targetLang: 'ar',
       originalUrl: `${ORIGIN}/blog/gioi-thieu`,
       siteHomeUrl: `${ORIGIN}/blog/`,
-      proxyBaseDomain: 'translateme.app',
+      baseMode: 'host',
+      publicBaseUrl: 'https://translateme.app',
     }).html;
     assert.ok(r.includes('<html lang="ar" dir="rtl">'));
-    assert.ok(r.includes('href="https://abc.translateme.app/ar/gioi-thieu"'));
+    assert.ok(r.includes('<link rel="canonical" href="https://abc.translateme.app/ar/gioi-thieu">'));
     assert.ok(r.includes('<a href="/ar/bai-1">'));
     assert.ok(r.includes(`<a href="${ORIGIN}/shop/">`), 'ngoài thư mục website -> về gốc');
+  });
+
+  it('BASE_MODE=path: PUBLIC_BASE_URL có dấu / cuối hoặc có thư mục con', () => {
+    const a = roundTrip(page('<a href="/lien-he">x</a>'), { publicBaseUrl: `${CF}/` }).html;
+    assert.ok(a.includes(`<link rel="canonical" href="${CF}/abc/en/phong-nghi/deluxe?ref=1">`));
+    assert.ok(a.includes('<a href="/abc/en/lien-he">'));
+    const b = roundTrip(page('<a href="/lien-he">x</a>'), { publicBaseUrl: `${CF}/demo/` }).html;
+    assert.ok(b.includes(`<link rel="canonical" href="${CF}/demo/abc/en/phong-nghi/deluxe?ref=1">`));
+    assert.ok(b.includes('<a href="/demo/abc/en/lien-he">'));
   });
 });
 
@@ -108,10 +121,10 @@ describe('rebuild – viết lại URL', () => {
   const headHtml = `<link rel="stylesheet" href="/css/site.css"><link rel="icon" href="favicon.ico"><style>body{background:url(/img/b.png)} @import "/css/more.css";</style>`;
   const { html } = roundTrip(page(body, headHtml));
 
-  it('liên kết nội bộ -> /{lang}/…, giữ query và hash; tương đối theo trang hiện tại', () => {
-    assert.ok(html.includes('<a href="/en/lien-he?x=1#map">'));
-    assert.ok(html.includes('<a href="/en/phong-nghi/tien-ich">'));
-    assert.ok(html.includes('<a href="/en/">'));
+  it('liên kết nội bộ -> /{slug}/{lang}/…, giữ query và hash; tương đối theo trang hiện tại', () => {
+    assert.ok(html.includes('<a href="/abc/en/lien-he?x=1#map">'));
+    assert.ok(html.includes('<a href="/abc/en/phong-nghi/tien-ich">'));
+    assert.ok(html.includes('<a href="/abc/en/">'));
   });
 
   it('liên kết ngoài, #, mailto, tel, javascript giữ nguyên; tệp không phải trang -> về gốc', () => {
@@ -150,13 +163,13 @@ describe('rebuild – viết lại URL', () => {
 
   it('og:url trỏ về trang dịch', () => {
     const r = roundTrip(page('<p>x y</p>', `<meta property="og:url" content="${ORIGIN}/phong-nghi/deluxe">`)).html;
-    assert.ok(r.includes('<meta property="og:url" content="https://abc.translateme.example/en/phong-nghi/deluxe?ref=1">'));
+    assert.ok(r.includes(`<meta property="og:url" content="${CF}/abc/en/phong-nghi/deluxe?ref=1">`));
   });
 
   it('<base href> được dùng để phân giải rồi bỏ đi', () => {
     const r = roundTrip(page('<a href="gioi-thieu">x</a><img src="logo.png">', `<base href="${ORIGIN}/vi/">`)).html;
     assert.ok(!r.includes('<base'));
-    assert.ok(r.includes('<a href="/en/vi/gioi-thieu">'));
+    assert.ok(r.includes('<a href="/abc/en/vi/gioi-thieu">'));
     assert.ok(r.includes(`src="${ORIGIN}/vi/logo.png"`));
   });
 });
@@ -166,8 +179,8 @@ describe('rebuild – nút chọn ngôn ngữ', () => {
     const { html } = roundTrip(page('<p>Xin chào</p>'), { languageSwitcher: true, targetLang: 'ko', languages: ['en', 'ko'] });
     assert.match(html, /<body><details id="tm-lang" class="notranslate" translate="no">/);
     assert.ok(html.includes(`<a href="${ORIGIN}/phong-nghi/deluxe?ref=1" hreflang="vi" lang="vi">Tiếng Việt (gốc)</a>`));
-    assert.ok(html.includes('<a href="/en/phong-nghi/deluxe?ref=1" hreflang="en" lang="en">English</a>'));
-    assert.ok(html.includes('<a href="/ko/phong-nghi/deluxe?ref=1" hreflang="ko" lang="ko" aria-current="page">한국어</a>'));
+    assert.ok(html.includes('<a href="/abc/en/phong-nghi/deluxe?ref=1" hreflang="en" lang="en">English</a>'));
+    assert.ok(html.includes('<a href="/abc/ko/phong-nghi/deluxe?ref=1" hreflang="ko" lang="ko" aria-current="page">한국어</a>'));
     assert.ok(!html.includes('<script'), 'không dùng JavaScript');
     assert.deepEqual(extract(html).sentences, ['Xin chào'], 'nút chọn ngôn ngữ không bị coi là nội dung cần dịch');
   });

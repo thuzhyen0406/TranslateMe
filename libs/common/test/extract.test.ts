@@ -192,7 +192,7 @@ describe('extract – quy tắc chi tiết', () => {
     const r = extract(wrap(body));
     const html = rebuild(r.skeletonHtml, r.sentences, r.placeholders, { targetLang: 'en', originalUrl: 'https://a.vn/', slug: 'a' });
     assert.equal(r.sentences.length, 6000);
-    assert.ok(html.includes('<a href="/en/p/2999">'));
+    assert.ok(html.includes('<a href="/a/en/p/2999">'));
     assert.ok(Date.now() - started < 5000, `${Date.now() - started} ms`);
   });
 

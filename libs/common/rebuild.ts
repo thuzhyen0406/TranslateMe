@@ -8,10 +8,15 @@
  *     để không làm vỡ DOM (mục 3.2 Quy ước). Thẻ được khôi phục theo id, không theo thứ tự.
  *  2. <html lang>, <link rel="canonical"> trỏ về chính trang dịch, <link rel="alternate" hreflang> cho mọi
  *     ngôn ngữ đang bật + ngôn ngữ gốc + x-default (cả hai trỏ về website gốc).
- *  3. Liên kết nội bộ -> /{lang}/…; ảnh, CSS, JS, phông chữ, iframe, action của form -> URL tuyệt đối về
+ *  3. Liên kết nội bộ -> /{slug}/{lang}/… (BASE_MODE=path) hoặc /{lang}/… (BASE_MODE=host); ảnh, CSS, JS, phông chữ, iframe, action của form -> URL tuyệt đối về
  *     website gốc (proxy không chuyển tiếp dữ liệu form). url(...) trong style cũng được đổi. <base> bị bỏ.
  *  4. Chèn nút chọn ngôn ngữ cố định đầu trang bằng <details> (HTML + CSS, không JavaScript),
  *     có mục "Tiếng Việt (gốc)" dẫn về website gốc.
+ *
+ * Dạng URL trang dịch (mục 2.3 báo cáo – chưa có tên miền riêng):
+ *  - BASE_MODE=path (mặc định): {PUBLIC_BASE_URL}/{slug}/{lang}/{path}, ví dụ https://d1abc.cloudfront.net/homestay-abc/en/
+ *  - BASE_MODE=host (khi có tên miền): https://{slug}.{host của PUBLIC_BASE_URL}/{lang}/{path}
+ * URL tuyệt đối của canonical, hreflang và og:url lấy từ PUBLIC_BASE_URL.
  */
 import { parse, serialize } from 'parse5';
 import {
@@ -36,7 +41,10 @@ import {
 import type { RebuildOptions, rebuild as ContractRebuild } from './interfaces.js';
 import { compareMarkers, escapeHtmlText, restoreInlineHtml, stripMarkers, validateMarkers } from './markers.js';
 
-export const DEFAULT_PROXY_BASE_DOMAIN = 'translateme.example';
+export type BaseMode = 'path' | 'host';
+export const DEFAULT_BASE_MODE: BaseMode = 'path';
+/** Chỉ dùng khi người gọi không truyền publicBaseUrl (test); proxy phải truyền biến môi trường PUBLIC_BASE_URL. */
+export const DEFAULT_PUBLIC_BASE_URL = 'https://translateme.example';
 export const DEFAULT_SOURCE_LANG = 'vi';
 
 export interface RebuildOptionsExt extends RebuildOptions {
@@ -46,8 +54,10 @@ export interface RebuildOptionsExt extends RebuildOptions {
   languages?: readonly string[];
   /** Trang chủ website gốc (bản ghi HOST). Mặc định: gốc tên miền của originalUrl */
   siteHomeUrl?: string;
-  /** Tên miền proxy: trang dịch ở https://{slug}.{proxyBaseDomain}/{lang}/… (mặc định translateme.example) */
-  proxyBaseDomain?: string;
+  /** BASE_MODE: 'path' (mặc định) hoặc 'host' */
+  baseMode?: BaseMode;
+  /** PUBLIC_BASE_URL, ví dụ https://d1abc.cloudfront.net (path) hoặc https://translateme.example (host) */
+  publicBaseUrl?: string;
   /** Chèn nút chọn ngôn ngữ (mặc định true) */
   languageSwitcher?: boolean;
 }
@@ -105,7 +115,30 @@ export interface UrlCtx {
   base: URL;
   homeOrigin: string;
   homePath: string; // luôn kết thúc bằng '/'
-  lang: string;
+  /** Tiền tố đường dẫn của trang dịch ở ngôn ngữ đích, ví dụ "/homestay-abc/en/" (path) hoặc "/en/" (host) */
+  prefix: string;
+}
+
+export interface TranslatedUrlScheme {
+  /** Tiền tố đường dẫn tương đối gốc cho ngôn ngữ `lang`, luôn kết thúc bằng '/' */
+  prefix(lang: string): string;
+  /** URL tuyệt đối của trang dịch: `rest` là phần đường dẫn sau trang chủ (kèm query nếu có) */
+  absolute(lang: string, rest: string): string;
+}
+
+/** Dạng URL trang dịch theo BASE_MODE và PUBLIC_BASE_URL (dùng chung cho rebuild và proxy). */
+export function translatedUrlScheme(slug: string, baseMode: BaseMode = DEFAULT_BASE_MODE, publicBaseUrl: string = DEFAULT_PUBLIC_BASE_URL): TranslatedUrlScheme {
+  const base = new URL(publicBaseUrl);
+  const s = encodeURIComponent(slug);
+  if (baseMode === 'host') {
+    return {
+      prefix: (lang) => `/${encodeURIComponent(lang)}/`,
+      absolute: (lang, rest) => `${base.protocol}//${s}.${base.host}/${encodeURIComponent(lang)}/${rest}`,
+    };
+  }
+  const basePath = base.pathname.replace(/\/+$/, '');
+  const prefix = (lang: string) => `${basePath}/${s}/${encodeURIComponent(lang)}/`;
+  return { prefix, absolute: (lang, rest) => `${base.origin}${prefix(lang)}${rest}` };
 }
 
 function tryUrl(value: string, base: URL | string): URL | null {
@@ -141,7 +174,7 @@ function rewriteNav(v: string, ctx: UrlCtx): string {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return u.href;
   const rest = restOf(u, ctx);
   if (rest === null || NON_PAGE_EXT.test(u.pathname)) return u.href;
-  return `/${ctx.lang}/${rest}${u.search}${u.hash}`;
+  return `${ctx.prefix}${rest}${u.search}${u.hash}`;
 }
 
 /**
@@ -252,13 +285,20 @@ function fillSlots(
   });
 }
 
-function buildSwitcherHtml(current: string, sourceLang: string, langs: readonly string[], originalUrl: string, rest: string): string {
+function buildSwitcherHtml(
+  current: string,
+  sourceLang: string,
+  langs: readonly string[],
+  originalUrl: string,
+  rest: string,
+  scheme: TranslatedUrlScheme,
+): string {
   const name = (l: string) => LANGUAGE_NAMES[l] ?? l;
   const items = [
     `<li><a href="${escapeAttr(originalUrl)}" hreflang="${escapeAttr(sourceLang)}" lang="${escapeAttr(sourceLang)}">${escapeHtmlText(name(sourceLang))} (gốc)</a></li>`,
     ...langs.map((l) => {
       const cur = l === current ? ' aria-current="page"' : '';
-      return `<li><a href="${escapeAttr(`/${l}/${rest}`)}" hreflang="${escapeAttr(l)}" lang="${escapeAttr(l)}"${cur}>${escapeHtmlText(name(l))}</a></li>`;
+      return `<li><a href="${escapeAttr(`${scheme.prefix(l)}${rest}`)}" hreflang="${escapeAttr(l)}" lang="${escapeAttr(l)}"${cur}>${escapeHtmlText(name(l))}</a></li>`;
     }),
   ].join('');
   return (
@@ -277,7 +317,7 @@ export function rebuildDetailed(
   const lang = options.targetLang;
   const sourceLang = options.sourceLang ?? DEFAULT_SOURCE_LANG;
   const langs = [...new Set([...(options.languages ?? []), lang])].filter((l) => l !== sourceLang);
-  const domain = options.proxyBaseDomain ?? DEFAULT_PROXY_BASE_DOMAIN;
+  const scheme = translatedUrlScheme(options.slug, options.baseMode, options.publicBaseUrl);
   const pageUrl = new URL(options.originalUrl);
   const home = tryUrl(options.siteHomeUrl ?? '/', pageUrl) ?? new URL('/', pageUrl);
   const homePath = home.pathname.endsWith('/') ? home.pathname : `${home.pathname}/`;
@@ -293,9 +333,9 @@ export function rebuildDetailed(
   const base = (baseHref !== undefined ? tryUrl(baseHref, pageUrl) : null) ?? pageUrl;
   for (const b of baseEl) removeNode(b);
 
-  const ctx: UrlCtx = { base, homeOrigin: home.origin, homePath, lang };
+  const ctx: UrlCtx = { base, homeOrigin: home.origin, homePath, prefix: scheme.prefix(lang) };
   const pageRest = restOf(pageUrl, ctx) ?? pageUrl.pathname.replace(/^\//, '');
-  const proxyUrl = (l: string) => `https://${options.slug}.${domain}/${l}/${pageRest}${pageUrl.search}`;
+  const proxyUrl = (l: string) => scheme.absolute(l, `${pageRest}${pageUrl.search}`);
 
   if (htmlEl) {
     setAttr(htmlEl, 'lang', lang);
@@ -325,7 +365,7 @@ export function rebuildDetailed(
   if (withSwitcher) insertChild(body, 0, createText(SWITCHER_TOKEN, body));
   let html = serialize(doc);
   if (withSwitcher) {
-    html = html.replace(SWITCHER_TOKEN, buildSwitcherHtml(lang, sourceLang, langs, pageUrl.href, `${pageRest}${pageUrl.search}`));
+    html = html.replace(SWITCHER_TOKEN, buildSwitcherHtml(lang, sourceLang, langs, pageUrl.href, `${pageRest}${pageUrl.search}`, scheme));
   }
   return { html, stats };
 }
