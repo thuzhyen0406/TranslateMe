@@ -1,20 +1,20 @@
 /**
- * markers – ký hiệu mỏ neo '{n}…{/n}' cho thẻ nội tuyến (Nhiệm vụ 1.5 – TV2).
+ * markers – ký hiệu mỏ neo `{n}…{/n}` cho thẻ nội tuyến (Nhiệm vụ 1.5 – TV2).
  * Dùng chung cho: F2 (proxy: extract/rebuild), TV3 (normalize_hash, TM), F4 (hậu kiểm).
  *
- * Quy ước dạng chuỗi nội bộ (dùng để  băm SHA-256, lưu TM, hiển thị cho Reviewer):
- *  - '{n}' … '{/n}' : cặp thẻ nội tuyến (a, strong, em, code…), n là số nguyên dương.
- *  - '{n/}'         : phần tử rỗng nằm giữa câu (img, br, input…).
- *  - '{{' và '}}'   : dấu ngoặc nhọn có thật trong văn bản (thoát ký tự, xem escapeMarkerText).
+ * Quy ước dạng chuỗi nội bộ (dùng để băm SHA-256, lưu TM, hiển thị cho Reviewer):
+ *  - `{n}` … `{/n}` : cặp thẻ nội tuyến (a, strong, em, code…), n là số nguyên dương.
+ *  - `{n/}`         : phần tử rỗng nằm giữa câu (img, br, input…).
+ *  - `{{` và `}}`   : dấu ngoặc nhọn có thật trong văn bản (thoát ký tự, xem escapeMarkerText).
  *
  * Khi gửi Amazon Translate (ContentType = text/html) chuỗi được đổi sang:
- *  - '{n}…{/n}' -> '<span data-i="n">…</span>'
- *  - '{n/}'     -> '<span data-i="n" data-v></span>'   (CHƯA kiểm chứng trên AWS thật)
+ *  - `{n}…{/n}` -> `<span data-i="n">…</span>`
+ *  - `{n/}`     -> `<span data-i="n" data-v></span>`   (CHƯA kiểm chứng trên AWS thật)
  * và đổi ngược lại bằng spanHtmlToMarkers() sau khi dịch.
  *
  * Nguyên tắc (theo docs/Quy ước trước khi code.md, mục 3.2):
  *  - Khôi phục thẻ theo GIÁ TRỊ id, không theo thứ tự xuất hiện (ko/ja hay đảo vị trí cụm).
- *  - Hàm không throw với dữ liệu xấu: trả về cờ 'ok' + danh sách lỗi để người gọi chọn fallback.
+ *  - Hàm không throw với dữ liệu xấu: trả về cờ `ok` + danh sách lỗi để người gọi chọn fallback.
  */
 
 /** Ngưỡng rủi ro 1.5 (Bảng 3.2): quá 5% số câu mất/lệch marker thì phải đổi phương án. */
@@ -26,7 +26,7 @@ export type MarkerToken =
   | { type: 'close'; id: string }
   | { type: 'void'; id: string };
 
-/** Một marker hợp lệ tại vị trí cho trước: '{n}', '{/n}' hoặc '{n/}' (n từ 1, tối đa 6 chữ số). */
+/** Một marker hợp lệ tại vị trí cho trước: `{n}`, `{/n}` hoặc `{n/}` (n từ 1, tối đa 6 chữ số). */
 const MARKER_AT = /\{(\/)?([1-9]\d{0,5})(\/)?\}/y;
 
 export type MarkerAt =
@@ -35,7 +35,7 @@ export type MarkerAt =
   | null;
 
 /**
- * Đọc marker (hoặc ký tự thoát '{{'/'}}') bắt đầu đúng tại vị trí 'i'. Trả null nếu tại đó là ký tự thường.
+ * Đọc marker (hoặc ký tự thoát `{{`/`}}`) bắt đầu đúng tại vị trí `i`. Trả null nếu tại đó là ký tự thường.
  * Dùng nội bộ cho tokenizeMarkers và segmenter.
  */
 export function markerAt(text: string, i: number): MarkerAt {
@@ -45,17 +45,17 @@ export function markerAt(text: string, i: number): MarkerAt {
   if (ch === '}') return null;
   MARKER_AT.lastIndex = i;
   const m = MARKER_AT.exec(text);
-  if (!m || (m[1] && m[3])) return null; // '{/1/}' không hợp lệ -> coi như văn bản
+  if (!m || (m[1] && m[3])) return null; // `{/1/}` không hợp lệ -> coi như văn bản
   const kind = m[1] ? 'close' : m[3] ? 'void' : 'open';
   return { kind, id: m[2], len: m[0].length };
 }
 
-/** Thoát dấu ngoặc nhọn có thật trong văn bản thuần trước khi ghép marker: '{' -> '{{', '}' -> '}}'. */
+/** Thoát dấu ngoặc nhọn có thật trong văn bản thuần trước khi ghép marker: `{` -> `{{`, `}` -> `}}`. */
 export function escapeMarkerText(plain: string): string {
   return plain.replace(/[{}]/g, (c) => c + c);
 }
 
-/** Tách chuỗi marker thành token. Dấu '{'/'}' lẻ không thành marker được giữ nguyên như văn bản. */
+/** Tách chuỗi marker thành token. Dấu `{`/`}` lẻ không thành marker được giữ nguyên như văn bản. */
 export function tokenizeMarkers(text: string): MarkerToken[] {
   const tokens: MarkerToken[] = [];
   let buf = '';
@@ -88,11 +88,11 @@ export function serializeMarkers(tokens: readonly MarkerToken[]): string {
         case 'text':
           return escapeMarkerText(t.value);
         case 'open':
-          return '{${t.id}}';
+          return `{${t.id}}`;
         case 'close':
-          return '{/${t.id}}';
+          return `{/${t.id}}`;
         case 'void':
-          return '{${t.id}/}';
+          return `{${t.id}/}`;
       }
     })
     .join('');
@@ -193,7 +193,7 @@ export function validateMarkers(text: string): MarkerValidation {
 // Đánh số lại id (mỗi câu đánh số riêng từ 1 để cùng một câu trên nhiều trang có cùng hash/TM)
 // ============================================================================
 
-/** Đổi tên id theo bảng 'mapping' (id cũ -> id mới). id không có trong bảng giữ nguyên. */
+/** Đổi tên id theo bảng `mapping` (id cũ -> id mới). id không có trong bảng giữ nguyên. */
 export function remapMarkerIds(text: string, mapping: Readonly<Record<string, string>>): string {
   const tokens = tokenizeMarkers(text).map((t) =>
     t.type === 'text' ? t : { ...t, id: mapping[t.id] ?? t.id },
@@ -251,7 +251,7 @@ export function decodeHtmlEntities(s: string): string {
 }
 
 /**
- * Chuỗi marker -> HTML gửi TranslateText. Văn bản được escape '& < >'.
+ * Chuỗi marker -> HTML gửi TranslateText. Văn bản được escape `& < >`.
  * Tiền điều kiện: validateMarkers(text).ok === true (người gọi kiểm tra trước).
  */
 export function markersToSpanHtml(text: string): string {
@@ -261,11 +261,11 @@ export function markersToSpanHtml(text: string): string {
         case 'text':
           return escapeHtmlText(t.value);
         case 'open':
-          return '<span data-i="${t.id}">';
+          return `<span data-i="${t.id}">`;
         case 'close':
           return '</span>';
         case 'void':
-          return '<span data-i="${t.id}" data-v></span>';
+          return `<span data-i="${t.id}" data-v></span>`;
       }
     })
     .join('');
@@ -279,14 +279,15 @@ export interface SpanParseResult {
   problems: string[];
 }
 
-const TAG_RE = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][a-zA-Z0-9:-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
+// Phần thuộc tính không chứa '<' để một thẻ hỏng (thiếu '>') không quét tới cuối chuỗi (tránh O(n²))
+const TAG_RE = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][a-zA-Z0-9:-]*)((?:[^<>"']|"[^"]*"|'[^']*')*)>/g;
 const DATA_I_RE = /\bdata-i\s*=\s*(?:"\s*([^"]*?)\s*"|'\s*([^']*?)\s*'|([^\s"'>/]+))/i;
 const DATA_V_RE = /\bdata-v\b/i;
 
 /**
  * HTML trả về từ TranslateText -> chuỗi marker.
  * Chịu được: thứ tự span bị đảo, nháy đơn/kép, thuộc tính thừa, entity, khoảng trắng thay đổi.
- * Thẻ lạ (không phải span) bị bỏ và ghi vào 'problems'.
+ * Thẻ lạ (không phải span) bị bỏ và ghi vào `problems`.
  */
 export function spanHtmlToMarkers(html: string): SpanParseResult {
   const problems: string[] = [];
@@ -308,29 +309,29 @@ export function spanHtmlToMarkers(html: string): SpanParseResult {
     const name = m[2].toLowerCase();
     const attrs = m[3] ?? '';
     if (name !== 'span') {
-      problems.push('UNEXPECTED_TAG:${name}');
+      problems.push(`UNEXPECTED_TAG:${name}`);
       continue;
     }
     if (isClose) {
       const top = stack.pop();
       if (!top) problems.push('UNMATCHED_SPAN_CLOSE');
-      else if (top.id !== null && !top.isVoid) out += '{/${top.id}}';
+      else if (top.id !== null && !top.isVoid) out += `{/${top.id}}`;
       continue;
     }
     const dm = DATA_I_RE.exec(attrs);
     const rawId = dm ? (dm[1] ?? dm[2] ?? dm[3] ?? '') : '';
     const id = /^[1-9]\d{0,5}$/.test(rawId) ? rawId : null;
-    if (id === null) problems.push(dm ? 'BAD_DATA_I:${rawId}' : 'SPAN_WITHOUT_DATA_I');
+    if (id === null) problems.push(dm ? `BAD_DATA_I:${rawId}` : 'SPAN_WITHOUT_DATA_I');
     const isVoid = id !== null && DATA_V_RE.test(attrs);
     const selfClosing = /\/\s*$/.test(attrs);
-    if (id !== null) out += isVoid ? '{${id}/}' : selfClosing ? '{${id}}{/${id}}' : '{${id}}';
+    if (id !== null) out += isVoid ? `{${id}/}` : selfClosing ? `{${id}}{/${id}}` : `{${id}}`;
     if (!selfClosing) stack.push({ id, isVoid });
   }
   pushText(html.slice(last));
 
-  for (const s of stack) if (s.id !== null && !s.isVoid) problems.push('UNCLOSED_SPAN:${s.id}');
+  for (const s of stack) if (s.id !== null && !s.isVoid) problems.push(`UNCLOSED_SPAN:${s.id}`);
   const v = validateMarkers(out);
-  for (const e of v.errors) problems.push('${e.code}:${e.id}');
+  for (const e of v.errors) problems.push(`${e.code}:${e.id}`);
   return { text: out, ok: problems.length === 0, problems };
 }
 
@@ -344,7 +345,7 @@ export interface MarkerComparison {
   /** Có thể khôi phục thẻ an toàn: cấu trúc hợp lệ, không thiếu, không thừa marker */
   restorable: boolean;
   structureValid: boolean;
-  /** Marker có ở câu gốc nhưng thiếu ở bản dịch, ví dụ '["{2}", "{/2}"]' */
+  /** Marker có ở câu gốc nhưng thiếu ở bản dịch, ví dụ `["{2}", "{/2}"]` */
   missing: string[];
   /** Marker thừa ở bản dịch */
   extra: string[];
@@ -448,8 +449,8 @@ export interface RestoreResult {
 
 /**
  * Chuỗi marker (đã dịch) + bảng thẻ gốc -> HTML.
- * @param text  Chuỗi marker, ví dụ 'Xem {2}giá{/2} tại {1}đây{/1}.'
- * @param tags  id -> thẻ MỞ gốc, ví dụ '{ "1": "<a href=\"/docs\">", "2": "<strong>" }'.
+ * @param text  Chuỗi marker, ví dụ `Xem {2}giá{/2} tại {1}đây{/1}.`
+ * @param tags  id -> thẻ MỞ gốc, ví dụ `{ "1": "<a href=\"/docs\">", "2": "<strong>" }`.
  *              Thẻ đóng được suy ra từ tên thẻ. Tra theo id nên thứ tự trong câu dịch không quan trọng.
  */
 export function restoreInlineHtml(text: string, tags: Readonly<Record<string, string>>): RestoreResult {
@@ -476,8 +477,14 @@ export function restoreInlineHtml(text: string, tags: Readonly<Record<string, st
       if (t.type === 'open') closers.push('');
       continue;
     }
-    html += tag;
-    if (t.type === 'open') closers.push(VOID_ELEMENTS.has(name) ? '' : '</${name}>');
+    const closeTag = VOID_ELEMENTS.has(name) ? '' : `</${name}>`;
+    if (t.type === 'open') {
+      html += tag;
+      closers.push(closeTag);
+    } else {
+      // {n/} trỏ tới phần tử không có nội dung, ví dụ icon <i class="fa"></i>: vẫn phải đóng thẻ
+      html += tag + closeTag;
+    }
   }
   return { html, ok: missingIds.length === 0, missingIds, usedFallback: false };
 }

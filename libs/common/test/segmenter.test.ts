@@ -60,6 +60,17 @@ describe('splitSentences – cơ bản', () => {
     assert.deepEqual(split('호텔에 도착했습니다. 방이 넓어요.'), ['호텔에 도착했습니다.', '방이 넓어요.']);
   });
 
+  it('"no" là từ tiếng Việt, không phải chữ viết tắt', () => {
+    assert.deepEqual(split('Ăn no. Ngủ kỹ.'), ['Ăn no.', 'Ngủ kỹ.']);
+  });
+
+  it('chuỗi khoảng trắng rất dài vẫn xử lý tuyến tính', () => {
+    const t = `a${' '.repeat(200_000)}b${' '.repeat(200_000)}c.`;
+    const started = Date.now();
+    assert.equal(segmentBlock(t).map((p) => p.text).join(''), t);
+    assert.ok(Date.now() - started < 2000);
+  });
+
   it('khối một câu, không dấu câu, rỗng', () => {
     assert.deepEqual(split('Đặt phòng ngay'), ['Đặt phòng ngay']);
     assert.deepEqual(split('   '), []);

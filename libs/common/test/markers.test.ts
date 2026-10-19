@@ -205,4 +205,17 @@ describe('restoreInlineHtml', () => {
   it('thẻ void dùng làm marker cặp không sinh thẻ đóng', () => {
     assert.equal(restoreInlineHtml('{1}a{/1}', { '1': '<br>' }).html, '<br>a');
   });
+
+  it('{n/} trỏ tới phần tử thường rỗng (icon <i>) vẫn được đóng thẻ', () => {
+    assert.equal(restoreInlineHtml('x{1/}y', { '1': '<i class="fa">' }).html, 'x<i class="fa"></i>y');
+  });
+});
+
+describe('hiệu năng với đầu vào xấu', () => {
+  it('thẻ hỏng thiếu ">" lặp nhiều lần vẫn xử lý tuyến tính', () => {
+    const started = Date.now();
+    const r = spanHtmlToMarkers('<a '.repeat(50_000));
+    assert.equal(r.text.length, 150_000);
+    assert.ok(Date.now() - started < 2000);
+  });
 });

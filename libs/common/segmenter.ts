@@ -25,7 +25,7 @@ export interface SegmentOptions {
 
 export const DEFAULT_ABBREVIATIONS: readonly string[] = Object.freeze([
   // en
-  'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs', 'no', 'fig', 'approx', 'e.g', 'i.e', 'a.m', 'p.m',
+  'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs', 'fig', 'approx', 'e.g', 'i.e', 'a.m', 'p.m',
   // vi
   'tp', 'ths', 'th.s', 'ts', 'pgs', 'gs', 'bs', 'ks', 'tr', 'gđ', 'pgđ', 'đ/c',
 ]);
@@ -151,15 +151,17 @@ export function segmentBlock(text: string, options: SegmentOptions = {}): Segmen
     else parts.push({ kind, text: s });
   };
 
+  // Tách khoảng trắng đầu/cuối bằng vòng lặp (không dùng regex lazy để tránh O(n²) khi trang có chuỗi khoảng trắng rất dài)
   let start = 0;
   for (const end of cuts) {
-    const seg = text.slice(start, end);
+    let a = start;
+    let b = end;
+    while (a < b && WS.test(text[a])) a++;
+    while (b > a && WS.test(text[b - 1])) b--;
+    push('gap', text.slice(start, a));
+    push('sentence', text.slice(a, b));
+    push('gap', text.slice(b, end));
     start = end;
-    const m = /^(\s*)([\s\S]*?)(\s*)$/u.exec(seg);
-    if (!m) continue;
-    push('gap', m[1]);
-    push('sentence', m[2]);
-    push('gap', m[3]);
   }
   return parts;
 }
