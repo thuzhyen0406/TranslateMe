@@ -452,6 +452,7 @@ export interface RestoreResult {
  * @param text  Chuỗi marker, ví dụ `Xem {2}giá{/2} tại {1}đây{/1}.`
  * @param tags  id -> thẻ MỞ gốc, ví dụ `{ "1": "<a href=\"/docs\">", "2": "<strong>" }`.
  *              Thẻ đóng được suy ra từ tên thẻ. Tra theo id nên thứ tự trong câu dịch không quan trọng.
+ *              Với marker rỗng `{n/}` có thể truyền HTML đầy đủ của phần tử (`<code>x</code>`), được chèn nguyên văn.
  */
 export function restoreInlineHtml(text: string, tags: Readonly<Record<string, string>>): RestoreResult {
   const tokens = tokenizeMarkers(text);
@@ -482,8 +483,10 @@ export function restoreInlineHtml(text: string, tags: Readonly<Record<string, st
       html += tag;
       closers.push(closeTag);
     } else {
-      // {n/} trỏ tới phần tử không có nội dung, ví dụ icon <i class="fa"></i>: vẫn phải đóng thẻ
-      html += tag + closeTag;
+      // {n/} có thể là: phần tử rỗng (<img>), HTML đầy đủ của phần tử giữ nguyên (<code>x</code>, <svg>…</svg>),
+      // hoặc chỉ thẻ mở của phần tử không nội dung (<i class="fa">) -> khi đó phải tự đóng thẻ.
+      const alreadyClosed = closeTag === '' || new RegExp(`</${name}\\s*>\\s*$`, 'i').test(tag);
+      html += alreadyClosed ? tag : tag + closeTag;
     }
   }
   return { html, ok: missingIds.length === 0, missingIds, usedFallback: false };
