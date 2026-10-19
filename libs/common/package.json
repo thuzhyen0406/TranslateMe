@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node --test dist/test/isBlockedIp.test.js dist/test/safeFetch.test.js dist/test/safeFetch.stub.test.js dist/test/experiments.test.js",
+    "test": "tsc -p tsconfig.json && node --test dist/test/isBlockedIp.test.js dist/test/safeFetch.test.js dist/test/safeFetch.stub.test.js dist/test/experiments.test.js dist/test/markers.test.js dist/test/segmenter.test.js",
     "exp:template": "tsc -p tsconfig.json && node dist/experiments/runExperiments.js --template",
     "exp:run": "tsc -p tsconfig.json && node dist/experiments/runExperiments.js --exp=all",
     "exp:1": "tsc -p tsconfig.json && node dist/experiments/runExperiments.js --exp=1",
