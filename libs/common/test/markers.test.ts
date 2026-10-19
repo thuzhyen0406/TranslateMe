@@ -209,6 +209,11 @@ describe('restoreInlineHtml', () => {
   it('{n/} trỏ tới phần tử thường rỗng (icon <i>) vẫn được đóng thẻ', () => {
     assert.equal(restoreInlineHtml('x{1/}y', { '1': '<i class="fa">' }).html, 'x<i class="fa"></i>y');
   });
+
+  it('{n/} mang HTML đầy đủ của phần tử được chèn nguyên văn, không đóng thẻ thừa', () => {
+    const tags = { '1': '<code>npm test</code>', '2': '<i class="fa"></i>', '3': '<svg viewBox="0 0 1 1"><path d="M0"></path></svg>' };
+    assert.equal(restoreInlineHtml('a{1/}b{2/}c{3/}', tags).html, `a${tags['1']}b${tags['2']}c${tags['3']}`);
+  });
 });
 
 describe('hiệu năng với đầu vào xấu', () => {
