@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: TranslateMe - khoa KMS (C11) va bang DynamoDB mot bang (C3)
+
+Parameters:
+  TableName:
+    Type: String
+    Default: TranslateMe
+  DeletionProtection:
+    Type: String
+    Default: "false"          # dat "true" khi len moi truong that
+    AllowedValues: ["true", "false"]
+
+Resources:
+  DataKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: TranslateMe - ma hoa DynamoDB, S3 va CloudWatch Logs
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccountAdminViaIAM
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root" }
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal: { Service: !Sub "logs.${AWS::Region}.amazonaws.com" }
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: "*"
+            Condition:
+              ArnLike:
+                "kms:EncryptionContext:aws:logs:arn": !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+  DataKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/translateme-data
+      TargetKeyId: !Ref DataKey
+
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: !Ref DeletionProtection
+      AttributeDefinitions:
+        - { AttributeName: PK,     AttributeType: S }
+        - { AttributeName: SK,     AttributeType: S }
+        - { AttributeName: GSI1PK, AttributeType: S }
+        - { AttributeName: GSI1SK, AttributeType: S }
+        - { AttributeName: GSI2PK, AttributeType: S }
+        - { AttributeName: GSI2SK, AttributeType: S }
+        - { AttributeName: GSI3PK, AttributeType: S }
+        - { AttributeName: GSI3SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1            # so lieu Platform Admin: USAGE#YYYY-MM -> TENANT#t
+          KeySchema:
+            - { AttributeName: GSI1PK, KeyType: HASH }
+            - { AttributeName: GSI1SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: GSI2            # cau theo trang: PAGE#lang#path -> HASH#sha256
+          KeySchema:
+            - { AttributeName: GSI2PK, KeyType: HASH }
+            - { AttributeName: GSI2SK, KeyType: RANGE }
+          Projection: { ProjectionType: KEYS_ONLY }
+        - IndexName: GSI3            # TM theo nhan: TM#tgt#MACHINE|HUMAN|REVIEW -> updatedAt
+          KeySchema:
+            - { AttributeName: GSI3PK, KeyType: HASH }
+            - { AttributeName: GSI3SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt DataKey.Arn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - { Key: project, Value: translateme }
+
+Outputs:
+  TableName:
+    Value: !Ref Table
+    Export:
+      Name: !Sub "${AWS::StackName}-TableName"
+  TableArn:
+    Value: !GetAtt Table.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-TableArn"
+  KeyArn:
+    Value: !GetAtt DataKey.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-KeyArn"
+  KeyAlias:
+    Value: !Ref DataKeyAlias
