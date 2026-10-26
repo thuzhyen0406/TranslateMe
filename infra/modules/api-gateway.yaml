@@ -1,0 +1,279 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: TranslateMe REST API — Cognito-protected console and API-key-protected translation routes.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@v3
+  com.aws.cloudformation.Context:
+    ref:
+      - at: ../../docs/api-gateway.md
+        has: REST API routes, authentication, usage plans, and gateway error responses
+        scope: module
+
+Parameters:
+  CognitoUserPoolId:
+    Type: String
+    Description: User Pool ID supplied by TV4; the console routes require this pool.
+  ConsoleFunctionArn:
+    Type: String
+    Description: ARN of the Lambda handling /console and /console/*.
+  TranslateFunctionArn:
+    Type: String
+    Description: ARN of the Lambda handling /translate and /translate/*.
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[A-Za-z0-9_-]+'
+  BasicRateLimit:
+    Type: Number
+    Default: 2
+    MinValue: 0.1
+    Description: Example steady-state requests per second; adjust to TV1's real quota.
+  BasicBurstLimit:
+    Type: Number
+    Default: 4
+    MinValue: 1
+    Description: Example burst request limit; adjust to TV1's real quota.
+  BasicMonthlyQuota:
+    Type: Number
+    Default: 5000
+    MinValue: 1
+    Description: Example monthly request quota; adjust to TV1's real quota.
+  StandardRateLimit:
+    Type: Number
+    Default: 10
+    MinValue: 0.1
+    Description: Example steady-state requests per second; adjust to TV1's real quota.
+  StandardBurstLimit:
+    Type: Number
+    Default: 20
+    MinValue: 1
+    Description: Example burst request limit; adjust to TV1's real quota.
+  StandardMonthlyQuota:
+    Type: Number
+    Default: 50000
+    MinValue: 1
+    Description: Example monthly request quota; adjust to TV1's real quota.
+
+Resources:
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${AWS::StackName}-api'
+      Description: TranslateMe REST API for console and translation endpoints.
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      ApiKeySourceType: HEADER
+
+  ConsoleAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoUserPoolAuthorizer
+      RestApiId: !Ref RestApi
+      Type: COGNITO_USER_POOLS
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !Sub 'arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoUserPoolId}'
+
+  ConsoleResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: console
+
+  ConsoleProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ConsoleResource
+      PathPart: '{proxy+}'
+
+  TranslateResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: translate
+
+  TranslateProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref TranslateResource
+      PathPart: '{proxy+}'
+
+  ConsoleMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ConsoleResource
+      HttpMethod: ANY
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ConsoleAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConsoleFunctionArn}/invocations'
+
+  ConsoleProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ConsoleProxyResource
+      HttpMethod: ANY
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ConsoleAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConsoleFunctionArn}/invocations'
+
+  TranslateMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref TranslateResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TranslateFunctionArn}/invocations'
+
+  TranslateProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref TranslateProxyResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TranslateFunctionArn}/invocations'
+
+  ConsoleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ConsoleFunctionArn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/console*'
+
+  TranslateInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TranslateFunctionArn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/translate*'
+
+  ApiDeploymentV1:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ConsoleMethod
+      - ConsoleProxyMethod
+      - TranslateMethod
+      - TranslateProxyMethod
+    Properties:
+      RestApiId: !Ref RestApi
+      Description: Initial API deployment snapshot.
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref ApiDeploymentV1
+      StageName: !Ref StageName
+
+  BasicUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: !Sub '${AWS::StackName}-basic'
+      Description: Example Basic plan; replace limits with values agreed with TV1.
+      ApiStages:
+        - ApiId: !Ref RestApi
+          Stage: !Ref ApiStage
+      Throttle:
+        RateLimit: !Ref BasicRateLimit
+        BurstLimit: !Ref BasicBurstLimit
+      Quota:
+        Limit: !Ref BasicMonthlyQuota
+        Period: MONTH
+
+  StandardUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: !Sub '${AWS::StackName}-standard'
+      Description: Example Standard plan; replace limits with values agreed with TV1.
+      ApiStages:
+        - ApiId: !Ref RestApi
+          Stage: !Ref ApiStage
+      Throttle:
+        RateLimit: !Ref StandardRateLimit
+        BurstLimit: !Ref StandardBurstLimit
+      Quota:
+        Limit: !Ref StandardMonthlyQuota
+        Period: MONTH
+
+  UnauthorizedGatewayResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: UNAUTHORIZED
+      StatusCode: '401'
+      ResponseParameters:
+        gatewayresponse.header.Content-Type: "'application/json'"
+      ResponseTemplates:
+        application/json: '{"code":"UNAUTHORIZED","request_id":"$context.requestId"}'
+
+  InvalidApiKeyGatewayResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: INVALID_API_KEY
+      StatusCode: '401'
+      ResponseParameters:
+        gatewayresponse.header.Content-Type: "'application/json'"
+      ResponseTemplates:
+        application/json: '{"code":"UNAUTHORIZED","request_id":"$context.requestId"}'
+
+  ThrottledGatewayResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: THROTTLED
+      StatusCode: '429'
+      ResponseParameters:
+        gatewayresponse.header.Content-Type: "'application/json'"
+      ResponseTemplates:
+        application/json: '{"code":"RATE_LIMITED","request_id":"$context.requestId"}'
+
+  QuotaExceededGatewayResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: QUOTA_EXCEEDED
+      StatusCode: '429'
+      ResponseParameters:
+        gatewayresponse.header.Content-Type: "'application/json'"
+      ResponseTemplates:
+        application/json: '{"code":"REQUEST_QUOTA_EXCEEDED","request_id":"$context.requestId"}'
+
+Outputs:
+  ApiId:
+    Description: REST API ID.
+    Value: !Ref RestApi
+  ApiBaseUrl:
+    Description: Base URL for the deployed REST API stage.
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}'
+  BasicUsagePlanId:
+    Description: Usage plan ID for Basic API keys.
+    Value: !Ref BasicUsagePlan
+  StandardUsagePlanId:
+    Description: Usage plan ID for Standard API keys.
+    Value: !Ref StandardUsagePlan
