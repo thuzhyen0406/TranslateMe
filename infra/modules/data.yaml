@@ -105,4 +105,3 @@ Outputs:
       Name: !Sub "${AWS::StackName}-KeyArn"
   KeyAlias:
     Value: !Ref DataKeyAlias
-    
