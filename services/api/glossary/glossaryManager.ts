@@ -1,17 +1,19 @@
 /**
  * Hạng mục 2.8 – Quản lý Thuật ngữ / Glossary (F4).
  *
- * Bám sát Hợp đồng giao diện Phần B (mục B.3, B.6, B.7) và Mục 1.3.3, 2.2.5, 2.6.5 của Báo cáo Tiến độ 2:
+ * Bám sát Hợp đồng giao diện Phần B (mục B.3, B.5, B.6, B.7) và Mục 1.3.3, 2.2.5, 2.6.5 của Báo cáo Tiến độ 2:
  *  - Bản ghi GLOSS: PK = "TENANT#<t>#GLOSS", SK = "TERM#<từ nguồn đã chuẩn hóa>".
  *  - Hai loại mục: KEEP (giữ nguyên, bản dịch mọi ngôn ngữ tự điền bằng từ nguồn)
  *    và FIXED (nhập bản dịch cho từng ngôn ngữ đích).
- *  - Nhập CSV UTF-8 (PREVIEW / COMMIT, xử lý trùng KEEP_EXISTING / OVERWRITE),
- *    bắt đủ lỗi: không phải UTF-8, thiếu cột ngôn ngữ, từ nguồn trùng, ô trống.
- *  - Tăng `glossaryVersion` ở CONFIG mỗi lần lưu, ghi `sinceVersion` cho các mục thay đổi.
- *  - Khi xóa mục (`deleteTerm`), lưu đánh dấu phiên bản xóa (`deleted: true, sinceVersion = newVersion`)
- *    để các bản dịch MACHINE cũ chứa từ bị xóa bị coi là lỗi thời (`isStale = true`).
- *  - Đồng bộ lên Amazon Translate qua `ImportTerminology` (`MergeStrategy = OVERWRITE`),
- *    mỗi tenant một terminology theo công thức duy nhất `terminologyNameOf(ctx)`.
+ *  - Nhập CSV UTF-8 (PREVIEW / COMMIT, xử lý trùng KEEP_EXISTING / OVERWRITE, giới hạn tối đa 99 dòng hợp lệ/lần
+ *    để đảm bảo giao dịch nguyên tử TransactWriteItems), bắt đủ lỗi: không phải UTF-8, thiếu cột ngôn ngữ,
+ *    từ nguồn trùng, ô trống.
+ *  - Cập nhật `CONFIG` bằng `Update` có điều kiện (Optimistic Locking `glossaryVersion = :old AND #st <> :locked`)
+ *    để không ghi đè toàn bộ `CONFIG` và chặn race condition khi hai admin sửa đồng thời hoặc tenant vừa bị khóa.
+ *  - Đồng bộ lên Amazon Translate qua `ImportTerminology` (`MergeStrategy = OVERWRITE`) từ danh sách thuật ngữ
+ *    trong bộ nhớ (không đọc lại sau ghi), và chỉ cập nhật `CONFIG.terminologyName` sau khi `ImportTerminology` thành công.
+ *  - Phần đọc dùng chung (`getGlossaryState`, `isStale`, `postCheckGlossary`, `terminologyNameOf`, ...) được đặt tại
+ *    `libs/common/glossary.ts` và re-export tại đây để tương thích với các caller hiện hữu.
  */
 
 import {
@@ -20,73 +22,67 @@ import {
   type ImportTerminologyCommandOutput,
 } from '@aws-sdk/client-translate';
 import { db, requireRole } from '../../../libs/common/db.js';
-import { stripHtmlTags } from '../../../libs/common/experiments/analyzers.js';
+import {
+  cleanTermText,
+  clearGlossaryCache,
+  containsTermInText,
+  DEFAULT_TARGET_LANGUAGES,
+  getGlossaryState,
+  GLOSSARY_CACHE_TTL_MS,
+  isStale,
+  normalizeTerm,
+  postCheckGlossary,
+  stripTagsAndMarkers,
+  SUPPORTED_GLOSSARY_LANGUAGES,
+  terminologyNameOf,
+  type GlossaryReadDependencies,
+  type GlossaryState,
+  type GlossaryTermEntry,
+  type GlossaryTermType,
+} from '../../../libs/common/glossary.js';
 import { AppError, keys, type Ctx, type Lang } from '../../../libs/common/types.js';
+
+export {
+  cleanTermText,
+  clearGlossaryCache,
+  containsTermInText,
+  DEFAULT_TARGET_LANGUAGES,
+  getGlossaryState,
+  GLOSSARY_CACHE_TTL_MS,
+  isStale,
+  normalizeTerm,
+  postCheckGlossary,
+  stripTagsAndMarkers,
+  SUPPORTED_GLOSSARY_LANGUAGES,
+  terminologyNameOf,
+  type GlossaryReadDependencies,
+  type GlossaryState,
+  type GlossaryTermEntry,
+  type GlossaryTermType,
+};
 
 const TABLE_NAME = process.env.TABLE_NAME || 'translate-data';
 
-/** Các mã ngôn ngữ ISO 639-1 được hệ thống hỗ trợ trong MVP. */
-export const SUPPORTED_GLOSSARY_LANGUAGES = Object.freeze([
-  'vi',
-  'en',
-  'ko',
-  'ja',
-  'zh',
-  'fr',
-  'de',
-  'es',
-] as const);
-
-/** Danh sách ngôn ngữ đích mặc định để tự điền khi tạo mục KEEP mà không truyền danh sách ngôn ngữ đích. */
-export const DEFAULT_TARGET_LANGUAGES: readonly Lang[] = Object.freeze(['en', 'ko', 'ja', 'zh']);
-
-/** Thời gian lưu đệm tối đa của GlossaryState trong bộ nhớ Lambda (60 giây theo B.7). */
-export const GLOSSARY_CACHE_TTL_MS = 60_000;
+/**
+ * Số dòng hợp lệ tối đa trong một lần nhập CSV (1 Update CONFIG + 99 Put GLOSS = 100 mục
+ * trong một giao dịch nguyên tử TransactWriteItems của DynamoDB).
+ */
+export const MAX_CSV_IMPORT_ROWS = 99;
 
 // ============================================================================
-// Kiểu dữ liệu (Khớp B.7 Phần B)
+// Kiểu dữ liệu cho các thao tác Ghi & Route Quản trị (B.6, B.7)
 // ============================================================================
-
-export type GlossaryTermType = 'KEEP' | 'FIXED';
-
-export interface GlossaryTermEntry {
-  normalized: string;
-  sourceTerm: string;
-  sourceLang: Lang;
-  type: GlossaryTermType;
-  translations: Record<Lang, string>;
-  sinceVersion: number;
-  deleted?: boolean;
-  updatedAt?: string;
-}
-
-export interface GlossaryState {
-  /** glossaryVersion hiện hành ở bản ghi CONFIG của tenant */
-  version: number;
-  /** Tên Custom Terminology trên Amazon Translate; null khi tenant chưa có thuật ngữ hiệu lực */
-  terminologyName: string | null;
-  /** Danh sách thuật ngữ (bao gồm cả mục đã đánh dấu xóa để `isStale` phát hiện bản dịch cũ) */
-  terms: {
-    normalized: string;
-    sourceTerm?: string;
-    sourceLang?: Lang;
-    type: GlossaryTermType;
-    translations?: Record<Lang, string>;
-    sinceVersion: number;
-    deleted?: boolean;
-  }[];
-}
 
 export interface PutTermInput {
   /** Từ nguồn (ví dụ: "Homestay ABC" hoặc "phố cổ Hội An") */
   sourceTerm: string;
-  /** Ngôn ngữ nguồn (mặc định: "vi") */
+  /** Ngôn ngữ nguồn (mặc định: ngôn ngữ nguồn của tenant hoặc "vi") */
   sourceLang?: Lang;
   /** Loại mục: KEEP (Giữ nguyên) hoặc FIXED (Dịch cố định) */
   type: GlossaryTermType;
   /** Bản dịch theo từng ngôn ngữ đích (với KEEP sẽ tự động điền bằng chính sourceTerm) */
   translations?: Record<Lang, string>;
-  /** Danh sách ngôn ngữ đích cần điền tự động cho loại KEEP (mặc định: en, ko, ja, zh) */
+  /** Danh sách ngôn ngữ đích cần điền tự động cho loại KEEP */
   targetLangs?: Lang[];
 }
 
@@ -103,6 +99,7 @@ export interface ImportCsvResult {
   overwrittenCount: number;
   skippedCount: number;
   version: number;
+  terminologySynced?: boolean;
 }
 
 export interface TranslateTerminologyClient {
@@ -112,7 +109,7 @@ export interface TranslateTerminologyClient {
 }
 
 export interface GlossaryDependencies {
-  db: Pick<typeof db, 'get' | 'put' | 'query' | 'transact'>;
+  db: Pick<typeof db, 'get' | 'put' | 'query' | 'transact'> & Partial<Pick<typeof db, 'update'>>;
   translateClient: TranslateTerminologyClient;
   now: () => number;
 }
@@ -134,120 +131,8 @@ const defaultDependencies: GlossaryDependencies = {
 };
 
 // ============================================================================
-// Bộ nhớ đệm GlossaryState theo (tenantId, version) trong Lambda (tối đa 60 giây)
+// Đọc danh sách hiệu lực cho màn hình Quản lý Thuật ngữ (listGlossary)
 // ============================================================================
-
-interface CachedGlossaryState {
-  version: number;
-  state: GlossaryState;
-  expiresAt: number;
-}
-
-const glossaryCache = new Map<string, CachedGlossaryState>();
-
-/** Xóa bộ nhớ đệm của một tenant hoặc toàn bộ (dùng sau khi ghi hoặc trong unit test). */
-export function clearGlossaryCache(tenantId?: string): void {
-  if (tenantId) {
-    glossaryCache.delete(tenantId);
-  } else {
-    glossaryCache.clear();
-  }
-}
-
-// ============================================================================
-// Hàm chuẩn hóa chuỗi & Công thức tên Terminology (B.7 & Mục 2.6.5)
-// ============================================================================
-
-/** Chuẩn hóa Unicode NFC, gộp khoảng trắng liên tiếp và cắt 2 đầu (giữ nguyên chữ hoa/thường). */
-export function cleanTermText(text: string): string {
-  if (typeof text !== 'string') return '';
-  return text.normalize('NFC').replace(/\s+/g, ' ').trim();
-}
-
-/** Chuẩn hóa từ nguồn làm khóa định danh (NFC + gộp khoảng trắng + cắt 2 đầu + chữ thường). */
-export function normalizeTerm(text: string): string {
-  return cleanTermText(text).toLowerCase();
-}
-
-/**
- * Công thức duy nhất tạo tên Custom Terminology trên Amazon Translate cho mỗi tenant (B.7 & Mục 2.6.5).
- * Chỉ chứa các ký tự hợp lệ của AWS Translate `^([A-Za-z0-9-]_?)+$`.
- */
-export function terminologyNameOf(ctx: Ctx): string {
-  const safeId = ctx.tenantId.replace(/[^A-Za-z0-9-_]/g, '-');
-  return `tm-${safeId}`;
-}
-
-// ============================================================================
-// Đọc trạng thái Thuật ngữ (getGlossaryState) & Danh sách hiệu lực (listGlossary)
-// ============================================================================
-
-/**
- * Lấy trạng thái bảng thuật ngữ của tenant (B.7).
- * Đọc `glossaryVersion` từ CONFIG và lưu đệm trong bộ nhớ Lambda theo `version` tối đa 60 giây.
- */
-export async function getGlossaryState(
-  ctx: Ctx,
-  deps: GlossaryDependencies = defaultDependencies,
-): Promise<GlossaryState> {
-  const config = await deps.db.get(ctx, keys.config(ctx));
-  if (config?.status === 'LOCKED') {
-    // Theo Bảng 2.14: thao tác đọc vẫn trả trạng thái khi cần hoặc do tầng gọi quyết định
-  }
-
-  const currentVersion = Number(config?.glossaryVersion ?? 0);
-  const now = deps.now();
-  const cached = glossaryCache.get(ctx.tenantId);
-
-  if (cached && cached.version === currentVersion && now < cached.expiresAt) {
-    return cached.state;
-  }
-
-  if (currentVersion <= 0) {
-    const emptyState: GlossaryState = {
-      version: 0,
-      terminologyName: null,
-      terms: [],
-    };
-    glossaryCache.set(ctx.tenantId, {
-      version: 0,
-      state: emptyState,
-      expiresAt: now + GLOSSARY_CACHE_TTL_MS,
-    });
-    return emptyState;
-  }
-
-  const glossPk = `TENANT#${ctx.tenantId}#GLOSS`;
-  const rawItems = await deps.db.query(ctx, glossPk, 'TERM#');
-
-  const terms: GlossaryState['terms'] = rawItems.map((item: Record<string, any>) => ({
-    normalized: String(item.normalized ?? String(item.SK ?? '').replace(/^TERM#/, '')),
-    sourceTerm: typeof item.sourceTerm === 'string' ? item.sourceTerm : String(item.normalized ?? ''),
-    sourceLang: typeof item.sourceLang === 'string' ? item.sourceLang : 'vi',
-    type: item.type === 'KEEP' ? 'KEEP' : 'FIXED',
-    translations:
-      item.translations && typeof item.translations === 'object'
-        ? { ...item.translations }
-        : {},
-    sinceVersion: Number(item.sinceVersion ?? 1),
-    deleted: Boolean(item.deleted),
-  }));
-
-  const hasActiveTerms = terms.some((t) => !t.deleted);
-  const state: GlossaryState = {
-    version: currentVersion,
-    terminologyName: hasActiveTerms ? terminologyNameOf(ctx) : null,
-    terms,
-  };
-
-  glossaryCache.set(ctx.tenantId, {
-    version: currentVersion,
-    state,
-    expiresAt: now + GLOSSARY_CACHE_TTL_MS,
-  });
-
-  return state;
-}
 
 /**
  * Trả về danh sách các mục thuật ngữ đang hiệu lực (không gồm các mục đã xóa) cho màn hình Quản lý Thuật ngữ.
@@ -280,7 +165,86 @@ export async function listGlossary(
 }
 
 // ============================================================================
-// Đồng bộ CSV lên Amazon Translate (ImportTerminology)
+// Đọc cấu hình ngôn ngữ của Tenant từ HOST# / CONFIG & Đọc GLOSS nhất quán mạnh
+// ============================================================================
+
+interface TenantLanguageProfile {
+  /** Ngôn ngữ nguồn đã được thiết lập ở HOST# hoặc các thuật ngữ hiện có (null nếu chưa có) */
+  establishedSourceLang: Lang | null;
+  /** Tập hợp ngôn ngữ đích cấu hình ở các website HOST# (hoặc DEFAULT_TARGET_LANGUAGES nếu chưa có website) */
+  configuredTargetLangs: Lang[];
+}
+
+async function loadTenantLanguageProfile(
+  ctx: Ctx,
+  config: Record<string, any>,
+  activeTerms: readonly GlossaryTermEntry[],
+  deps: GlossaryDependencies,
+): Promise<TenantLanguageProfile> {
+  const hostItems = await deps.db.query(ctx, `TENANT#${ctx.tenantId}`, 'HOST#');
+  let establishedSourceLang: Lang | null =
+    typeof config.sourceLang === 'string' && config.sourceLang.trim() !== ''
+      ? cleanTermText(config.sourceLang).toLowerCase()
+      : null;
+
+  const targetLangSet = new Set<string>();
+
+  for (const host of hostItems) {
+    if (!establishedSourceLang && typeof host.sourceLang === 'string' && host.sourceLang.trim() !== '') {
+      establishedSourceLang = cleanTermText(host.sourceLang).toLowerCase();
+    }
+    if (Array.isArray(host.targetLangs)) {
+      for (const rawLang of host.targetLangs) {
+        const lang = cleanTermText(String(rawLang)).toLowerCase();
+        if (lang && (SUPPORTED_GLOSSARY_LANGUAGES as readonly string[]).includes(lang)) {
+          targetLangSet.add(lang);
+        }
+      }
+    }
+  }
+
+  if (!establishedSourceLang && activeTerms.length > 0) {
+    establishedSourceLang = activeTerms[0].sourceLang || 'vi';
+  }
+
+  const configuredTargetLangs =
+    targetLangSet.size > 0 ? Array.from(targetLangSet) : [...DEFAULT_TARGET_LANGUAGES];
+
+  return {
+    establishedSourceLang,
+    configuredTargetLangs,
+  };
+}
+
+async function loadExistingGlossaryEntriesConsistent(
+  ctx: Ctx,
+  deps: GlossaryDependencies,
+): Promise<Map<string, GlossaryTermEntry>> {
+  const glossPk = `TENANT#${ctx.tenantId}#GLOSS`;
+  const rawItems = await deps.db.query(ctx, glossPk, 'TERM#', { consistent: true });
+  const map = new Map<string, GlossaryTermEntry>();
+
+  for (const item of rawItems) {
+    const normalized = String(item.normalized ?? String(item.SK ?? '').replace(/^TERM#/, ''));
+    if (!normalized) continue;
+    map.set(normalized, {
+      normalized,
+      sourceTerm: typeof item.sourceTerm === 'string' ? item.sourceTerm : normalized,
+      sourceLang: typeof item.sourceLang === 'string' ? item.sourceLang : 'vi',
+      type: item.type === 'KEEP' ? 'KEEP' : 'FIXED',
+      translations:
+        item.translations && typeof item.translations === 'object' ? { ...item.translations } : {},
+      sinceVersion: Number(item.sinceVersion ?? 1),
+      deleted: Boolean(item.deleted),
+      updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : undefined,
+    });
+  }
+
+  return map;
+}
+
+// ============================================================================
+// Đồng bộ CSV lên Amazon Translate (ImportTerminology) & Cập nhật terminologyName an toàn
 // ============================================================================
 
 function escapeCsvCell(val: string): string {
@@ -292,20 +256,37 @@ function escapeCsvCell(val: string): string {
 
 /**
  * Tạo nội dung tệp CSV UTF-8 chuẩn của Amazon Translate từ danh sách các mục thuật ngữ đang hiệu lực.
- * Dòng đầu tiên là mã ngôn ngữ (cột đầu là ngôn ngữ nguồn, các cột sau là ngôn ngữ đích).
+ *  - Dòng đầu tiên là mã ngôn ngữ (cột đầu là ngôn ngữ nguồn, các cột sau là ngôn ngữ đích).
+ *  - Đảm bảo mọi mục trong tenant có cùng `sourceLang`.
+ *  - Với các mục KEEP, tự động điền từ nguồn cho mọi ngôn ngữ đích của tenant (bao gồm cả cấu hình HOST# như fr, de, es).
  */
-export function buildTenantTerminologyCsv(activeTerms: readonly GlossaryTermEntry[]): string | null {
+export function buildTenantTerminologyCsv(
+  activeTerms: readonly GlossaryTermEntry[],
+  configuredTargetLangs: readonly Lang[] = DEFAULT_TARGET_LANGUAGES,
+): string | null {
   if (activeTerms.length === 0) return null;
 
-  const sourceLang = activeTerms[0].sourceLang || 'vi';
+  const sourceLang = cleanTermText(activeTerms[0].sourceLang || 'vi').toLowerCase() || 'vi';
   const targetLangSet = new Set<string>();
 
   for (const term of activeTerms) {
+    const termSourceLang = cleanTermText(term.sourceLang || 'vi').toLowerCase() || 'vi';
+    if (termSourceLang !== sourceLang) {
+      throw new AppError(
+        'INVALID_REQUEST',
+        `Ngôn ngữ nguồn của thuật ngữ '${term.sourceTerm}' (${termSourceLang}) không khớp với ngôn ngữ nguồn của tenant (${sourceLang})`,
+      );
+    }
+
     if (term.type === 'KEEP') {
+      for (const l of configuredTargetLangs) {
+        if (l && l !== sourceLang) targetLangSet.add(l);
+      }
       for (const l of DEFAULT_TARGET_LANGUAGES) {
-        if (l !== sourceLang) targetLangSet.add(l);
+        if (l && l !== sourceLang) targetLangSet.add(l);
       }
     }
+
     for (const [lang, text] of Object.entries(term.translations ?? {})) {
       if (lang !== sourceLang && typeof text === 'string' && text.trim() !== '') {
         targetLangSet.add(lang);
@@ -315,7 +296,7 @@ export function buildTenantTerminologyCsv(activeTerms: readonly GlossaryTermEntr
 
   const targetLangs = Array.from(targetLangSet);
   if (targetLangs.length === 0) {
-    for (const l of DEFAULT_TARGET_LANGUAGES) {
+    for (const l of configuredTargetLangs.length > 0 ? configuredTargetLangs : DEFAULT_TARGET_LANGUAGES) {
       if (l !== sourceLang) targetLangs.push(l);
     }
   }
@@ -330,7 +311,6 @@ export function buildTenantTerminologyCsv(activeTerms: readonly GlossaryTermEntr
         cells.push(term.sourceTerm);
       } else {
         const translated = term.translations?.[tgtLang]?.trim();
-        // Nếu một mục FIXED chỉ khai báo một số ngôn ngữ đích, các ngôn ngữ đích khác để trống
         cells.push(translated ?? '');
       }
     }
@@ -340,64 +320,196 @@ export function buildTenantTerminologyCsv(activeTerms: readonly GlossaryTermEntr
   return rows.join('\n') + '\n';
 }
 
+async function markTerminologySyncedOnConfig(
+  ctx: Ctx,
+  terminologyName: string | null,
+  syncedVersion: number,
+  deps: GlossaryDependencies,
+): Promise<void> {
+  const updatedAt = new Date(deps.now()).toISOString();
+  const updateParams = {
+    UpdateExpression:
+      'SET terminologyName = :tname, terminologySyncedVersion = :v, updatedAt = :now',
+    ConditionExpression:
+      'attribute_exists(PK) AND (attribute_not_exists(terminologySyncedVersion) OR terminologySyncedVersion < :v)',
+    ExpressionAttributeValues: {
+      ':tname': terminologyName,
+      ':v': syncedVersion,
+      ':now': updatedAt,
+    },
+  };
+
+  try {
+    if (typeof deps.db.update === 'function') {
+      await deps.db.update(ctx, { Key: keys.config(ctx), ...updateParams });
+    } else {
+      await deps.db.transact(ctx, [
+        {
+          Update: {
+            TableName: TABLE_NAME,
+            Key: keys.config(ctx),
+            ...updateParams,
+          },
+        },
+      ]);
+    }
+  } catch (err: any) {
+    if (
+      err?.name === 'ConditionalCheckFailedException' ||
+      err?.name === 'TransactionCanceledException'
+    ) {
+      // Đã có một phiên bản mới hơn cập nhật terminologySyncedVersion -> bỏ qua an toàn
+      return;
+    }
+    throw err;
+  }
+}
+
 async function syncTerminologyToTranslate(
   ctx: Ctx,
   activeTerms: readonly GlossaryTermEntry[],
+  newVersion: number,
+  configuredTargetLangs: readonly Lang[],
   deps: GlossaryDependencies,
-): Promise<void> {
-  const csv = buildTenantTerminologyCsv(activeTerms);
+): Promise<boolean> {
+  const csv = buildTenantTerminologyCsv(activeTerms, configuredTargetLangs);
   if (!csv) {
-    // Khi không còn thuật ngữ hiệu lực nào, getGlossaryState trả terminologyName = null
-    // nên F2/F9/F10 sẽ không truyền TerminologyNames vào TranslateText.
-    return;
+    // Khi không còn thuật ngữ hiệu lực nào -> xóa terminologyName trên CONFIG (đặt về null)
+    // để F2/F9/F10 không truyền TerminologyNames vào TranslateText.
+    await markTerminologySyncedOnConfig(ctx, null, newVersion, deps);
+    clearGlossaryCache(ctx.tenantId);
+    return true;
   }
 
-  await deps.translateClient.send(
-    new ImportTerminologyCommand({
-      Name: terminologyNameOf(ctx),
-      MergeStrategy: 'OVERWRITE',
-      Description: `Custom Terminology for tenant ${ctx.tenantId}`,
-      TerminologyData: {
-        File: Buffer.from(csv, 'utf8'),
-        Format: 'CSV',
-      },
-    }),
-  );
+  const targetName = terminologyNameOf(ctx);
+  try {
+    await deps.translateClient.send(
+      new ImportTerminologyCommand({
+        Name: targetName,
+        MergeStrategy: 'OVERWRITE',
+        Description: `Custom Terminology for tenant ${ctx.tenantId}`,
+        TerminologyData: {
+          File: Buffer.from(csv, 'utf8'),
+          Format: 'CSV',
+        },
+      }),
+    );
+  } catch (err: any) {
+    // Nếu ImportTerminology lỗi: ghi log có cấu trúc, KHÔNG gán terminologyName mới lên CONFIG
+    // để tránh F2/F9/F10 gọi TranslateText với một terminology chưa tồn tại (ResourceNotFoundException).
+    console.error(
+      JSON.stringify({
+        level: 'ERROR',
+        event: 'IMPORT_TERMINOLOGY_FAILED',
+        tenantId: ctx.tenantId,
+        version: newVersion,
+        terminologyName: targetName,
+        error: err?.message ?? String(err),
+      }),
+    );
+    clearGlossaryCache(ctx.tenantId);
+    return false;
+  }
+
+  await markTerminologySyncedOnConfig(ctx, targetName, newVersion, deps);
+  clearGlossaryCache(ctx.tenantId);
+  return true;
 }
 
 // ============================================================================
-// Thêm / Sửa một thuật ngữ (putTerm) & Xóa một thuật ngữ (deleteTerm)
+// Kiểm tra CONFIG & Giao dịch Optimistic Locking (Mục 2 Review PR #15)
 // ============================================================================
 
 async function loadConfigAndAssertWritable(
   ctx: Ctx,
   deps: GlossaryDependencies,
 ): Promise<Record<string, any>> {
-  const config = (await deps.db.get(ctx, keys.config(ctx))) ?? {
-    PK: `TENANT#${ctx.tenantId}`,
-    SK: 'CONFIG',
-    tenantId: ctx.tenantId,
-    status: 'ACTIVE',
-    glossaryVersion: 0,
-  };
-
+  const config = await deps.db.get(ctx, keys.config(ctx));
+  if (!config) {
+    throw new AppError('NOT_FOUND', 'Không tìm thấy cấu hình tenant');
+  }
   if (config.status === 'LOCKED') {
-    throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị tạm khóa, không thể thay đổi bảng thuật ngữ');
+    throw new AppError(
+      'TENANT_SUSPENDED',
+      'Tenant đang bị tạm khóa, không thể thay đổi bảng thuật ngữ',
+    );
   }
   return config;
 }
+
+function buildConfigVersionUpdateOp(
+  ctx: Ctx,
+  oldVersion: number,
+  newVersion: number,
+  updatedAt: string,
+) {
+  return {
+    Update: {
+      TableName: TABLE_NAME,
+      Key: keys.config(ctx),
+      UpdateExpression: 'SET glossaryVersion = :new, updatedAt = :now',
+      ConditionExpression:
+        'attribute_exists(PK) AND (attribute_not_exists(glossaryVersion) OR glossaryVersion = :old) AND #st <> :locked',
+      ExpressionAttributeNames: {
+        '#st': 'status',
+      },
+      ExpressionAttributeValues: {
+        ':new': newVersion,
+        ':old': oldVersion,
+        ':now': updatedAt,
+        ':locked': 'LOCKED',
+      },
+    },
+  };
+}
+
+async function executeGlossaryTransaction(
+  ctx: Ctx,
+  ops: any[],
+  deps: GlossaryDependencies,
+): Promise<void> {
+  try {
+    await deps.db.transact(ctx, ops);
+  } catch (err: any) {
+    if (
+      err?.name === 'TransactionCanceledException' ||
+      err?.name === 'ConditionalCheckFailedException'
+    ) {
+      const latestConfig = await deps.db.get(ctx, keys.config(ctx));
+      if (!latestConfig) {
+        throw new AppError('NOT_FOUND', 'Không tìm thấy cấu hình tenant');
+      }
+      if (latestConfig.status === 'LOCKED') {
+        throw new AppError(
+          'TENANT_SUSPENDED',
+          'Tenant đang bị tạm khóa, không thể thay đổi bảng thuật ngữ',
+        );
+      }
+      throw new AppError(
+        'VERSION_CONFLICT',
+        'Bảng thuật ngữ vừa được cập nhật bởi một yêu cầu khác, vui lòng thử lại',
+      );
+    }
+    throw err;
+  }
+}
+
+// ============================================================================
+// Thêm / Sửa một thuật ngữ (putTerm) & Xóa một thuật ngữ (deleteTerm)
+// ============================================================================
 
 /**
  * Thêm mới hoặc cập nhật một mục thuật ngữ (B.7).
  *  - Với loại KEEP: bản dịch ở mọi ngôn ngữ đích tự động điền bằng chính từ nguồn.
  *  - Với loại FIXED: yêu cầu bản dịch cố định cho các ngôn ngữ đích.
- *  - Tăng `glossaryVersion` ở CONFIG, ghi `sinceVersion = newVersion` và đồng bộ `ImportTerminology`.
+ *  - Tăng `glossaryVersion` ở CONFIG bằng `Update` có điều kiện (`glossaryVersion = :old AND #st <> :locked`).
+ *  - Đồng bộ `ImportTerminology` từ danh sách trong bộ nhớ và chỉ ghi `terminologyName` sau khi thành công.
  */
 export async function putTerm(
   ctx: Ctx,
   input: PutTermInput,
   deps: GlossaryDependencies = defaultDependencies,
-): Promise<{ version: number }> {
+): Promise<{ version: number; terminologySynced: boolean }> {
   const cleanedSource = cleanTermText(input?.sourceTerm ?? '');
   const normalized = normalizeTerm(cleanedSource);
 
@@ -409,29 +521,56 @@ export async function putTerm(
     throw new AppError('INVALID_REQUEST', 'Loại thuật ngữ phải là KEEP hoặc FIXED');
   }
 
-  const sourceLang = cleanTermText(input.sourceLang ?? 'vi').toLowerCase() || 'vi';
-  if (!(SUPPORTED_GLOSSARY_LANGUAGES as readonly string[]).includes(sourceLang)) {
-    throw new AppError('UNSUPPORTED_LANGUAGE', `Ngôn ngữ nguồn không được hỗ trợ: ${sourceLang}`);
+  const config = await loadConfigAndAssertWritable(ctx, deps);
+  const existingMap = await loadExistingGlossaryEntriesConsistent(ctx, deps);
+  const currentActiveTerms = Array.from(existingMap.values()).filter((t) => !t.deleted);
+  const langProfile = await loadTenantLanguageProfile(ctx, config, currentActiveTerms, deps);
+
+  const requestedSourceLang = input.sourceLang
+    ? cleanTermText(input.sourceLang).toLowerCase()
+    : langProfile.establishedSourceLang ?? 'vi';
+
+  if (!(SUPPORTED_GLOSSARY_LANGUAGES as readonly string[]).includes(requestedSourceLang)) {
+    throw new AppError('UNSUPPORTED_LANGUAGE', `Ngôn ngữ nguồn không được hỗ trợ: ${requestedSourceLang}`);
   }
 
+  if (
+    langProfile.establishedSourceLang &&
+    requestedSourceLang !== langProfile.establishedSourceLang
+  ) {
+    throw new AppError(
+      'INVALID_REQUEST',
+      `Ngôn ngữ nguồn '${requestedSourceLang}' không khớp với ngôn ngữ nguồn của tenant ('${langProfile.establishedSourceLang}')`,
+    );
+  }
+
+  const sourceLang = requestedSourceLang;
   const translations: Record<Lang, string> = {};
 
   if (input.type === 'KEEP') {
-    const targets =
+    const rawTargets =
       input.targetLangs && input.targetLangs.length > 0
         ? input.targetLangs
         : input.translations && Object.keys(input.translations).length > 0
           ? Object.keys(input.translations)
-          : DEFAULT_TARGET_LANGUAGES.filter((l) => l !== sourceLang);
+          : langProfile.configuredTargetLangs.filter((l) => l !== sourceLang);
 
-    for (const rawLang of targets) {
+    for (const rawLang of rawTargets) {
       const lang = cleanTermText(rawLang).toLowerCase();
       if (!lang || lang === sourceLang) continue;
       if (!(SUPPORTED_GLOSSARY_LANGUAGES as readonly string[]).includes(lang)) {
         throw new AppError('UNSUPPORTED_LANGUAGE', `Ngôn ngữ đích không được hỗ trợ: ${lang}`);
       }
-      // Quy tắc KEEP: tự điền bản dịch ở mọi ngôn ngữ đích bằng chính từ nguồn
       translations[lang] = cleanedSource;
+    }
+
+    // Nếu các ngôn ngữ cấu hình ở HOST# chưa có trong translations của mục KEEP và người gọi không truyền targetLangs riêng
+    if (!input.targetLangs || input.targetLangs.length === 0) {
+      for (const lang of langProfile.configuredTargetLangs) {
+        if (lang && lang !== sourceLang) {
+          translations[lang] = cleanedSource;
+        }
+      }
     }
   } else {
     const rawTranslations = input.translations ?? {};
@@ -452,58 +591,67 @@ export async function putTerm(
       translations[lang] = cleanedVal;
     }
     if (Object.keys(translations).length === 0) {
-      throw new AppError('INVALID_REQUEST', 'Thuật ngữ loại FIXED phải có ít nhất một ngôn ngữ đích khác ngôn ngữ nguồn');
+      throw new AppError(
+        'INVALID_REQUEST',
+        'Thuật ngữ loại FIXED phải có ít nhất một ngôn ngữ đích khác ngôn ngữ nguồn',
+      );
     }
   }
 
-  const config = await loadConfigAndAssertWritable(ctx, deps);
-  const newVersion = Number(config.glossaryVersion ?? 0) + 1;
+  const oldVersion = Number(config.glossaryVersion ?? 0);
+  const newVersion = oldVersion + 1;
   const updatedAt = new Date(deps.now()).toISOString();
   const glossKey = keys.gloss(ctx, normalized);
 
-  await deps.db.transact(ctx, [
-    {
-      Put: {
-        TableName: TABLE_NAME,
-        Item: {
-          ...config,
-          PK: `TENANT#${ctx.tenantId}`,
-          SK: 'CONFIG',
-          glossaryVersion: newVersion,
-          updatedAt,
+  const newEntry: GlossaryTermEntry = {
+    normalized,
+    sourceTerm: cleanedSource,
+    sourceLang,
+    type: input.type,
+    translations,
+    sinceVersion: newVersion,
+    deleted: false,
+    updatedAt,
+  };
+
+  await executeGlossaryTransaction(
+    ctx,
+    [
+      buildConfigVersionUpdateOp(ctx, oldVersion, newVersion, updatedAt),
+      {
+        Put: {
+          TableName: TABLE_NAME,
+          Item: {
+            PK: glossKey.PK,
+            SK: glossKey.SK,
+            tenantId: ctx.tenantId,
+            ...newEntry,
+          },
         },
       },
-    },
-    {
-      Put: {
-        TableName: TABLE_NAME,
-        Item: {
-          PK: glossKey.PK,
-          SK: glossKey.SK,
-          tenantId: ctx.tenantId,
-          normalized,
-          sourceTerm: cleanedSource,
-          sourceLang,
-          type: input.type,
-          translations,
-          sinceVersion: newVersion,
-          deleted: false,
-          updatedAt,
-        },
-      },
-    },
-  ]);
+    ],
+    deps,
+  );
+
+  // Hợp nhất danh sách thuật ngữ hiệu lực ngay trong bộ nhớ (không query lại sau ghi)
+  existingMap.set(normalized, newEntry);
+  const updatedActiveTerms = Array.from(existingMap.values()).filter((t) => !t.deleted);
 
   clearGlossaryCache(ctx.tenantId);
-  const currentList = await listGlossary(ctx, deps);
-  await syncTerminologyToTranslate(ctx, currentList.terms, deps);
+  const terminologySynced = await syncTerminologyToTranslate(
+    ctx,
+    updatedActiveTerms,
+    newVersion,
+    langProfile.configuredTargetLangs,
+    deps,
+  );
 
-  return { version: newVersion };
+  return { version: newVersion, terminologySynced };
 }
 
 /**
  * Xóa một mục thuật ngữ (B.7).
- *  - Tăng `glossaryVersion` ở CONFIG.
+ *  - Tăng `glossaryVersion` ở CONFIG bằng `Update` có điều kiện.
  *  - Lưu bản ghi đánh dấu xóa (`deleted: true, sinceVersion = newVersion`) để các bản dịch MACHINE cũ
  *    có chứa từ vừa bị xóa bị `isStale()` coi là lỗi thời và dịch lại ở lần truy cập sau.
  */
@@ -511,57 +659,72 @@ export async function deleteTerm(
   ctx: Ctx,
   termOrNormalized: string,
   deps: GlossaryDependencies = defaultDependencies,
-): Promise<{ version: number }> {
+): Promise<{ version: number; terminologySynced: boolean }> {
   const normalized = normalizeTerm(termOrNormalized);
   if (!normalized) {
     throw new AppError('INVALID_REQUEST', 'Từ thuật ngữ cần xóa không hợp lệ');
   }
 
   const config = await loadConfigAndAssertWritable(ctx, deps);
-  const glossKey = keys.gloss(ctx, normalized);
-  const existing = await deps.db.get(ctx, glossKey);
+  const existingMap = await loadExistingGlossaryEntriesConsistent(ctx, deps);
+  const existing = existingMap.get(normalized) ?? (await deps.db.get(ctx, keys.gloss(ctx, normalized))) as GlossaryTermEntry | null;
 
   if (!existing || existing.deleted) {
     throw new AppError('NOT_FOUND', `Không tìm thấy thuật ngữ '${termOrNormalized}'`);
   }
 
-  const newVersion = Number(config.glossaryVersion ?? 0) + 1;
-  const updatedAt = new Date(deps.now()).toISOString();
+  const currentActiveTerms = Array.from(existingMap.values()).filter((t) => !t.deleted);
+  const langProfile = await loadTenantLanguageProfile(ctx, config, currentActiveTerms, deps);
 
-  await deps.db.transact(ctx, [
-    {
-      Put: {
-        TableName: TABLE_NAME,
-        Item: {
-          ...config,
-          PK: `TENANT#${ctx.tenantId}`,
-          SK: 'CONFIG',
-          glossaryVersion: newVersion,
-          updatedAt,
+  const oldVersion = Number(config.glossaryVersion ?? 0);
+  const newVersion = oldVersion + 1;
+  const updatedAt = new Date(deps.now()).toISOString();
+  const glossKey = keys.gloss(ctx, normalized);
+
+  await executeGlossaryTransaction(
+    ctx,
+    [
+      buildConfigVersionUpdateOp(ctx, oldVersion, newVersion, updatedAt),
+      {
+        Put: {
+          TableName: TABLE_NAME,
+          Item: {
+            ...existing,
+            PK: glossKey.PK,
+            SK: glossKey.SK,
+            tenantId: ctx.tenantId,
+            normalized,
+            sinceVersion: newVersion,
+            deleted: true,
+            deletedAtVersion: newVersion,
+            updatedAt,
+          },
         },
       },
-    },
-    {
-      Put: {
-        TableName: TABLE_NAME,
-        Item: {
-          ...existing,
-          PK: glossKey.PK,
-          SK: glossKey.SK,
-          sinceVersion: newVersion,
-          deleted: true,
-          deletedAtVersion: newVersion,
-          updatedAt,
-        },
-      },
-    },
-  ]);
+    ],
+    deps,
+  );
+
+  // Cập nhật danh sách hiệu lực ngay trong bộ nhớ
+  existingMap.set(normalized, {
+    ...existing,
+    normalized,
+    sinceVersion: newVersion,
+    deleted: true,
+    updatedAt,
+  });
+  const updatedActiveTerms = Array.from(existingMap.values()).filter((t) => !t.deleted);
 
   clearGlossaryCache(ctx.tenantId);
-  const currentList = await listGlossary(ctx, deps);
-  await syncTerminologyToTranslate(ctx, currentList.terms, deps);
+  const terminologySynced = await syncTerminologyToTranslate(
+    ctx,
+    updatedActiveTerms,
+    newVersion,
+    langProfile.configuredTargetLangs,
+    deps,
+  );
 
-  return { version: newVersion };
+  return { version: newVersion, terminologySynced };
 }
 
 // ============================================================================
@@ -587,7 +750,6 @@ export function decodeUtf8Csv(input: string | Uint8Array | Buffer): string {
     throw new AppError('INVALID_REQUEST', 'Nội dung tệp CSV không hợp lệ');
   }
 
-  // Bỏ UTF-8 BOM nếu có ở đầu tệp
   if (text.startsWith('\uFEFF')) {
     text = text.slice(1);
   }
@@ -630,7 +792,7 @@ export function parseCsvLine(line: string): string[] | null {
     }
   }
 
-  if (inQuotes) return null; // Dấu ngoặc kép chưa đóng
+  if (inQuotes) return null;
   cells.push(current);
   return cells;
 }
@@ -638,10 +800,8 @@ export function parseCsvLine(line: string): string[] | null {
 /**
  * Nhập bảng thuật ngữ từ tệp CSV UTF-8 (B.7 & Mục 2.6.5).
  *  - Dòng đầu là các mã ngôn ngữ (`vi,en,ko,ja`), cột đầu là ngôn ngữ nguồn.
- *  - Mục có mọi bản dịch đích trùng từ nguồn -> KEEP; ngược lại -> FIXED.
- *  - Chế độ `PREVIEW`: trả về số dòng hợp lệ, các dòng lỗi kèm lý do, danh sách trùng với mục đã có.
- *  - Chế độ `COMMIT`: lưu vào DynamoDB theo `onDuplicate` (`KEEP_EXISTING` hoặc `OVERWRITE`),
- *    tăng `glossaryVersion` và gọi `ImportTerminology`.
+ *  - Giới hạn tối đa 99 dòng hợp lệ mỗi lần nhập để toàn bộ thao tác COMMIT nằm gọn trong
+ *    1 giao dịch nguyên tử `TransactWriteItems` (1 Update CONFIG + tối đa 99 Put GLOSS = 100 mục).
  */
 export async function importCsv(
   ctx: Ctx,
@@ -653,7 +813,6 @@ export async function importCsv(
   const csvText = decodeUtf8Csv(csvInput);
   const rawLines = csvText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
 
-  // Loại bỏ các dòng hoàn toàn rỗng ở cuối tệp
   while (rawLines.length > 0 && rawLines[rawLines.length - 1].trim() === '') {
     rawLines.pop();
   }
@@ -688,20 +847,40 @@ export async function importCsv(
   const sourceLang = langColumns[0];
   const targetLangs = langColumns.slice(1);
 
-  // Đọc danh sách các mục đang hiệu lực hiện có của tenant để phát hiện trùng
-  const existingList = await listGlossary(ctx, deps);
-  const existingMap = new Map<string, GlossaryTermEntry>();
-  for (const item of existingList.terms) {
-    existingMap.set(item.normalized, item);
+  const config = await loadConfigAndAssertWritable(ctx, deps);
+  const fullExistingMap = await loadExistingGlossaryEntriesConsistent(ctx, deps);
+  const activeExistingMap = new Map<string, GlossaryTermEntry>();
+  for (const [k, item] of fullExistingMap.entries()) {
+    if (!item.deleted) {
+      activeExistingMap.set(k, item);
+    }
   }
 
+  const langProfile = await loadTenantLanguageProfile(
+    ctx,
+    config,
+    Array.from(activeExistingMap.values()),
+    deps,
+  );
+
+  if (
+    langProfile.establishedSourceLang &&
+    sourceLang !== langProfile.establishedSourceLang
+  ) {
+    throw new AppError(
+      'INVALID_REQUEST',
+      `Ngôn ngữ nguồn trong CSV ('${sourceLang}') không khớp với ngôn ngữ nguồn của tenant ('${langProfile.establishedSourceLang}')`,
+    );
+  }
+
+  const oldVersion = Number(config.glossaryVersion ?? 0);
   const errors: ImportCsvErrorItem[] = [];
   const duplicates: { term: string }[] = [];
   const parsedEntries: GlossaryTermEntry[] = [];
   const seenInFile = new Set<string>();
 
   for (let i = 1; i < rawLines.length; i++) {
-    const rowNumber = i + 1; // Dòng 1 là header, dữ liệu bắt đầu từ dòng 2
+    const rowNumber = i + 1;
     const rawLine = rawLines[i];
     if (rawLine.trim() === '') {
       errors.push({ row: rowNumber, reason: 'Dòng trống' });
@@ -731,7 +910,6 @@ export async function importCsv(
       continue;
     }
 
-    // Kiểm tra ô trống ở các cột ngôn ngữ đích
     const translations: Record<Lang, string> = {};
     let emptyTargetCol: string | null = null;
     for (let colIdx = 1; colIdx < langColumns.length; colIdx++) {
@@ -749,19 +927,16 @@ export async function importCsv(
       continue;
     }
 
-    // Kiểm tra trùng ngay trong cùng tệp CSV (giữ dòng đầu, báo lỗi các dòng trùng phía sau)
     if (seenInFile.has(normalized)) {
       errors.push({ row: rowNumber, reason: `Trùng từ nguồn '${sourceTerm}' trong tệp CSV` });
       continue;
     }
     seenInFile.add(normalized);
 
-    // Tự động phân loại KEEP vs FIXED theo mục 1.3.3 & 2.6.5:
-    // Nếu mọi ô đích đều trùng từ nguồn -> KEEP, ngược lại -> FIXED.
     const isKeep = targetLangs.every((l) => translations[l] === sourceTerm);
     const termType: GlossaryTermType = isKeep ? 'KEEP' : 'FIXED';
 
-    if (existingMap.has(normalized)) {
+    if (activeExistingMap.has(normalized)) {
       duplicates.push({ term: sourceTerm });
     }
 
@@ -771,8 +946,15 @@ export async function importCsv(
       sourceLang,
       type: termType,
       translations,
-      sinceVersion: existingList.version + 1,
+      sinceVersion: oldVersion + 1,
     });
+  }
+
+  if (parsedEntries.length > MAX_CSV_IMPORT_ROWS) {
+    throw new AppError(
+      'INVALID_REQUEST',
+      `Mỗi lần nhập CSV chỉ cho phép tối đa ${MAX_CSV_IMPORT_ROWS} dòng hợp lệ (tệp hiện có ${parsedEntries.length} dòng hợp lệ)`,
+    );
   }
 
   let addedCount = 0;
@@ -781,7 +963,7 @@ export async function importCsv(
   const itemsToSave: GlossaryTermEntry[] = [];
 
   for (const entry of parsedEntries) {
-    if (existingMap.has(entry.normalized)) {
+    if (activeExistingMap.has(entry.normalized)) {
       if (onDuplicate === 'KEEP_EXISTING') {
         skippedCount++;
       } else {
@@ -802,11 +984,10 @@ export async function importCsv(
       addedCount,
       overwrittenCount,
       skippedCount,
-      version: existingList.version,
+      version: oldVersion,
     };
   }
 
-  const config = await loadConfigAndAssertWritable(ctx, deps);
   if (itemsToSave.length === 0) {
     return {
       validRows: parsedEntries.length,
@@ -815,26 +996,13 @@ export async function importCsv(
       addedCount: 0,
       overwrittenCount: 0,
       skippedCount,
-      version: Number(config.glossaryVersion ?? 0),
+      version: oldVersion,
+      terminologySynced: true,
     };
   }
 
-  const newVersion = Number(config.glossaryVersion ?? 0) + 1;
+  const newVersion = oldVersion + 1;
   const updatedAt = new Date(deps.now()).toISOString();
-
-  // DynamoDB TransactWriteItems giới hạn 100 mục/giao dịch; chia lô nếu số mục lớn
-  const configPutOp = {
-    Put: {
-      TableName: TABLE_NAME,
-      Item: {
-        ...config,
-        PK: `TENANT#${ctx.tenantId}`,
-        SK: 'CONFIG',
-        glossaryVersion: newVersion,
-        updatedAt,
-      },
-    },
-  };
 
   const glossPutOps = itemsToSave.map((item) => {
     const glossKey = keys.gloss(ctx, item.normalized);
@@ -858,16 +1026,32 @@ export async function importCsv(
     };
   });
 
-  const BATCH_SIZE = 90;
-  for (let i = 0; i < glossPutOps.length; i += BATCH_SIZE) {
-    const slice = glossPutOps.slice(i, i + BATCH_SIZE);
-    const ops = i === 0 ? [configPutOp, ...slice] : slice;
-    await deps.db.transact(ctx, ops);
+  // Giao dịch nguyên tử duy nhất (1 Update CONFIG + tối đa 99 Put GLOSS <= 100 mục)
+  await executeGlossaryTransaction(
+    ctx,
+    [buildConfigVersionUpdateOp(ctx, oldVersion, newVersion, updatedAt), ...glossPutOps],
+    deps,
+  );
+
+  for (const item of itemsToSave) {
+    activeExistingMap.set(item.normalized, {
+      ...item,
+      sinceVersion: newVersion,
+      deleted: false,
+      updatedAt,
+    });
   }
 
+  const updatedActiveTerms = Array.from(activeExistingMap.values());
   clearGlossaryCache(ctx.tenantId);
-  const updatedGlossary = await listGlossary(ctx, deps);
-  await syncTerminologyToTranslate(ctx, updatedGlossary.terms, deps);
+
+  const terminologySynced = await syncTerminologyToTranslate(
+    ctx,
+    updatedActiveTerms,
+    newVersion,
+    langProfile.configuredTargetLangs,
+    deps,
+  );
 
   return {
     validRows: parsedEntries.length,
@@ -877,116 +1061,7 @@ export async function importCsv(
     overwrittenCount,
     skippedCount,
     version: newVersion,
-  };
-}
-
-// ============================================================================
-// Phát hiện bản dịch lỗi thời (isStale) & Hậu kiểm thuật ngữ (postCheckGlossary)
-// ============================================================================
-
-const CJK_REGEX = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/;
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * Kiểm tra một thuật ngữ (đã chuẩn hóa NFC + chữ thường) có xuất hiện trong văn bản (đã chuẩn hóa NFC + chữ thường) hay không.
- * Theo Mục 2.6.5:
- *  - Với chữ Latin / Quốc ngữ: so khớp theo ranh giới từ chữ Latin/chữ số (`(?<![\p{Script=Latin}\p{M}\p{N}])...(?![\p{Script=Latin}\p{M}\p{N}])`),
- *    cho phép thuật ngữ KEEP ("Homestay ABC") đứng liền trước trợ từ tiếng Nhật/Hàn (như "Homestay ABCは", "Homestay ABC는").
- *  - Với chữ Hán, Nhật, Hàn (CJK): so khớp theo chuỗi con (`includes`).
- */
-export function containsTermInText(normalizedHaystack: string, normalizedNeedle: string): boolean {
-  if (!normalizedHaystack || !normalizedNeedle) return false;
-  if (CJK_REGEX.test(normalizedNeedle)) {
-    return normalizedHaystack.includes(normalizedNeedle);
-  }
-  const pattern = new RegExp(
-    `(?<![\\p{Script=Latin}\\p{M}\\p{N}])${escapeRegex(normalizedNeedle)}(?![\\p{Script=Latin}\\p{M}\\p{N}])`,
-    'u',
-  );
-  return pattern.test(normalizedHaystack);
-}
-
-/**
- * Kiểm tra một bản ghi trong Translation Memory (TM) có bị lỗi thời theo bảng thuật ngữ hiện tại hay không (B.7 & Mục 2.6.5).
- *  - Quy tắc: Bản dịch bị coi là lỗi thời nếu `sourceText` chứa BẤT KỲ thuật ngữ nào (kể cả mục vừa bị xóa)
- *    có `sinceVersion > entryGlossaryVersion`.
- *  - Với bản MACHINE: lỗi thời -> coi là trượt TM và dịch lại.
- *  - Với bản HUMAN: lỗi thời -> giữ nguyên nội dung nhưng hiển thị nhãn "Cần xem lại" (`needsReview = true`).
- */
-export function isStale(
-  sourceText: string,
-  entryGlossaryVersion: number,
-  g: GlossaryState,
-): boolean {
-  if (!g || g.version <= entryGlossaryVersion || !Array.isArray(g.terms) || g.terms.length === 0) {
-    return false;
-  }
-
-  // Loại bỏ các ký hiệu placeholder nội tuyến {1}...{/1} hoặc thẻ HTML trước khi dò từ nguồn
-  const plainSource = stripHtmlTags(sourceText).replace(/\{\/?\d+\}/g, ' ');
-  const normalizedSource = normalizeTerm(plainSource);
-  if (!normalizedSource) return false;
-
-  for (const term of g.terms) {
-    if (term.sinceVersion <= entryGlossaryVersion) continue;
-    const needle = normalizeTerm(term.normalized || term.sourceTerm || '');
-    if (containsTermInText(normalizedSource, needle)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-/**
- * Hậu kiểm thuật ngữ sau khi dịch máy (Mục 2.6.5).
- * Kiểm tra mọi thuật ngữ hiệu lực xuất hiện trong `sourceText` có xuất hiện bản dịch tương ứng
- * trong `translatedText` ở ngôn ngữ `targetLang` hay không.
- * Nếu thiếu bất kỳ thuật ngữ nào -> `needsReview = true` ("Cần xem lại").
- */
-export function postCheckGlossary(
-  sourceText: string,
-  translatedText: string,
-  targetLang: Lang,
-  g: GlossaryState,
-): {
-  passed: boolean;
-  needsReview: boolean;
-  missingTerms: string[];
-} {
-  if (!g || !Array.isArray(g.terms) || g.terms.length === 0) {
-    return { passed: true, needsReview: false, missingTerms: [] };
-  }
-
-  const normalizedSource = normalizeTerm(stripHtmlTags(sourceText).replace(/\{\/?\d+\}/g, ' '));
-  const normalizedTranslated = normalizeTerm(stripHtmlTags(translatedText).replace(/\{\/?\d+\}/g, ' '));
-  const missingTerms: string[] = [];
-
-  for (const term of g.terms) {
-    if (term.deleted) continue;
-    const sourceNeedle = normalizeTerm(term.normalized || term.sourceTerm || '');
-    if (!containsTermInText(normalizedSource, sourceNeedle)) continue;
-
-    const expectedTarget =
-      term.type === 'KEEP'
-        ? term.sourceTerm ?? term.normalized
-        : term.translations?.[targetLang];
-
-    if (!expectedTarget) continue;
-    const targetNeedle = normalizeTerm(expectedTarget);
-    if (!containsTermInText(normalizedTranslated, targetNeedle)) {
-      missingTerms.push(term.sourceTerm ?? term.normalized);
-    }
-  }
-
-  const passed = missingTerms.length === 0;
-  return {
-    passed,
-    needsReview: !passed,
-    missingTerms,
+    terminologySynced,
   };
 }
 
@@ -999,6 +1074,15 @@ export interface GlossaryHttpRequest {
   path: string;
   termParam?: string;
   body?: Record<string, any>;
+}
+
+function decodeTermPathParam(raw?: string): string {
+  if (!raw) return '';
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 /**
@@ -1018,12 +1102,29 @@ export async function handleGlossaryRoute(
     return listGlossary(ctx, deps);
   }
 
-  // Mọi thao tác ghi (PUT, DELETE, POST import) chỉ dành cho TENANT_ADMIN
+  // Mọi thao tác ghi (PUT, DELETE, POST import) chỉ dành cho TENANT_ADMIN (ném FORBIDDEN nếu sai vai trò)
   requireRole(ctx, ['TENANT_ADMIN']);
 
   if (req.method === 'PUT') {
     const body = req.body ?? {};
-    const sourceTerm = String(body.sourceTerm ?? req.termParam ?? '');
+    const paramFromPath = req.path.startsWith('/console/glossary/terms/')
+      ? req.path.slice('/console/glossary/terms/'.length)
+      : '';
+    const decodedPathTerm = decodeTermPathParam(req.termParam ?? paramFromPath);
+    const bodySourceTerm = typeof body.sourceTerm === 'string' ? body.sourceTerm : '';
+
+    if (
+      decodedPathTerm &&
+      bodySourceTerm &&
+      normalizeTerm(decodedPathTerm) !== normalizeTerm(bodySourceTerm)
+    ) {
+      throw new AppError(
+        'INVALID_REQUEST',
+        `Từ nguồn trên đường dẫn ('${decodedPathTerm}') và trong body ('${bodySourceTerm}') không khớp`,
+      );
+    }
+
+    const sourceTerm = bodySourceTerm || decodedPathTerm;
     return putTerm(
       ctx,
       {
@@ -1038,7 +1139,12 @@ export async function handleGlossaryRoute(
   }
 
   if (req.method === 'DELETE') {
-    const termToDelete = String(req.termParam ?? req.body?.sourceTerm ?? req.body?.term ?? '');
+    const paramFromPath = req.path.startsWith('/console/glossary/terms/')
+      ? req.path.slice('/console/glossary/terms/'.length)
+      : '';
+    const termToDelete =
+      decodeTermPathParam(req.termParam ?? paramFromPath) ||
+      String(req.body?.sourceTerm ?? req.body?.term ?? '');
     return deleteTerm(ctx, termToDelete, deps);
   }
 
