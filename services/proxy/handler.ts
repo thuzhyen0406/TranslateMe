@@ -1,5 +1,5 @@
 /**
- * Lambda proxy F2 – bản tuần 1 (Nhiệm vụ 1.6, TV2): chạy thông bước 1, 2, 6, 8 và gọi TranslateText (chưa có TM).
+ * Lambda proxy F2 (Nhiệm vụ 1.6 + 2.4, TV2): bước 1, 2, 3–4 (TM), 5 (rút gọn), 6, 8.
  * Gọi qua Lambda function URL (AWS_IAM) phía sau CloudFront + OAC. Đường dẫn nhận được luôn có dạng
  * /{slug}/{lang}/{path} (BASE_MODE=path: Visitor gõ sẵn; BASE_MODE=host: CloudFront Function viết lại).
  *
@@ -7,20 +7,27 @@
  *     Website không ACTIVE hoặc tenant LOCKED -> 302 về trang gốc; lang không bật -> 404.
  *     Tải trang gốc bằng safe_fetch (chặn SSRF, không chuyển cookie) và xử lý `outcome.kind`.
  *  2. extract(): tách câu {n}, bỏ qua vùng không dịch của website.
- *  5. (bản rút gọn) translateSentences(): TranslateText theo khối ≤ 10.000 byte, ngân sách 20 s.
+ *  3–4. Băm câu, tra TM (getTM): HUMAN dùng ngay, MACHINE dùng nếu chưa lỗi thời theo thuật ngữ.
+ *  5. (bản rút gọn) translateSentences() cho câu trượt TM, rồi putMachineTM (không đè HUMAN).
+ *     Lỗi TM không làm hỏng trang: tra lỗi -> coi như trượt hết; ghi lỗi -> chỉ ghi log.
  *  6. rebuildDetailed(): ráp HTML, canonical/hreflang theo BASE_MODE + PUBLIC_BASE_URL, viết lại URL.
  *  8. Trả 200 + Cache-Control: public, s-maxage=<cacheSeconds>; trang dịch dở dùng s-maxage=60 và
  *     X-TranslateMe-Partial: 1. Mọi lỗi không lường trước -> 302 về trang gốc (Visitor không thấy trang lỗi).
- * Chưa làm (tuần 2): TM (bước 3–4), đặt trước hạn mức, SEG (bước 7), bộ đếm USAGE, Lambda worker hoàn tất nền.
+ * Chưa làm: đặt trước hạn mức + USAGE (2.7 của TV3), chữ ký B.9 + worker (2.5), SEG (3.4).
+ * Bản tạm (B.14): hash câu chờ thư viện 1.8, getGlossaryState chờ 2.8, db chờ batchGet/update của 2.2.
  *
- * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), PROXY_SITES_JSON, TRANSLATE_BUDGET_MS (20000),
+ * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), PROXY_SITES_JSON, TABLE_NAME (bật TM), TRANSLATE_BUDGET_MS (20000),
  * TRANSLATE_CONCURRENCY (4), USE_FETCH_STUB=1 (dùng safeFetch.stub, không gọi mạng).
  */
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { TranslateClient } from '@aws-sdk/client-translate';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { extract } from '../../libs/common/extract.js';
 import { DEFAULT_PUBLIC_BASE_URL, rebuildDetailed, type BaseMode } from '../../libs/common/rebuild.js';
 import { safe_fetch as realSafeFetch, type SafeFetchCompatResult } from '../../libs/common/safeFetch.js';
 import { safe_fetch as stubSafeFetch } from '../../libs/common/safeFetch.stub.js';
+import { createDynamoTmDb, createTM, type GlossaryState, type SentenceWithHash, type TmHit } from '../../libs/common/tm.js';
+import type { Ctx, Sha256Hex } from '../../libs/common/types.js';
 import {
   DEFAULT_CACHE_SECONDS,
   LANG_RE,
@@ -30,6 +37,7 @@ import {
   staticSiteResolver,
   type SiteResolver,
 } from './sites.js';
+import { getGlossaryStateStub, hashSentenceStub } from './stubs.js';
 import { DEFAULT_CONCURRENCY, translateSentences, type TranslateClientLike } from './translator.js';
 
 export const DEFAULT_BUDGET_MS = 20_000;
@@ -66,6 +74,10 @@ export interface ProxyDeps {
   concurrency?: number;
   now?: () => number;
   logger?: ProxyLogger;
+  /** Translation Memory (2.4). Không truyền = không dùng TM (như bản tuần 1). */
+  tm?: ReturnType<typeof createTM>;
+  getGlossaryState?: (ctx: Ctx) => Promise<GlossaryState>;
+  hashSentence?: (text: string) => Sha256Hex;
 }
 
 export const defaultLogger: ProxyLogger = {
@@ -208,18 +220,61 @@ export function createProxyHandler(deps: ProxyDeps) {
     try {
       // Bước 2: tách câu
       const ex = extract(fetched.body, { customExclusionSelectors: site.exclusionSelectors ?? [] });
+      const ctx: Ctx = { tenantId: site.tenantId, via: 'SLUG', requestId: String(event.requestContext?.requestId ?? ''), slug: site.slug };
+      const glossary = deps.tm ? await (deps.getGlossaryState ?? getGlossaryStateStub)(ctx) : undefined;
 
-      // Bước 5 (rút gọn, chưa có TM): dịch máy trong ngân sách thời gian
-      const tr = await translateSentences(deps.translateClient, ex.sentences, {
-        sourceLang: site.sourceLang,
-        targetLang: parsed.lang,
-        deadline: started + budgetMs,
-        concurrency: deps.concurrency ?? DEFAULT_CONCURRENCY,
-        now,
-      });
+      // Bước 3–4: băm câu và tra TM
+      const hashOf = deps.hashSentence ?? hashSentenceStub;
+      const items: SentenceWithHash[] = ex.sentences.map((text, id) => ({ id, text, hash: hashOf(text) }));
+      let hits = new Map<Sha256Hex, TmHit>();
+      const tmLog: Record<string, unknown> = {};
+      if (deps.tm && glossary) {
+        try {
+          hits = (await deps.tm.getTM(ctx, site.sourceLang, parsed.lang, items, glossary)).hits;
+        } catch (err) {
+          tmLog.tmReadError = err instanceof Error ? err.name : 'Unknown';
+        }
+      }
+      const translations: Array<string | undefined> = items.map((it) => hits.get(it.hash)?.tgt);
+      const missIdx = items.filter((it) => translations[it.id] === undefined).map((it) => it.id);
+
+      // Bước 5 (rút gọn): dịch máy câu trượt TM trong ngân sách thời gian
+      const tr = await translateSentences(
+        deps.translateClient,
+        missIdx.map((i) => ex.sentences[i]),
+        {
+          sourceLang: site.sourceLang,
+          targetLang: parsed.lang,
+          terminologyNames: glossary?.terminologyName ? [glossary.terminologyName] : undefined,
+          deadline: started + budgetMs,
+          concurrency: deps.concurrency ?? DEFAULT_CONCURRENCY,
+          now,
+        },
+      );
+      missIdx.forEach((i, k) => (translations[i] = tr.translations[k]));
+
+      // Ghi bản MACHINE mới vào TM (không đè HUMAN)
+      if (deps.tm && glossary) {
+        const entries = missIdx
+          .map((i, k) => ({ i, k }))
+          .filter(({ k }) => tr.translations[k] !== undefined)
+          .map(({ i, k }) => ({
+            hash: items[i].hash,
+            sourceText: items[i].text,
+            tgt: tr.translations[k] as string,
+            glossaryVersion: glossary.version,
+            needsReview: tr.needsReview[k],
+          }));
+        try {
+          const rep = await deps.tm.putMachineTM(ctx, site.sourceLang, parsed.lang, entries);
+          Object.assign(tmLog, { tmWritten: rep.written, tmSkippedHuman: rep.skippedHuman, tmWriteFailed: rep.failed.length });
+        } catch (err) {
+          tmLog.tmWriteError = err instanceof Error ? err.name : 'Unknown';
+        }
+      }
 
       // Bước 6: ráp HTML
-      const rb = rebuildDetailed(ex.skeletonHtml, tr.translations, ex.placeholders, {
+      const rb = rebuildDetailed(ex.skeletonHtml, translations, ex.placeholders, {
         targetLang: parsed.lang,
         originalUrl: pageUrl,
         slug: site.slug,
@@ -248,6 +303,10 @@ export function createProxyHandler(deps: ProxyDeps) {
         {
           outcome: partial ? 'PARTIAL' : 'OK',
           sentences: ex.sentences.length,
+          tmEnabled: Boolean(deps.tm),
+          tmHitSentences: ex.sentences.length - missIdx.length,
+          tmMissSentences: missIdx.length,
+          ...tmLog,
           uniqueSentences: tr.uniqueSentences,
           charsSent: tr.charsSent,
           translateCalls: tr.calls,
@@ -280,6 +339,11 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env, logger: ProxyL
   const baseMode: BaseMode = env.BASE_MODE === 'host' ? 'host' : 'path';
   if (!env.PUBLIC_BASE_URL) logger.error({ action: 'MISSING_PUBLIC_BASE_URL', fallback: DEFAULT_PUBLIC_BASE_URL });
   const positive = (v: string | undefined, d: number) => (Number(v) > 0 ? Number(v) : d);
+  const tableName = env.TABLE_NAME?.trim();
+  const tm = tableName
+    ? createTM({ db: createDynamoTmDb(DynamoDBDocumentClient.from(new DynamoDBClient({})), tableName), writer: 'proxy' })
+    : undefined;
+  if (!tm) logger.error({ action: 'TM_DISABLED', reason: 'MISSING_TABLE_NAME' });
   return {
     resolveSite: cachedSiteResolver(staticSiteResolver(sites)),
     fetchPage: env.USE_FETCH_STUB === '1' ? stubSafeFetch : (url) => realSafeFetch(url),
@@ -289,6 +353,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env, logger: ProxyL
     budgetMs: positive(env.TRANSLATE_BUDGET_MS, DEFAULT_BUDGET_MS),
     concurrency: positive(env.TRANSLATE_CONCURRENCY, DEFAULT_CONCURRENCY),
     logger,
+    tm,
   };
 }
 
