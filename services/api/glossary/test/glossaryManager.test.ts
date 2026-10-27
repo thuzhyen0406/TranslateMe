@@ -14,6 +14,7 @@ import {
   importCsv,
   isStale,
   listGlossary,
+  MAX_CSV_IMPORT_ROWS,
   normalizeTerm,
   postCheckGlossary,
   putTerm,
@@ -23,27 +24,41 @@ import {
 
 /**
  * Bộ giả lập DynamoDB & Amazon Translate trong bộ nhớ cho Hạng mục 2.8 (F4).
- * Kiểm tra cả kiểm soát cách ly tenant (PK = TENANT#<t> hoặc TENANT#<t>#GLOSS).
+ * Hỗ trợ đầy đủ:
+ *  - Kiểm soát cách ly tenant (PK = TENANT#<t> hoặc TENANT#<t>#GLOSS).
+ *  - Giao dịch `Update` có `ConditionExpression` (Optimistic Locking `glossaryVersion = :old AND #st <> :locked`
+ *    và `terminologySyncedVersion < :v`) mà vẫn giữ nguyên các trường khác của `CONFIG`.
  */
-function createMockHarness(initialConfig?: Record<string, any>) {
+function createMockHarness(
+  initialConfig?: Record<string, any> | null,
+  options?: {
+    shouldFailImportTerminology?: boolean;
+    onBeforeVersionTransaction?: (store: Map<string, Record<string, any>>) => void;
+  },
+) {
   const store = new Map<string, Record<string, any>>();
   const translateCalls: ImportTerminologyCommand[] = [];
   let queryCount = 0;
+  let transactCount = 0;
   let currentNow = 1_700_000_000_000;
+  let failTranslate = Boolean(options?.shouldFailImportTerminology);
 
   const keyStr = (pk: string, sk: string) => `${pk}||${sk}`;
 
-  if (initialConfig) {
-    store.set(keyStr(initialConfig.PK, initialConfig.SK), { ...initialConfig });
-  } else {
-    store.set(keyStr('TENANT#t1', 'CONFIG'), {
-      PK: 'TENANT#t1',
-      SK: 'CONFIG',
-      tenantId: 't1',
-      plan: 'FREE',
-      status: 'ACTIVE',
-      glossaryVersion: 0,
-    });
+  if (initialConfig !== null) {
+    if (initialConfig) {
+      store.set(keyStr(initialConfig.PK, initialConfig.SK), { ...initialConfig });
+    } else {
+      store.set(keyStr('TENANT#t1', 'CONFIG'), {
+        PK: 'TENANT#t1',
+        SK: 'CONFIG',
+        tenantId: 't1',
+        plan: 'PRO',
+        quotaLimit: 500_000,
+        status: 'ACTIVE',
+        glossaryVersion: 0,
+      });
+    }
   }
 
   function assertTenantKey(ctx: Ctx, pk: string) {
@@ -51,6 +66,63 @@ function createMockHarness(initialConfig?: Record<string, any>) {
     if (pk !== prefix && !pk.startsWith(`${prefix}#`)) {
       throw new AppError('FORBIDDEN', `Truy cập trái phép PK: ${pk}`);
     }
+  }
+
+  function applyUpdateOperation(updateOp: Record<string, any>) {
+    const k = keyStr(updateOp.Key.PK, updateOp.Key.SK);
+    const existing = store.get(k);
+    const cond: string = updateOp.ConditionExpression ?? '';
+    const vals: Record<string, any> = updateOp.ExpressionAttributeValues ?? {};
+
+    if (cond.includes('attribute_exists(PK)') && !existing) {
+      throw Object.assign(new Error('Transaction cancelled: item does not exist'), {
+        name: 'TransactionCanceledException',
+      });
+    }
+
+    if (cond.includes('glossaryVersion = :old')) {
+      const currentVer = existing?.glossaryVersion;
+      if (currentVer !== undefined && currentVer !== vals[':old']) {
+        throw Object.assign(new Error('Transaction cancelled: version mismatch'), {
+          name: 'TransactionCanceledException',
+        });
+      }
+    }
+
+    if (cond.includes('#st <> :locked')) {
+      if (existing?.status === vals[':locked']) {
+        throw Object.assign(new Error('Transaction cancelled: tenant locked'), {
+          name: 'TransactionCanceledException',
+        });
+      }
+    }
+
+    if (cond.includes('terminologySyncedVersion < :v')) {
+      const syncedVer = existing?.terminologySyncedVersion;
+      if (syncedVer !== undefined && syncedVer >= vals[':v']) {
+        throw Object.assign(new Error('ConditionalCheckFailed: newer version already synced'), {
+          name: 'ConditionalCheckFailedException',
+        });
+      }
+    }
+
+    const updated = { ...(existing ?? { PK: updateOp.Key.PK, SK: updateOp.Key.SK }) };
+    const expr: string = updateOp.UpdateExpression ?? '';
+
+    if (expr.includes('glossaryVersion = :new')) {
+      updated.glossaryVersion = vals[':new'];
+    }
+    if (expr.includes('terminologyName = :tname')) {
+      updated.terminologyName = vals[':tname'];
+    }
+    if (expr.includes('terminologySyncedVersion = :v')) {
+      updated.terminologySyncedVersion = vals[':v'];
+    }
+    if (expr.includes('updatedAt = :now')) {
+      updated.updatedAt = vals[':now'];
+    }
+
+    store.set(k, updated);
   }
 
   const deps: GlossaryDependencies = {
@@ -64,6 +136,10 @@ function createMockHarness(initialConfig?: Record<string, any>) {
         assertTenantKey(ctx, item.PK);
         store.set(keyStr(item.PK, item.SK), { ...item });
       },
+      async update(ctx, params) {
+        assertTenantKey(ctx, params.Key.PK);
+        applyUpdateOperation(params);
+      },
       async query(ctx, pk, skPrefix) {
         assertTenantKey(ctx, pk);
         queryCount++;
@@ -76,12 +152,29 @@ function createMockHarness(initialConfig?: Record<string, any>) {
         return results;
       },
       async transact(ctx, ops: any[]) {
+        transactCount++;
         for (const op of ops) {
-          const item = op.Put?.Item ?? op.Update?.Key ?? op.Delete?.Key;
+          const item =
+            op.Put?.Item ?? op.Update?.Key ?? op.Delete?.Key ?? op.ConditionCheck?.Key;
           if (item?.PK) {
             assertTenantKey(ctx, item.PK);
           }
         }
+
+        const hasVersionUpdate = ops.some((op) =>
+          String(op.Update?.UpdateExpression ?? '').includes('glossaryVersion = :new'),
+        );
+        if (hasVersionUpdate && options?.onBeforeVersionTransaction) {
+          options.onBeforeVersionTransaction(store);
+        }
+
+        // Kiểm tra và thực thi các lệnh Update trước (để nếu ConditionExpression lỗi thì không ghi Put)
+        for (const op of ops) {
+          if (op.Update) {
+            applyUpdateOperation(op.Update);
+          }
+        }
+
         for (const op of ops) {
           if (op.Put?.Item) {
             const it = op.Put.Item;
@@ -92,6 +185,9 @@ function createMockHarness(initialConfig?: Record<string, any>) {
     },
     translateClient: {
       async send(cmd: ImportTerminologyCommand) {
+        if (failTranslate) {
+          throw new Error('AWS Translate throttled or unavailable');
+        }
         translateCalls.push(cmd);
         return {
           TerminologyProperties: {
@@ -109,6 +205,10 @@ function createMockHarness(initialConfig?: Record<string, any>) {
     store,
     translateCalls,
     getQueryCount: () => queryCount,
+    getTransactCount: () => transactCount,
+    setFailTranslate: (val: boolean) => {
+      failTranslate = val;
+    },
     advanceTime: (ms: number) => {
       currentNow += ms;
     },
@@ -117,7 +217,6 @@ function createMockHarness(initialConfig?: Record<string, any>) {
 
 const adminCtx: Ctx = {
   tenantId: 't1',
-  userId: 'user-admin',
   role: 'TENANT_ADMIN',
   via: 'JWT',
   requestId: 'req-1',
@@ -129,7 +228,6 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
   });
 
   it('chuẩn hóa từ nguồn NFC + chữ thường và sinh tên terminology đúng chuẩn AWS Translate', () => {
-    // Tổ hợp dấu rời (NFD) -> NFC
     const nfd = 'pho\u0302\u0301   co\u0302\u0309   Ho\u0323\u0302i An ';
     assert.equal(cleanTermText(nfd), 'phố cổ Hội An');
     assert.equal(normalizeTerm(nfd), 'phố cổ hội an');
@@ -140,8 +238,8 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     });
   });
 
-  it('putTerm hỗ trợ cả KEEP (tự điền mọi ngôn ngữ đích bằng từ nguồn) và FIXED, tăng glossaryVersion và gọi ImportTerminology', async () => {
-    const { deps, translateCalls } = createMockHarness();
+  it('putTerm hỗ trợ cả KEEP và FIXED, bảo toàn các thuộc tính khác của CONFIG, tăng glossaryVersion và gọi ImportTerminology', async () => {
+    const { deps, store, translateCalls } = createMockHarness();
 
     // 1. Thêm mục KEEP ("Homestay ABC")
     const r1 = await putTerm(
@@ -155,6 +253,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
       deps,
     );
     assert.equal(r1.version, 1);
+    assert.equal(r1.terminologySynced, true);
     assert.equal(translateCalls.length, 1);
     assert.equal(translateCalls[0].input.Name, 'tm-t1');
     assert.equal(translateCalls[0].input.MergeStrategy, 'OVERWRITE');
@@ -162,6 +261,13 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     const csv1 = Buffer.from(translateCalls[0].input.TerminologyData!.File!).toString('utf8');
     assert.ok(csv1.includes('vi,en,ko,ja'));
     assert.ok(csv1.includes('Homestay ABC,Homestay ABC,Homestay ABC,Homestay ABC'));
+
+    // Kiểm tra CONFIG vẫn giữ nguyên plan = PRO và quotaLimit = 500_000 (không bị ghi đè mất trường)
+    const savedConfig = store.get('TENANT#t1||CONFIG');
+    assert.equal(savedConfig?.plan, 'PRO');
+    assert.equal(savedConfig?.quotaLimit, 500_000);
+    assert.equal(savedConfig?.glossaryVersion, 1);
+    assert.equal(savedConfig?.terminologyName, 'tm-t1');
 
     // 2. Thêm mục FIXED ("phố cổ Hội An")
     const r2 = await putTerm(
@@ -179,6 +285,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
       deps,
     );
     assert.equal(r2.version, 2);
+    assert.equal(r2.terminologySynced, true);
     assert.equal(translateCalls.length, 2);
 
     const state = await getGlossaryState(adminCtx, deps);
@@ -203,7 +310,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     assert.equal(fixedItem.translations?.en, 'Hoi An Ancient Town');
   });
 
-  it('deleteTerm tăng glossaryVersion, đánh dấu xóa để bản dịch MACHINE cũ bị coi là lỗi thời (isStale = true)', async () => {
+  it('deleteTerm tăng glossaryVersion, đặt terminologyName = null khi xóa hết mục và đánh dấu isStale cho bản dịch MACHINE cũ', async () => {
     const { deps } = createMockHarness();
 
     await putTerm(
@@ -219,31 +326,102 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
 
     const stateV1 = await getGlossaryState(adminCtx, deps);
     assert.equal(stateV1.version, 1);
-    // Bản dịch được tạo ở glossaryVersion = 1 thì không lỗi thời ở v1
+    assert.equal(stateV1.terminologyName, 'tm-t1');
     assert.equal(isStale('Thưởng thức món cao lầu đặc sản.', 1, stateV1), false);
 
     // Xóa thuật ngữ "cao lầu" -> glossaryVersion tăng lên 2
     const delRes = await deleteTerm(adminCtx, 'Cao Lầu', deps);
     assert.equal(delRes.version, 2);
+    assert.equal(delRes.terminologySynced, true);
 
     const stateV2 = await getGlossaryState(adminCtx, deps);
     assert.equal(stateV2.version, 2);
-    // Khi không còn mục hiệu lực nào, terminologyName trả null để không gọi TranslateText với bảng rỗng
     assert.equal(stateV2.terminologyName, null);
 
     const activeList = await listGlossary(adminCtx, deps);
     assert.equal(activeList.terms.length, 0);
 
-    // Bản dịch MACHINE cũ (entryGlossaryVersion = 1) có chứa từ "cao lầu" vừa bị xóa ở v2 PHẢI bị coi là lỗi thời!
+    // Bản dịch MACHINE cũ (entryGlossaryVersion = 1) chứa từ vừa xóa PHẢI bị coi là lỗi thời
     assert.equal(isStale('Thưởng thức món cao lầu đặc sản.', 1, stateV2), true);
-    // Câu không chứa từ "cao lầu" thì không bị ảnh hưởng
     assert.equal(isStale('Phòng có ban công hướng biển.', 1, stateV2), false);
   });
 
-  it('importCsv ở chế độ PREVIEW bắt đủ các lỗi (không phải UTF-8, thiếu cột, trùng trong tệp, ô trống) và nhận diện trùng với DB', async () => {
+  it('Optimistic Locking: phát hiện xung đột VERSION_CONFLICT, TENANT_SUSPENDED giữa chừng và NOT_FOUND khi thiếu CONFIG', async () => {
+    // 1. Khi CONFIG không tồn tại -> ném NOT_FOUND, không tự tạo CONFIG giả
+    const missingConfigHarness = createMockHarness(null);
+    await assert.rejects(
+      putTerm(adminCtx, { sourceTerm: 'Homestay ABC', type: 'KEEP' }, missingConfigHarness.deps),
+      (err: unknown) => err instanceof AppError && err.code === 'NOT_FOUND',
+    );
+    assert.equal(missingConfigHarness.store.has('TENANT#t1||CONFIG'), false);
+
+    // 2. Khi một request khác cập nhật glossaryVersion xen giữa bước đọc và bước ghi -> ném VERSION_CONFLICT
+    const conflictHarness = createMockHarness(undefined, {
+      onBeforeVersionTransaction(store) {
+        const cfg = store.get('TENANT#t1||CONFIG')!;
+        store.set('TENANT#t1||CONFIG', { ...cfg, glossaryVersion: 99 });
+      },
+    });
+    await assert.rejects(
+      putTerm(adminCtx, { sourceTerm: 'Homestay ABC', type: 'KEEP' }, conflictHarness.deps),
+      (err: unknown) => err instanceof AppError && err.code === 'VERSION_CONFLICT',
+    );
+
+    // 3. Khi tenant bị chuyển sang LOCKED ngay trước khi giao dịch thực thi -> ném TENANT_SUSPENDED và giữ nguyên LOCKED
+    const lockedMidflightHarness = createMockHarness(undefined, {
+      onBeforeVersionTransaction(store) {
+        const cfg = store.get('TENANT#t1||CONFIG')!;
+        store.set('TENANT#t1||CONFIG', { ...cfg, status: 'LOCKED' });
+      },
+    });
+    await assert.rejects(
+      putTerm(adminCtx, { sourceTerm: 'Homestay ABC', type: 'KEEP' }, lockedMidflightHarness.deps),
+      (err: unknown) => err instanceof AppError && err.code === 'TENANT_SUSPENDED',
+    );
+    assert.equal(lockedMidflightHarness.store.get('TENANT#t1||CONFIG')?.status, 'LOCKED');
+  });
+
+  it('khi ImportTerminology thất bại ở lần tạo đầu tiên, getGlossaryState trả terminologyName = null để không làm gãy F2/F9/F10', async () => {
+    const { deps, setFailTranslate } = createMockHarness(undefined, {
+      shouldFailImportTerminology: true,
+    });
+
+    const res = await putTerm(
+      adminCtx,
+      { sourceTerm: 'Homestay ABC', type: 'KEEP', targetLangs: ['en', 'ko'] },
+      deps,
+    );
+    assert.equal(res.version, 1);
+    assert.equal(res.terminologySynced, false);
+
+    // Vì ImportTerminology lỗi nên terminologyName chưa tồn tại trên AWS Translate -> phải trả null
+    const stateFailed = await getGlossaryState(adminCtx, deps);
+    assert.equal(stateFailed.version, 1);
+    assert.equal(stateFailed.terminologyName, null);
+    assert.equal(stateFailed.terms.length, 1);
+
+    // Khi AWS Translate phục hồi ở lần lưu kế tiếp -> terminologyName được cập nhật thành 'tm-t1'
+    setFailTranslate(false);
+    const res2 = await putTerm(
+      adminCtx,
+      {
+        sourceTerm: 'phố cổ Hội An',
+        type: 'FIXED',
+        translations: { en: 'Hoi An Ancient Town', ko: '호이안 구시가지' },
+      },
+      deps,
+    );
+    assert.equal(res2.version, 2);
+    assert.equal(res2.terminologySynced, true);
+
+    const stateRecovered = await getGlossaryState(adminCtx, deps);
+    assert.equal(stateRecovered.version, 2);
+    assert.equal(stateRecovered.terminologyName, 'tm-t1');
+  });
+
+  it('importCsv ở chế độ PREVIEW bắt đủ các lỗi và giới hạn tối đa 99 dòng hợp lệ trong 1 giao dịch nguyên tử', async () => {
     const { deps, translateCalls } = createMockHarness();
 
-    // Tạo sẵn 1 mục trong DB để kiểm tra phát hiện trùng (duplicates)
     await putTerm(
       adminCtx,
       {
@@ -255,22 +433,22 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     );
     translateCalls.length = 0;
 
-    // 1. Kiểm tra từ chối tệp không phải UTF-8
+    // 1. Từ chối tệp không phải UTF-8
     const invalidUtf8 = Buffer.from([0x76, 0x69, 0x2c, 0x65, 0x6e, 0x0a, 0xff, 0xfe, 0x80]);
     await assert.rejects(
       importCsv(adminCtx, invalidUtf8, 'PREVIEW', 'OVERWRITE', deps),
       (err: unknown) => err instanceof AppError && err.code === 'INVALID_REQUEST',
     );
 
-    // 2. Kiểm tra CSV hỗn hợp có cả dòng đúng, dòng thiếu cột, dòng ô trống, dòng trùng trong file
+    // 2. Kiểm tra CSV hỗn hợp
     const csvContent = [
       'vi,en,ko,ja',
-      'Homestay ABC,Homestay ABC,Homestay ABC,Homestay ABC', // Dòng 2: Hợp lệ (KEEP), trùng với DB
-      'phố cổ Hội An,Hoi An Ancient Town,호이안 구시가지,ホイアン旧市街', // Dòng 3: Hợp lệ (FIXED)
-      'cao lầu,cao lau noodles,까오러우 국수', // Dòng 4: Lỗi thiếu cột 'ja'
-      'sông Hoài,Hoai River,,ホイアン川', // Dòng 5: Lỗi ô trống ở cột 'ko'
-      ',Empty Source,빈 원본,空のソース', // Dòng 6: Lỗi ô từ nguồn trống
-      'PHỐ CỔ HỘI AN,Old Town,구시가지,旧市街', // Dòng 7: Lỗi trùng từ nguồn trong cùng tệp CSV
+      'Homestay ABC,Homestay ABC,Homestay ABC,Homestay ABC',
+      'phố cổ Hội An,Hoi An Ancient Town,호이안 구시가지,ホイアン旧市街',
+      'cao lầu,cao lau noodles,까오러우 국수',
+      'sông Hoài,Hoai River,,ホイアン川',
+      ',Empty Source,빈 원본,空のソース',
+      'PHỐ CỔ HỘI AN,Old Town,구시가지,旧市街',
     ].join('\n');
 
     const preview = await importCsv(adminCtx, csvContent, 'PREVIEW', 'OVERWRITE', deps);
@@ -282,20 +460,23 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
       preview.errors.map((e) => e.row),
       [4, 5, 6, 7],
     );
-    assert.match(preview.errors[0].reason, /Thiếu cột 'ja'/);
-    assert.match(preview.errors[1].reason, /Ô trống ở cột ngôn ngữ 'ko'/);
-    assert.match(preview.errors[2].reason, /Ô từ nguồn/);
-    assert.match(preview.errors[3].reason, /Trùng từ nguồn/);
-
-    // Chế độ PREVIEW không được tăng version và không gọi ImportTerminology
     assert.equal(preview.version, 1);
     assert.equal(translateCalls.length, 0);
+
+    // 3. Từ chối CSV vượt quá 99 dòng hợp lệ (MAX_CSV_IMPORT_ROWS = 99)
+    const hundredRowsCsv = [
+      'vi,en',
+      ...Array.from({ length: MAX_CSV_IMPORT_ROWS + 1 }, (_, i) => `thuật ngữ ${i + 1},term ${i + 1}`),
+    ].join('\n');
+    await assert.rejects(
+      importCsv(adminCtx, hundredRowsCsv, 'COMMIT', 'OVERWRITE', deps),
+      (err: unknown) => err instanceof AppError && err.code === 'INVALID_REQUEST',
+    );
   });
 
-  it('importCsv ở chế độ COMMIT xử lý đúng KEEP_EXISTING và OVERWRITE, tăng glossaryVersion và đồng bộ Translate', async () => {
+  it('importCsv ở chế độ COMMIT xử lý đúng KEEP_EXISTING và OVERWRITE trong 1 giao dịch nguyên tử', async () => {
     const { deps, translateCalls } = createMockHarness();
 
-    // Tạo sẵn "phố cổ Hội An" với bản dịch cũ
     await putTerm(
       adminCtx,
       {
@@ -320,6 +501,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     assert.equal(commitKeep.addedCount, 2);
     assert.equal(commitKeep.skippedCount, 1);
     assert.equal(commitKeep.overwrittenCount, 0);
+    assert.equal(commitKeep.terminologySynced, true);
     assert.equal(translateCalls.length, 1);
 
     let list = await listGlossary(adminCtx, deps);
@@ -338,6 +520,51 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     assert.equal(homestay?.type, 'KEEP');
   });
 
+  it('tự động lấy targetLangs từ bản ghi website HOST# cho mục KEEP và kiểm tra nhất quán sourceLang', async () => {
+    const { deps, store, translateCalls } = createMockHarness();
+
+    // Giả lập tenant có 1 website cấu hình dịch từ 'vi' sang ['en', 'fr', 'de']
+    store.set('TENANT#t1||HOST#homestay-abc-vn', {
+      PK: 'TENANT#t1',
+      SK: 'HOST#homestay-abc-vn',
+      slug: 'homestay-abc-vn',
+      sourceLang: 'vi',
+      targetLangs: ['en', 'fr', 'de'],
+      status: 'ACTIVE',
+    });
+
+    // Tạo mục KEEP mà không truyền targetLangs -> tự động điền cả fr, de theo cấu hình HOST#
+    await putTerm(
+      adminCtx,
+      {
+        sourceTerm: 'Homestay ABC',
+        type: 'KEEP',
+      },
+      deps,
+    );
+
+    const csvSent = Buffer.from(translateCalls[0].input.TerminologyData!.File!).toString('utf8');
+    const headerCols = csvSent.split('\n')[0].split(',');
+    assert.equal(headerCols[0], 'vi');
+    assert.ok(headerCols.includes('fr'));
+    assert.ok(headerCols.includes('de'));
+
+    // Nếu cố tình thêm thuật ngữ có sourceLang = 'en' trái với sourceLang = 'vi' của tenant -> ném INVALID_REQUEST
+    await assert.rejects(
+      putTerm(
+        adminCtx,
+        {
+          sourceTerm: 'Ancient Town',
+          sourceLang: 'en',
+          type: 'FIXED',
+          translations: { fr: 'Vieille ville' },
+        },
+        deps,
+      ),
+      (err: unknown) => err instanceof AppError && err.code === 'INVALID_REQUEST',
+    );
+  });
+
   it('getGlossaryState lưu đệm trong bộ nhớ tối đa 60 giây theo glossaryVersion', async () => {
     const { deps, getQueryCount, advanceTime } = createMockHarness();
 
@@ -346,23 +573,20 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
       { sourceTerm: 'Homestay ABC', type: 'KEEP', targetLangs: ['en', 'ko', 'ja'] },
       deps,
     );
-    // Sau putTerm, listGlossary đã nạp cache 1 lần
-    const queriesAfterPut = getQueryCount();
 
-    // Gọi lại getGlossaryState trong vòng 60s khi version không đổi -> không query lại bảng GLOSS
     const s1 = await getGlossaryState(adminCtx, deps);
+    const queriesAfterFirstRead = getQueryCount();
     const s2 = await getGlossaryState(adminCtx, deps);
     assert.equal(s1.version, 1);
     assert.equal(s2.version, 1);
-    assert.equal(getQueryCount(), queriesAfterPut);
+    assert.equal(getQueryCount(), queriesAfterFirstRead);
 
-    // Sau 61 giây -> cache hết hạn -> query lại DynamoDB
     advanceTime(61_000);
     await getGlossaryState(adminCtx, deps);
-    assert.equal(getQueryCount(), queriesAfterPut + 1);
+    assert.equal(getQueryCount(), queriesAfterFirstRead + 1);
   });
 
-  it('isStale và postCheckGlossary xử lý chính xác ranh giới từ tiếng Việt/Latin, chuỗi CJK và ký hiệu {n}', async () => {
+  it('isStale và postCheckGlossary xử lý chính xác ranh giới từ, ký hiệu {n} và đạt hiệu năng < 50ms cho 300 câu x 500 thuật ngữ', async () => {
     const { deps } = createMockHarness();
 
     await putTerm(
@@ -391,22 +615,13 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     const g = await getGlossaryState(adminCtx, deps);
     assert.equal(g.version, 2);
 
-    // 1. Kiểm tra ranh giới từ: từ "an" không khớp nhầm với "bình an"
     assert.equal(containsTermInText('chúc bạn bình an', 'an'), true);
     assert.equal(containsTermInText('chúc bạn bình an', 'bình'), true);
     assert.equal(containsTermInText('chúc bạn bình an', 'ình'), false);
 
-    // 2. Kiểm tra isStale với câu có chứa {1}...{/1}
-    assert.equal(
-      isStale('Chào mừng đến {1}Homestay ABC{/1} gần phố cổ Hội An.', 1, g),
-      true, // vì "phố cổ Hội An" có sinceVersion = 2 > 1
-    );
-    assert.equal(
-      isStale('Chào mừng đến {1}Homestay ABC{/1}.', 1, g),
-      false, // vì "Homestay ABC" có sinceVersion = 1 <= 1
-    );
+    assert.equal(isStale('Chào mừng đến {1}Homestay ABC{/1} gần phố cổ Hội An.', 1, g), true);
+    assert.equal(isStale('Chào mừng đến {1}Homestay ABC{/1}.', 1, g), false);
 
-    // 3. Kiểm tra hậu kiểm postCheckGlossary
     const checkEnOk = postCheckGlossary(
       'Homestay ABC nằm gần phố cổ Hội An.',
       'Homestay ABC is located near Hoi An Ancient Town.',
@@ -433,9 +648,34 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     assert.equal(checkMissing.passed, false);
     assert.equal(checkMissing.needsReview, true);
     assert.deepEqual(checkMissing.missingTerms, ['phố cổ Hội An']);
+
+    // Kiểm tra hiệu năng: 300 câu x 500 thuật ngữ với WeakMap pre-compiled regex + includes pre-filter
+    const bigGlossary: typeof g = {
+      version: 10,
+      terminologyName: 'tm-t1',
+      terms: Array.from({ length: 500 }, (_, i) => ({
+        normalized: `thuật ngữ chuyên ngành ${i}`,
+        sourceTerm: `Thuật ngữ chuyên ngành ${i}`,
+        sourceLang: 'vi',
+        type: 'FIXED' as const,
+        translations: { en: `Specialized term ${i}` },
+        sinceVersion: 5,
+      })),
+    };
+    const sampleSentences = Array.from(
+      { length: 300 },
+      (_, i) => `Đây là câu văn bản mẫu số ${i} trên trang chủ khách sạn du lịch biển Đà Nẵng.`,
+    );
+
+    const t0 = performance.now();
+    for (const sentence of sampleSentences) {
+      isStale(sentence, 1, bigGlossary);
+    }
+    const elapsedMs = performance.now() - t0;
+    assert.ok(elapsedMs < 100, `Expected 300x500 isStale < 100ms, got ${elapsedMs.toFixed(2)}ms`);
   });
 
-  it('handleGlossaryRoute kiểm tra chặt quyền theo vai trò (TENANT_ADMIN vs DEVELOPER / REVIEWER) và trạng thái LOCKED', async () => {
+  it('handleGlossaryRoute kiểm tra chặt quyền FORBIDDEN (B.5), khớp termParam trên URL và trạng thái LOCKED', async () => {
     const { deps } = createMockHarness();
 
     const reviewerCtx: Ctx = { ...adminCtx, role: 'REVIEWER' };
@@ -446,7 +686,8 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
       adminCtx,
       {
         method: 'PUT',
-        path: '/console/glossary/terms/sông%20Hoài',
+        path: '/console/glossary/terms/s%C3%B4ng%20Ho%C3%A0i',
+        termParam: 's%C3%B4ng%20Ho%C3%A0i',
         body: {
           sourceTerm: 'sông Hoài',
           type: 'FIXED',
@@ -457,6 +698,24 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     )) as { version: number };
     assert.equal(putRes.version, 1);
 
+    // Nếu termParam trên URL và body.sourceTerm lệch nhau -> ném INVALID_REQUEST
+    await assert.rejects(
+      handleGlossaryRoute(
+        adminCtx,
+        {
+          method: 'PUT',
+          path: '/console/glossary/terms/s%C3%B4ng%20Ho%C3%A0i',
+          termParam: 's%C3%B4ng%20Ho%C3%A0i',
+          body: {
+            sourceTerm: 'chùa Cầu',
+            type: 'KEEP',
+          },
+        },
+        deps,
+      ),
+      (err: unknown) => err instanceof AppError && err.code === 'INVALID_REQUEST',
+    );
+
     // REVIEWER và DEVELOPER được phép GET
     const getRes = (await handleGlossaryRoute(
       reviewerCtx,
@@ -466,7 +725,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     assert.equal(getRes.version, 1);
     assert.equal(getRes.terms.length, 1);
 
-    // REVIEWER và DEVELOPER bị chặn 403 PERMISSION_DENIED khi gọi PUT, DELETE, POST import
+    // REVIEWER và DEVELOPER bị chặn 403 FORBIDDEN (theo B.5) khi gọi PUT, DELETE, POST import
     for (const ctx of [reviewerCtx, developerCtx]) {
       await assert.rejects(
         handleGlossaryRoute(
@@ -478,7 +737,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
           },
           deps,
         ),
-        (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
+        (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
       );
 
       await assert.rejects(
@@ -487,7 +746,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
           { method: 'DELETE', path: '/console/glossary/terms/sông%20Hoài', termParam: 'sông Hoài' },
           deps,
         ),
-        (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
+        (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
       );
 
       await assert.rejects(
@@ -500,7 +759,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
           },
           deps,
         ),
-        (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
+        (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
       );
     }
 

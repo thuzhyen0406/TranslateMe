@@ -22,7 +22,7 @@
     "../../libs/common/roles.ts",
     "../../libs/common/types.ts",
     "../../libs/common/db.ts",
-    "../../libs/common/experiments/analyzers.ts"
+    "../../libs/common/glossary.ts"
   ],
   "exclude": ["dist", "node_modules"]
 }
