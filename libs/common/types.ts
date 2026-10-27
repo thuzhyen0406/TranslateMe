@@ -20,6 +20,10 @@ export type ErrorCode =
   | 'TOO_MANY_REDIRECTS'
   | 'DUPLICATE_SLUG'
   | 'TENANT_SUSPENDED'
+  | 'INVALID_REQUEST'
+  | 'UNSUPPORTED_LANGUAGE'
+  | 'NOT_FOUND'
+  | 'VERSION_CONFLICT'
   | 'INTERNAL_ERROR';
 
 export class AppError extends Error {
@@ -31,7 +35,9 @@ export class AppError extends Error {
 
 export const keys = {
   config: (ctx: Ctx) => ({ PK: `TENANT#${ctx.tenantId}`, SK: 'CONFIG' }),
+  member: (ctx: Ctx, sub: string) => ({ PK: `TENANT#${ctx.tenantId}`, SK: `MEMBER#${sub}` }),
   host: (ctx: Ctx, slug: string) => ({ PK: `TENANT#${ctx.tenantId}`, SK: `HOST#${slug}` }),
+  gloss: (ctx: Ctx, normalized: string) => ({ PK: `TENANT#${ctx.tenantId}#GLOSS`, SK: `TERM#${normalized}` }),
   // Các khóa nền tảng chỉ sử dụng bởi module quản lý website và resolver
   slug: (slug: string) => ({ PK: `TENANT#PLATFORM#SLUG#${slug}`, SK: 'META' }),
   keymap: (keyId: string) => ({ PK: `TENANT#PLATFORM#KEY#${keyId}`, SK: 'META' }),
