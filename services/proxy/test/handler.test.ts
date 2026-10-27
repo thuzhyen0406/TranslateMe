@@ -118,7 +118,7 @@ describe('proxy – trang dịch dở', () => {
     assert.equal(res.headers['cache-control'], 'public, max-age=0, s-maxage=60');
     assert.ok(res.body.includes('<h1>Chào mừng</h1>'));
     assert.equal(logger.infos[0].outcome, 'PARTIAL');
-    assert.deepEqual(logger.infos[0].translateErrors, ['ThrottlingException']);
+    assert.deepEqual(logger.infos[0].failedReasons, ['ThrottlingException']);
   });
 
   it('hết ngân sách thời gian -> trả trang dịch dở', async () => {
@@ -205,13 +205,24 @@ describe('depsFromEnv', () => {
   it('đọc PROXY_SITES_JSON, BASE_MODE, PUBLIC_BASE_URL, ngân sách thời gian', async () => {
     const logger = fakeLogger();
     const d = depsFromEnv(
-      { PROXY_SITES_JSON: JSON.stringify([SITE]), BASE_MODE: 'host', PUBLIC_BASE_URL: CF, TRANSLATE_BUDGET_MS: '15000', TABLE_NAME: 'translate-data' },
+      {
+        PROXY_SITES_JSON: JSON.stringify([SITE]),
+        BASE_MODE: 'host',
+        PUBLIC_BASE_URL: CF,
+        TRANSLATE_BUDGET_MS: '15000',
+        TABLE_NAME: 'translate-data',
+        WORKER_FUNCTION_NAME: 'translateme-dev-worker',
+        WORKER_PAYLOAD_BUCKET: 'translateme-dev-worker-payload',
+      },
       logger,
     );
     assert.equal(d.baseMode, 'host');
     assert.equal(d.publicBaseUrl, CF);
     assert.equal(d.budgetMs, 15_000);
     assert.ok(d.tm, 'có TABLE_NAME thì bật TM');
+    assert.ok(d.invokeWorker, 'có WORKER_FUNCTION_NAME thì bật hoàn tất nền');
+    assert.ok(d.workerStore);
+    assert.ok(d.quota);
     assert.equal((await d.resolveSite('homestay-abc'))?.tenantId, SITE.tenantId);
     assert.deepEqual(logger.errors, []);
   });
@@ -221,8 +232,10 @@ describe('depsFromEnv', () => {
     const d = depsFromEnv({ PROXY_SITES_JSON: '[{', BASE_MODE: 'abc' }, logger);
     assert.equal(d.baseMode, 'path');
     assert.equal(await d.resolveSite('homestay-abc'), null);
-    assert.deepEqual(logger.errors.map((e) => e.action), ['INVALID_PROXY_SITES_JSON', 'MISSING_PUBLIC_BASE_URL', 'TM_DISABLED']);
+    assert.deepEqual(logger.errors.map((e) => e.action), ['INVALID_PROXY_SITES_JSON', 'TM_DISABLED', 'MISSING_PUBLIC_BASE_URL', 'WORKER_DISABLED']);
     assert.equal(d.tm, undefined);
+    assert.equal(d.invokeWorker, undefined);
+    assert.equal(d.workerStore, undefined);
   });
 
   it('USE_FETCH_STUB=1 -> dùng safe_fetch stub (trang mẫu cố định, không gọi mạng)', async () => {

@@ -1,36 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { assertTenantKey, createTM, tmKey, type GlossaryState, type TmDb, type TmKey } from '../../../libs/common/tm.js';
+import { createTM, tmKey, type GlossaryState } from '../../../libs/common/tm.js';
 import type { Ctx } from '../../../libs/common/types.js';
 import { createProxyHandler, type FunctionUrlEvent } from '../handler.js';
 import { staticSiteResolver } from '../sites.js';
 import { hashSentenceStub } from '../stubs.js';
-import { SAMPLE_PAGE, SITE, fakeFetch, fakeLogger, fakeTranslate, okHtml, upperCaseOutsideTags } from './helpers.js';
+import { SAMPLE_PAGE, SITE, fakeFetch, fakeLogger, fakeTranslate, memoryTmDb, okHtml, upperCaseOutsideTags } from './helpers.js';
 
 const ev = (rawPath: string): FunctionUrlEvent => ({ rawPath, requestContext: { requestId: 'req-tm', http: { method: 'GET' } } });
 const ctx: Ctx = { tenantId: SITE.tenantId, via: 'SLUG', requestId: 'x', slug: SITE.slug };
-
-/** DynamoDB giả cho TM: điều kiện "không đè HUMAN" đánh giá nguyên tử như DynamoDB. */
-function memoryTmDb() {
-  const store = new Map<string, Record<string, unknown>>();
-  const id = (k: TmKey) => `${k.PK}|${k.SK}`;
-  const db: TmDb & { store: typeof store } = {
-    store,
-    async batchGet(c, keys) {
-      keys.forEach((k) => assertTenantKey(c, k));
-      return keys.map((k) => store.get(id(k))).filter((x): x is Record<string, unknown> => !!x);
-    },
-    async update(c, key, expr) {
-      assertTenantKey(c, key);
-      const v = expr.ExpressionAttributeValues ?? {};
-      const cur = store.get(id(key));
-      if (cur && cur.label !== 'MACHINE') throw Object.assign(new Error('x'), { name: 'ConditionalCheckFailedException' });
-      store.set(id(key), { ...key, src: v[':src'], tgt: v[':tgt'], label: 'MACHINE', glossaryVersion: v[':gv'], needsReview: v[':nr'], GSI3PK: v[':g3pk'] });
-      return {};
-    },
-  };
-  return db;
-}
 
 function setup(o: { db?: ReturnType<typeof memoryTmDb>; glossary?: GlossaryState; translate?: ReturnType<typeof fakeTranslate> } = {}) {
   const db = o.db ?? memoryTmDb();
