@@ -62,14 +62,14 @@ function setup(o: Partial<WorkerDeps> & { sites?: SiteConfig[]; db?: ReturnType<
 
 describe('buildWorkerEvents', () => {
   it('không có câu -> không có sự kiện; ít câu -> một sự kiện kèm câu', async () => {
-    assert.deepEqual(await buildWorkerEvents(BASE, []), []);
+    assert.deepEqual(await buildWorkerEvents(BASE, []), { events: [], dropped: [] });
     const s = withHash(['Một', 'Hai']);
-    assert.deepEqual(await buildWorkerEvents(BASE, s), [{ ...BASE, sentences: s }]);
+    assert.deepEqual(await buildWorkerEvents(BASE, s), { events: [{ ...BASE, sentences: s }], dropped: [] });
   });
 
   it('chia theo kích thước JSON, mỗi sự kiện ≤ maxBytes, giữ đủ câu theo thứ tự', async () => {
     const s = withHash(Array.from({ length: 50 }, (_, i) => `Câu số ${i} khá dài để chia sự kiện.`));
-    const events = await buildWorkerEvents(BASE, s, { maxBytes: 2_000, maxInlineEvents: 100 });
+    const { events } = await buildWorkerEvents(BASE, s, { maxBytes: 2_000, maxInlineEvents: 100 });
     assert.ok(events.length > 1);
     for (const e of events) assert.ok(Buffer.byteLength(JSON.stringify(e), 'utf8') <= 2_000);
     assert.deepEqual(events.flatMap((e) => e.sentences ?? []), s);
@@ -78,7 +78,7 @@ describe('buildWorkerEvents', () => {
   it('quá nhiều sự kiện và có kho S3 -> ghi câu ra S3 dưới worker/<tenantId>/', async () => {
     const s = withHash(Array.from({ length: 50 }, (_, i) => `Câu số ${i} khá dài để chia sự kiện.`));
     const store = memoryStore();
-    const events = await buildWorkerEvents(BASE, s, { maxBytes: 2_000, maxInlineEvents: 2, store, uniqueId: () => 'u1' });
+    const { events } = await buildWorkerEvents(BASE, s, { maxBytes: 2_000, maxInlineEvents: 2, store, uniqueId: () => 'u1' });
     assert.equal(events.length, 1);
     assert.equal(events[0].sentences, undefined);
     assert.equal(events[0].sentencesS3Key, `worker/${SITE.tenantId}/u1-0.json`);
@@ -87,9 +87,40 @@ describe('buildWorkerEvents', () => {
 
   it('quá nhiều sự kiện nhưng không có kho S3 -> vẫn gửi kèm câu', async () => {
     const s = withHash(Array.from({ length: 50 }, (_, i) => `Câu số ${i} khá dài để chia sự kiện.`));
-    const events = await buildWorkerEvents(BASE, s, { maxBytes: 2_000, maxInlineEvents: 2 });
+    const { events, dropped } = await buildWorkerEvents(BASE, s, { maxBytes: 2_000, maxInlineEvents: 2 });
     assert.ok(events.length > 2);
     assert.ok(events.every((e) => e.sentences && !e.sentencesS3Key));
+    assert.deepEqual(dropped, []);
+  });
+
+  it('một câu riêng lẻ vượt maxBytes, chỉ một nhóm -> vẫn chuyển qua S3, không có sự kiện nào vượt giới hạn', async () => {
+    const big = withHash(['Một câu rất dài '.repeat(200)]);
+    const store = memoryStore();
+    const { events, dropped } = await buildWorkerEvents(BASE, big, { maxBytes: 2_000, store, uniqueId: () => 'u2' });
+    assert.deepEqual(dropped, []);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].sentences, undefined);
+    assert.equal(events[0].sentencesS3Key, `worker/${SITE.tenantId}/u2-0.json`);
+    assert.deepEqual(JSON.parse(store.files.get(events[0].sentencesS3Key!)!), big);
+    for (const e of events) assert.ok(Buffer.byteLength(JSON.stringify(e), 'utf8') <= 2_000);
+  });
+
+  it('câu quá lớn lẫn với câu thường, có S3 -> giữ đủ câu theo thứ tự trong các tệp S3', async () => {
+    const s = withHash(['Câu đầu.', 'Một câu rất dài '.repeat(200), 'Câu cuối.']);
+    const store = memoryStore();
+    const { events, dropped } = await buildWorkerEvents(BASE, s, { maxBytes: 2_000, store, uniqueId: () => 'u3' });
+    assert.deepEqual(dropped, []);
+    assert.ok(events.every((e) => e.sentencesS3Key && !e.sentences));
+    const all = events.flatMap((e) => JSON.parse(store.files.get(e.sentencesS3Key!)!) as unknown[]);
+    assert.deepEqual(all, s);
+  });
+
+  it('câu quá lớn và không có kho S3 -> bỏ câu đó (báo trong dropped), vẫn gửi các câu còn lại', async () => {
+    const s = withHash(['Câu đầu.', 'Một câu rất dài '.repeat(200), 'Câu cuối.']);
+    const { events, dropped } = await buildWorkerEvents(BASE, s, { maxBytes: 2_000 });
+    assert.deepEqual(dropped, [s[1]]);
+    assert.deepEqual(events.flatMap((e) => e.sentences ?? []), [s[0], s[2]]);
+    for (const e of events) assert.ok(Buffer.byteLength(JSON.stringify(e), 'utf8') <= 2_000);
   });
 });
 

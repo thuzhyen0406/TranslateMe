@@ -83,6 +83,8 @@ Báo cáo (F2 bước 5) ghi "bọc câu bằng `<span data-i>`". Không dùng c
 - Hạn mức: tạm dùng `quotaStub` (`usage.ts`, B.14: luôn đủ, settle chỉ ghi log) cho tới khi có `reserveChars`/`releaseChars`/`settleUsage` của 2.7. Không có câu trượt thì không gọi `reserveChars`.
 - Câu trong `pending` và `failed` (trừ `SENTENCE_TOO_LARGE`) được gửi worker qua `lambda:InvokeFunction` (InvocationType `Event`). Chỉ gửi khi bật TM, vì worker chỉ ghi kết quả vào TM. Lỗi gọi worker chỉ ghi log.
 
+Sự kiện `FINISH_PAGE` gửi worker (`workerEvents.ts`): mỗi sự kiện ≤ 200 KB. Danh sách câu dài thì chia nhiều sự kiện; quá 4 sự kiện, hoặc có câu mà riêng nó đã vượt 200 KB, thì ghi danh sách câu ra S3 và sự kiện chỉ mang `sentencesS3Key`. Không cấu hình `WORKER_PAYLOAD_BUCKET` mà có câu như vậy thì bỏ câu đó và ghi log `workerDropped`. Thực tế câu gửi worker luôn ≤ 10.000 byte, vì câu lớn hơn đã bị translator đánh `SENTENCE_TOO_LARGE`.
+
 ## Lambda worker C13 (`worker.ts`)
 
 | Mục | Giá trị |

@@ -379,14 +379,16 @@ export function createProxyHandler(deps: ProxyDeps) {
         extra.usageError = err instanceof Error ? err.name : 'Unknown';
       }
 
-      // Hết 20 giây (hoặc Translate lỗi tạm thời): gửi phần còn lại cho worker C13 dịch nốt vào TM
+      // Hết 20 giây (hoặc Translate lỗi tạm thời): gửi phần còn lại cho worker C13 dịch nốt vào TM.
+      // Câu vượt TRANSLATE_MAX_BYTES đã bị translator đánh SENTENCE_TOO_LARGE ngay từ đầu nên không có ở đây;
+      // buildWorkerEvents vẫn tự bảo đảm không sự kiện nào vượt giới hạn tải trọng (câu quá lớn đi qua S3).
       const leftover = [...tr.pending, ...tr.failed.filter((f) => f.reason !== 'SENTENCE_TOO_LARGE').map((f) => f.id)]
         .sort((x, y) => x - y)
         .map((id) => items[id]);
       let workerEvents = 0;
       if (leftover.length && deps.invokeWorker && deps.tm && glossary) {
         try {
-          const events = await buildWorkerEvents(
+          const { events, dropped } = await buildWorkerEvents(
             {
               type: 'FINISH_PAGE',
               tenantId: site.tenantId,
@@ -401,6 +403,7 @@ export function createProxyHandler(deps: ProxyDeps) {
             leftover,
             { store: deps.workerStore },
           );
+          if (dropped.length) extra.workerDropped = dropped.length;
           for (const e of events) {
             await deps.invokeWorker(e);
             workerEvents++;
