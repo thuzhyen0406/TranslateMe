@@ -205,12 +205,13 @@ describe('depsFromEnv', () => {
   it('đọc PROXY_SITES_JSON, BASE_MODE, PUBLIC_BASE_URL, ngân sách thời gian', async () => {
     const logger = fakeLogger();
     const d = depsFromEnv(
-      { PROXY_SITES_JSON: JSON.stringify([SITE]), BASE_MODE: 'host', PUBLIC_BASE_URL: CF, TRANSLATE_BUDGET_MS: '15000' },
+      { PROXY_SITES_JSON: JSON.stringify([SITE]), BASE_MODE: 'host', PUBLIC_BASE_URL: CF, TRANSLATE_BUDGET_MS: '15000', TABLE_NAME: 'translate-data' },
       logger,
     );
     assert.equal(d.baseMode, 'host');
     assert.equal(d.publicBaseUrl, CF);
     assert.equal(d.budgetMs, 15_000);
+    assert.ok(d.tm, 'có TABLE_NAME thì bật TM');
     assert.equal((await d.resolveSite('homestay-abc'))?.tenantId, SITE.tenantId);
     assert.deepEqual(logger.errors, []);
   });
@@ -220,7 +221,8 @@ describe('depsFromEnv', () => {
     const d = depsFromEnv({ PROXY_SITES_JSON: '[{', BASE_MODE: 'abc' }, logger);
     assert.equal(d.baseMode, 'path');
     assert.equal(await d.resolveSite('homestay-abc'), null);
-    assert.deepEqual(logger.errors.map((e) => e.action), ['INVALID_PROXY_SITES_JSON', 'MISSING_PUBLIC_BASE_URL']);
+    assert.deepEqual(logger.errors.map((e) => e.action), ['INVALID_PROXY_SITES_JSON', 'MISSING_PUBLIC_BASE_URL', 'TM_DISABLED']);
+    assert.equal(d.tm, undefined);
   });
 
   it('USE_FETCH_STUB=1 -> dùng safe_fetch stub (trang mẫu cố định, không gọi mạng)', async () => {

@@ -52,6 +52,8 @@ export interface TranslateSentencesResult {
   calls: number;
   /** Câu phải dịch lại dạng văn bản thuần vì marker hỏng */
   plainFallbacks: number;
+  /** Cùng độ dài với mảng câu đầu vào; true = dịch lại không kèm thẻ nội tuyến, cần gắn "Cần xem lại" */
+  needsReview: boolean[];
   /** Câu không dịch được (lỗi Translate, câu quá dài, hết giờ) */
   untranslated: number;
   timedOut: boolean;
@@ -106,6 +108,7 @@ export async function translateSentences(
     charsSent: 0,
     calls: 0,
     plainFallbacks: 0,
+    needsReview: new Array(sentences.length).fill(false),
     untranslated: 0,
     timedOut: false,
     errors: [],
@@ -125,6 +128,7 @@ export async function translateSentences(
   });
   result.uniqueSentences = unique.length;
   const out: Array<string | undefined> = new Array(unique.length).fill(undefined);
+  const plainK = new Set<number>();
 
   const call = async (text: string): Promise<string> => {
     result.calls++;
@@ -201,6 +205,7 @@ export async function translateSentences(
       const plain = spanHtmlToMarkers((await call(escapeHtmlText(stripMarkers(unique[k])))).trim());
       if (plain.text.trim()) {
         out[k] = plain.text.trim();
+        plainK.add(k);
         result.plainFallbacks++;
       }
     } catch (err) {
@@ -210,6 +215,7 @@ export async function translateSentences(
 
   if (tooBig.length) result.errors.push(`SENTENCE_TOO_LARGE x${tooBig.length}`);
   result.translations = uniqueOf.map((k) => out[k]);
+  result.needsReview = uniqueOf.map((k) => plainK.has(k));
   result.untranslated = result.translations.filter((t) => t === undefined).length;
   return result;
 }
