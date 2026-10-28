@@ -11,6 +11,9 @@
  *  - website không ACTIVE / tenant LOCKED: 302 về trang gốc; ngôn ngữ không bật: 404
  *  - lỗi không lường trước: 302 về trang gốc (Visitor không bao giờ thấy trang lỗi)
  * Lỗi TM, đếm lượng dùng, gọi worker không làm hỏng trang: chỉ ghi log.
+ * Đọc thuật ngữ (getGlossaryState) lỗi -> xử lý như lỗi tra TM: bỏ qua TM (không tra, không ghi, không gọi worker),
+ * dịch không kèm terminology và cache ngắn (s-maxage=60) để sớm dịch lại khi thuật ngữ đọc được.
+ * Bản HUMAN lỗi thời theo thuật ngữ vẫn dùng, và được ghi cờ "Cần xem lại" (markHumanNeedsReview).
  *
  * Bản tạm (B.14): hash câu và countChars chờ thư viện 1.8; getGlossaryState chờ 2.8; db chờ batchGet/update của 2.2;
  * reserveChars/settleUsage chờ 2.7 (quotaStub). Chưa làm: ghi SEG (3.4).
@@ -247,16 +250,27 @@ export function createProxyHandler(deps: ProxyDeps) {
       const ctx: Ctx = { tenantId: site.tenantId, via: 'SLUG', requestId: String(event.requestContext?.requestId ?? ''), slug: site.slug };
       const src = site.sourceLang;
       const tgt = parsed.lang;
-      const glossary = deps.tm ? await (deps.getGlossaryState ?? getGlossaryStateStub)(ctx) : undefined;
+      const extra: Record<string, unknown> = {};
+
+      // Thuật ngữ lỗi thì xử lý như lỗi tra TM: không làm hỏng trang, bỏ qua TM, dịch không kèm terminology.
+      // Không ghi TM và không gọi worker vì bản dịch không kèm terminology và không biết glossaryVersion đúng.
+      let glossary: GlossaryState | undefined;
+      if (deps.tm) {
+        try {
+          glossary = await (deps.getGlossaryState ?? getGlossaryStateStub)(ctx);
+        } catch (err) {
+          extra.glossaryError = err instanceof Error ? err.name : 'Unknown';
+        }
+      }
 
       // Bước 3–4: băm câu và tra TM
       const hashOf = deps.hashSentence ?? hashSentenceStub;
       const items: SentenceWithHash[] = ex.sentences.map((text, id) => ({ id, text, hash: hashOf(text) }));
       let hits = new Map<Sha256Hex, TmHit>();
-      const extra: Record<string, unknown> = {};
+      let reviewFlags: Sha256Hex[] = [];
       if (deps.tm && glossary) {
         try {
-          hits = (await deps.tm.getTM(ctx, src, tgt, items, glossary)).hits;
+          ({ hits, reviewFlags } = await deps.tm.getTM(ctx, src, tgt, items, glossary));
         } catch (err) {
           extra.tmReadError = err instanceof Error ? err.name : 'Unknown';
         }
@@ -296,25 +310,46 @@ export function createProxyHandler(deps: ProxyDeps) {
         for (const t of tr.translated) translations[t.id] = t.tgt;
       }
 
-      // Ghi bản MACHINE mới vào TM (không đè HUMAN)
-      if (deps.tm && glossary && tr.translated.length) {
-        try {
-          const rep = await deps.tm.putMachineTM(
-            ctx,
-            src,
-            tgt,
-            tr.translated.map((t) => ({
-              hash: items[t.id].hash,
-              sourceText: items[t.id].text,
-              tgt: t.tgt,
-              glossaryVersion: glossary.version,
-              needsReview: t.needsReview,
-            })),
-          );
-          Object.assign(extra, { tmWritten: rep.written, tmSkippedHuman: rep.skippedHuman, tmWriteFailed: rep.failed.length });
-        } catch (err) {
-          extra.tmWriteError = err instanceof Error ? err.name : 'Unknown';
-        }
+      // Ghi bản MACHINE mới vào TM (không đè HUMAN) và ghi cờ "Cần xem lại" cho HUMAN lỗi thời, song song
+      if (deps.tm && glossary) {
+        const tm = deps.tm;
+        const glossaryVersion = glossary.version;
+        const writeMachine = async () => {
+          if (!tr.translated.length) return;
+          try {
+            const rep = await tm.putMachineTM(
+              ctx,
+              src,
+              tgt,
+              tr.translated.map((t) => ({
+                hash: items[t.id].hash,
+                sourceText: items[t.id].text,
+                tgt: t.tgt,
+                glossaryVersion,
+                needsReview: t.needsReview,
+              })),
+            );
+            Object.assign(extra, { tmWritten: rep.written, tmSkippedHuman: rep.skippedHuman, tmWriteFailed: rep.failed.length });
+          } catch (err) {
+            extra.tmWriteError = err instanceof Error ? err.name : 'Unknown';
+          }
+        };
+        // Bản HUMAN lỗi thời theo thuật ngữ: ghi cờ để vào hàng đợi duyệt (F5)
+        const flagHuman = async () => {
+          if (!reviewFlags.length) return;
+          try {
+            const rep = await tm.markHumanNeedsReview(
+              ctx,
+              src,
+              tgt,
+              reviewFlags.map((hash) => ({ hash, tgt: hits.get(hash)!.tgt })),
+            );
+            Object.assign(extra, { tmReviewFlagged: rep.marked, tmReviewFlagSkipped: rep.skipped, tmReviewFlagFailed: rep.failed.length });
+          } catch (err) {
+            extra.tmReviewFlagError = err instanceof Error ? err.name : 'Unknown';
+          }
+        };
+        await Promise.all([writeMachine(), flagHuman()]);
       }
 
       // Bước 6: ráp HTML
@@ -381,7 +416,12 @@ export function createProxyHandler(deps: ProxyDeps) {
 
       // Bước 8: trả về CloudFront
       const partial = quotaExceeded ? 'quota' : rb.stats.keptSource > 0 ? '1' : null;
-      const sMaxAge = quotaExceeded ? QUOTA_PARTIAL_CACHE_SECONDS : partial ? PARTIAL_CACHE_SECONDS : site.cacheSeconds ?? DEFAULT_CACHE_SECONDS;
+      // Dịch không kèm thuật ngữ (đọc thuật ngữ lỗi): cache ngắn như trang dịch dở
+      const sMaxAge = quotaExceeded
+        ? QUOTA_PARTIAL_CACHE_SECONDS
+        : partial || extra.glossaryError !== undefined
+          ? PARTIAL_CACHE_SECONDS
+          : site.cacheSeconds ?? DEFAULT_CACHE_SECONDS;
       const headers: Record<string, string> = {
         'content-type': 'text/html; charset=utf-8',
         'content-language': parsed.lang,
@@ -396,6 +436,7 @@ export function createProxyHandler(deps: ProxyDeps) {
           sentences: items.length,
           tmEnabled: Boolean(deps.tm),
           tmHitSentences: items.length - misses.length,
+          tmHumanNeedsReview: [...hits.values()].filter((h) => h.label === 'HUMAN' && h.needsReview).length,
           tmMissSentences: misses.length,
           ...extra,
           quotaExceeded,

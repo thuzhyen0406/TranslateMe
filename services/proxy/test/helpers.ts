@@ -116,6 +116,14 @@ export function memoryTmDb() {
       assertTenantKey(c, key);
       const v = expr.ExpressionAttributeValues ?? {};
       const cur = store.get(id(key));
+      if (v[':human'] !== undefined) {
+        // markHumanNeedsReview: #label = :human AND #tgt = :tgt AND chưa có cờ
+        if (!cur || cur.label !== 'HUMAN' || cur.tgt !== v[':tgt'] || cur.needsReview === true) {
+          throw Object.assign(new Error('x'), { name: 'ConditionalCheckFailedException' });
+        }
+        store.set(id(key), { ...cur, needsReview: true, GSI3PK: v[':g3pk'] });
+        return {};
+      }
       if (cur && cur.label !== 'MACHINE') throw Object.assign(new Error('x'), { name: 'ConditionalCheckFailedException' });
       store.set(id(key), { ...key, src: v[':src'], tgt: v[':tgt'], label: 'MACHINE', glossaryVersion: v[':gv'], needsReview: v[':nr'], GSI3PK: v[':g3pk'] });
       return {};

@@ -17,6 +17,9 @@
  * Quy tắc:
  *  - getTM: BatchGetItem theo lô 100 khoá; db.batchGet tự lặp UnprocessedKeys.
  *    HUMAN dùng ngay (needsReview tính khi đọc). MACHINE chỉ dùng khi chưa lỗi thời theo thuật ngữ.
+ *    HUMAN lỗi thời theo thuật ngữ mà chưa có cờ -> trả trong reviewFlags để nơi gọi ghi cờ.
+ *  - markHumanNeedsReview: ghi cờ "Cần xem lại" cho bản HUMAN lỗi thời (gắn nhãn khi tra, không cần
+ *    Lambda quét nền). Ghi có điều kiện: vẫn là HUMAN, tgt chưa đổi, chưa có cờ.
  *  - putMachineTM: ghi có điều kiện attribute_not_exists(label) OR label = :machine
  *    -> bản HUMAN không bao giờ bị MACHINE ghi đè, kể cả khi ghi đồng thời.
  *    Dùng UpdateItem (thay vì PutItem như kế hoạch) để tăng `version` nguyên tử mà vẫn giữ điều kiện trên.
@@ -113,6 +116,26 @@ export interface TmDeps {
   concurrency?: number;
 }
 
+export interface TmLookup {
+  hits: Map<Sha256Hex, TmHit>;
+  misses: SentenceWithHash[];
+  /** Mở rộng B.8: hash các bản HUMAN lỗi thời theo thuật ngữ mà bản ghi chưa có cờ needsReview */
+  reviewFlags: Sha256Hex[];
+}
+
+/** Bản HUMAN cần gắn cờ; tgt là bản dịch lúc tra (ghi cờ chỉ khi Reviewer chưa sửa câu đó) */
+export interface ReviewFlagEntry {
+  hash: Sha256Hex;
+  tgt: string;
+}
+
+export interface MarkReviewReport {
+  marked: number;
+  /** Bản ghi đã đổi (Reviewer vừa sửa, đã có cờ, không còn là HUMAN) nên không ghi */
+  skipped: number;
+  failed: { hash: Sha256Hex; error: string }[];
+}
+
 export interface PutMachineTmReport {
   written: number;
   /** Đã có bản HUMAN nên không ghi (điều kiện chặn) */
@@ -145,7 +168,7 @@ export function createTM(deps: TmDeps) {
     tgt: Lang,
     items: readonly SentenceWithHash[],
     g: GlossaryState,
-  ): Promise<{ hits: Map<Sha256Hex, TmHit>; misses: SentenceWithHash[] }> {
+  ): Promise<TmLookup> {
     const byHash = new Map<Sha256Hex, SentenceWithHash>();
     for (const it of items) if (!byHash.has(it.hash)) byHash.set(it.hash, it);
     const hashes = [...byHash.keys()];
@@ -159,6 +182,7 @@ export function createTM(deps: TmDeps) {
     }
 
     const hits = new Map<Sha256Hex, TmHit>();
+    const reviewFlags: Sha256Hex[] = [];
     for (const hash of hashes) {
       const item = found.get(`HASH#${hash}`);
       if (!item || typeof item.tgt !== 'string' || !item.tgt) continue;
@@ -167,6 +191,7 @@ export function createTM(deps: TmDeps) {
       const sourceText = typeof item.src === 'string' ? item.src : byHash.get(hash)!.text;
       const stale = isStale(sourceText, glossaryVersion, g);
       if (label === 'MACHINE' && stale) continue; // lỗi thời -> dịch lại
+      if (label === 'HUMAN' && stale && item.needsReview !== true) reviewFlags.push(hash);
       hits.set(hash, {
         tgt: item.tgt,
         label,
@@ -176,7 +201,7 @@ export function createTM(deps: TmDeps) {
       });
     }
     const misses = items.filter((it) => !hits.has(it.hash));
-    return { hits, misses };
+    return { hits, misses, reviewFlags };
   }
 
   /** B.8: ghi bản MACHINE, không bao giờ đè HUMAN. Không throw vì lỗi từng câu – xem báo cáo trả về. */
@@ -225,7 +250,38 @@ export function createTM(deps: TmDeps) {
     return report;
   }
 
-  return { getTM, putMachineTM };
+  /**
+   * Gắn cờ "Cần xem lại" cho bản HUMAN lỗi thời theo thuật ngữ (đưa vào nhóm REVIEW của GSI3).
+   * Không tăng `version`: đây là cờ hệ thống, không phải chỉnh sửa nội dung, nên không làm Reviewer
+   * đang mở câu đó bị 409. Không throw vì lỗi từng câu – xem báo cáo trả về.
+   */
+  async function markHumanNeedsReview(ctx: Ctx, src: Lang, tgt: Lang, entries: readonly ReviewFlagEntry[]): Promise<MarkReviewReport> {
+    const report: MarkReviewReport = { marked: 0, skipped: 0, failed: [] };
+    const unique = [...new Map(entries.map((e) => [e.hash, e])).values()];
+    await runPool(unique, deps.concurrency ?? 8, async (e) => {
+      try {
+        await deps.db.update(ctx, tmKey(ctx, src, tgt, e.hash), {
+          UpdateExpression: 'SET #nr = :true, #g3pk = :g3pk, #g3sk = if_not_exists(#g3sk, :at)',
+          ConditionExpression: '#label = :human AND #tgt = :tgt AND (attribute_not_exists(#nr) OR #nr <> :true)',
+          ExpressionAttributeNames: { '#nr': 'needsReview', '#g3pk': 'GSI3PK', '#g3sk': 'GSI3SK', '#label': 'label', '#tgt': 'tgt' },
+          ExpressionAttributeValues: {
+            ':true': true,
+            ':human': 'HUMAN',
+            ':tgt': e.tgt,
+            ':g3pk': `TENANT#${ctx.tenantId}#TM#REVIEW`,
+            ':at': now(),
+          },
+        });
+        report.marked++;
+      } catch (err) {
+        if (errName(err) === 'ConditionalCheckFailedException') report.skipped++;
+        else report.failed.push({ hash: e.hash, error: errName(err) });
+      }
+    });
+    return report;
+  }
+
+  return { getTM, putMachineTM, markHumanNeedsReview };
 }
 
 // ============================================================================

@@ -47,6 +47,14 @@ function memoryDb() {
       await new Promise((r) => setImmediate(r));
       const cur = store.get(id(key));
       const v = expr.ExpressionAttributeValues ?? {};
+      if (v[':human'] !== undefined) {
+        // markHumanNeedsReview: #label = :human AND #tgt = :tgt AND (attribute_not_exists(#nr) OR #nr <> :true)
+        if (!cur || cur.label !== 'HUMAN' || cur.tgt !== v[':tgt'] || cur.needsReview === true) {
+          throw Object.assign(new Error('The conditional request failed'), { name: 'ConditionalCheckFailedException' });
+        }
+        store.set(id(key), { ...cur, needsReview: true, GSI3PK: v[':g3pk'], GSI3SK: cur.GSI3SK ?? v[':at'] });
+        return {};
+      }
       if (cur && cur.label !== undefined && cur.label !== v[':machine']) {
         throw Object.assign(new Error('The conditional request failed'), { name: 'ConditionalCheckFailedException' });
       }
@@ -156,6 +164,25 @@ describe('getTM', () => {
     assert.deepEqual(r.misses, [m]);
     assert.equal(r.hits.get(hu.hash)?.needsReview, true);
     assert.equal(r.hits.get(hu.hash)?.label, 'HUMAN');
+    assert.deepEqual(r.reviewFlags, [hu.hash], 'HUMAN lỗi thời chưa có cờ -> nơi gọi phải ghi cờ');
+  });
+
+  it('HUMAN không lỗi thời hoặc đã có cờ thì không nằm trong reviewFlags', async () => {
+    const db = memoryDb();
+    const tm = createTM({ db });
+    const ok = sent(0, 'Phòng có ban công');
+    const flagged = sent(1, 'Gần phố cổ Hội An');
+    for (const s of [ok, flagged]) {
+      await tm.putMachineTM(ctxA, 'vi', 'en', [{ hash: s.hash, sourceText: s.text, tgt: 'x', glossaryVersion: 3 }]);
+      db.human(ctxA, tmKey(ctxA, 'vi', 'en', s.hash), `human ${s.id}`);
+    }
+    const k = tmKey(ctxA, 'vi', 'en', flagged.hash);
+    db.store.set(`${k.PK}|${k.SK}`, { ...db.store.get(`${k.PK}|${k.SK}`), needsReview: true });
+    const g = glossary(4, [{ normalized: 'phố cổ hội an', type: 'FIXED', sinceVersion: 4 }]);
+    const r = await tm.getTM(ctxA, 'vi', 'en', [ok, flagged], g);
+    assert.equal(r.hits.size, 2);
+    assert.equal(r.hits.get(flagged.hash)?.needsReview, true);
+    assert.deepEqual(r.reviewFlags, []);
   });
 
   it('quá 100 hash -> chia lô 100 (250 câu = 100 + 100 + 50)', async () => {
@@ -254,6 +281,64 @@ describe('putMachineTM', () => {
     const r = await tm.putMachineTM(evil, 'vi', 'en', [{ hash: 'aa', sourceText: 'x', tgt: 'y', glossaryVersion: 1 }]);
     assert.equal(r.written, 1);
     assert.ok([...db.store.keys()].every((k) => k.startsWith(`TENANT#${ctxB.tenantId}#`)));
+  });
+});
+
+describe('markHumanNeedsReview', () => {
+  it('ghi cờ Cần xem lại cho HUMAN, chuyển sang nhóm REVIEW của GSI3, không tăng version, không đổi tgt', async () => {
+    const db = memoryDb();
+    const tm = createTM({ db, now: () => '2026-10-28T10:00:00.000Z' });
+    const hu = sent(0, 'Gần phố cổ Hội An');
+    const key = tmKey(ctxA, 'vi', 'en', hu.hash);
+    await tm.putMachineTM(ctxA, 'vi', 'en', [{ hash: hu.hash, sourceText: hu.text, tgt: 'x', glossaryVersion: 3 }]);
+    db.human(ctxA, key, 'Near Hoi An Ancient Town');
+    const before = { ...db.store.get(`${key.PK}|${key.SK}`) };
+    const rep = await tm.markHumanNeedsReview(ctxA, 'vi', 'en', [
+      { hash: hu.hash, tgt: 'Near Hoi An Ancient Town' },
+      { hash: hu.hash, tgt: 'Near Hoi An Ancient Town' },
+    ]);
+    assert.deepEqual(rep, { marked: 1, skipped: 0, failed: [] }, 'câu trùng chỉ ghi một lần');
+    const after = db.store.get(`${key.PK}|${key.SK}`)!;
+    assert.equal(after.needsReview, true);
+    assert.equal(after.GSI3PK, `TENANT#${ctxA.tenantId}#TM#REVIEW`);
+    assert.equal(after.label, 'HUMAN');
+    assert.equal(after.tgt, 'Near Hoi An Ancient Town');
+    assert.equal(after.version, before.version);
+  });
+
+  it('Reviewer vừa sửa câu (tgt khác lúc tra), đã có cờ hoặc không phải HUMAN -> bỏ qua, không ghi', async () => {
+    const db = memoryDb();
+    const tm = createTM({ db });
+    const a = sent(0, 'Câu A');
+    const b = sent(1, 'Câu B');
+    const c = sent(2, 'Câu C');
+    await tm.putMachineTM(ctxA, 'vi', 'en', [a, b, c].map((s) => ({ hash: s.hash, sourceText: s.text, tgt: 'm', glossaryVersion: 1 })));
+    db.human(ctxA, tmKey(ctxA, 'vi', 'en', a.hash), 'new text');
+    db.human(ctxA, tmKey(ctxA, 'vi', 'en', b.hash), 'B');
+    await tm.markHumanNeedsReview(ctxA, 'vi', 'en', [{ hash: b.hash, tgt: 'B' }]);
+    const rep = await tm.markHumanNeedsReview(ctxA, 'vi', 'en', [
+      { hash: a.hash, tgt: 'old text' },
+      { hash: b.hash, tgt: 'B' },
+      { hash: c.hash, tgt: 'm' },
+    ]);
+    assert.deepEqual(rep, { marked: 0, skipped: 3, failed: [] });
+  });
+
+  it('gửi đúng điều kiện cho DynamoDB; lỗi khác không throw mà ghi vào failed', async () => {
+    const exprs: UpdateExpr[] = [];
+    const db: TmDb = {
+      batchGet: async () => [],
+      update: async (_c, _k, expr) => {
+        exprs.push(expr);
+        throw Object.assign(new Error('slow down'), { name: 'ThrottlingException' });
+      },
+    };
+    const tm = createTM({ db });
+    const a = sent(0, 'Câu A');
+    const rep = await tm.markHumanNeedsReview(ctxA, 'vi', 'en', [{ hash: a.hash, tgt: 'A' }]);
+    assert.deepEqual(rep, { marked: 0, skipped: 0, failed: [{ hash: a.hash, error: 'ThrottlingException' }] });
+    assert.equal(exprs[0].ConditionExpression, '#label = :human AND #tgt = :tgt AND (attribute_not_exists(#nr) OR #nr <> :true)');
+    assert.ok(!exprs[0].UpdateExpression.includes('#version'), 'không tăng version');
   });
 });
 
