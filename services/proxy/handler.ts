@@ -8,8 +8,11 @@
  *     Tải trang gốc bằng safe_fetch (chặn SSRF, không chuyển cookie) và xử lý `outcome.kind`.
  *  2. extract(): tách câu {n}, bỏ qua vùng không dịch của website.
  *  3–4. Băm câu, tra TM (getTM): HUMAN dùng ngay, MACHINE dùng nếu chưa lỗi thời theo thuật ngữ.
+ *     HUMAN lỗi thời theo thuật ngữ vẫn dùng, và được ghi cờ "Cần xem lại" (markHumanNeedsReview).
  *  5. (bản rút gọn) translateSentences() cho câu trượt TM, rồi putMachineTM (không đè HUMAN).
  *     Lỗi TM không làm hỏng trang: tra lỗi -> coi như trượt hết; ghi lỗi -> chỉ ghi log.
+ *     Đọc thuật ngữ (getGlossaryState) lỗi -> xử lý như lỗi tra TM: bỏ qua TM (không tra, không ghi),
+ *     dịch không kèm terminology và cache ngắn (s-maxage=60) để sớm dịch lại khi thuật ngữ đọc được.
  *  6. rebuildDetailed(): ráp HTML, canonical/hreflang theo BASE_MODE + PUBLIC_BASE_URL, viết lại URL.
  *  8. Trả 200 + Cache-Control: public, s-maxage=<cacheSeconds>; trang dịch dở dùng s-maxage=60 và
  *     X-TranslateMe-Partial: 1. Mọi lỗi không lường trước -> 302 về trang gốc (Visitor không thấy trang lỗi).
@@ -221,16 +224,27 @@ export function createProxyHandler(deps: ProxyDeps) {
       // Bước 2: tách câu
       const ex = extract(fetched.body, { customExclusionSelectors: site.exclusionSelectors ?? [] });
       const ctx: Ctx = { tenantId: site.tenantId, via: 'SLUG', requestId: String(event.requestContext?.requestId ?? ''), slug: site.slug };
-      const glossary = deps.tm ? await (deps.getGlossaryState ?? getGlossaryStateStub)(ctx) : undefined;
+      const tmLog: Record<string, unknown> = {};
+
+      // Thuật ngữ lỗi thì xử lý như lỗi tra TM: không làm hỏng trang, bỏ qua TM, dịch không kèm terminology.
+      // Không ghi TM vì bản dịch không kèm terminology và không biết glossaryVersion đúng.
+      let glossary: GlossaryState | undefined;
+      if (deps.tm) {
+        try {
+          glossary = await (deps.getGlossaryState ?? getGlossaryStateStub)(ctx);
+        } catch (err) {
+          tmLog.glossaryError = err instanceof Error ? err.name : 'Unknown';
+        }
+      }
 
       // Bước 3–4: băm câu và tra TM
       const hashOf = deps.hashSentence ?? hashSentenceStub;
       const items: SentenceWithHash[] = ex.sentences.map((text, id) => ({ id, text, hash: hashOf(text) }));
       let hits = new Map<Sha256Hex, TmHit>();
-      const tmLog: Record<string, unknown> = {};
+      let reviewFlags: Sha256Hex[] = [];
       if (deps.tm && glossary) {
         try {
-          hits = (await deps.tm.getTM(ctx, site.sourceLang, parsed.lang, items, glossary)).hits;
+          ({ hits, reviewFlags } = await deps.tm.getTM(ctx, site.sourceLang, parsed.lang, items, glossary));
         } catch (err) {
           tmLog.tmReadError = err instanceof Error ? err.name : 'Unknown';
         }
@@ -265,12 +279,27 @@ export function createProxyHandler(deps: ProxyDeps) {
             glossaryVersion: glossary.version,
             needsReview: tr.needsReview[k],
           }));
-        try {
-          const rep = await deps.tm.putMachineTM(ctx, site.sourceLang, parsed.lang, entries);
-          Object.assign(tmLog, { tmWritten: rep.written, tmSkippedHuman: rep.skippedHuman, tmWriteFailed: rep.failed.length });
-        } catch (err) {
-          tmLog.tmWriteError = err instanceof Error ? err.name : 'Unknown';
-        }
+        const tm = deps.tm;
+        const writeMachine = async () => {
+          try {
+            const rep = await tm.putMachineTM(ctx, site.sourceLang, parsed.lang, entries);
+            Object.assign(tmLog, { tmWritten: rep.written, tmSkippedHuman: rep.skippedHuman, tmWriteFailed: rep.failed.length });
+          } catch (err) {
+            tmLog.tmWriteError = err instanceof Error ? err.name : 'Unknown';
+          }
+        };
+        // Bản HUMAN lỗi thời theo thuật ngữ: ghi cờ "Cần xem lại" để vào hàng đợi duyệt (F5)
+        const flagHuman = async () => {
+          if (!reviewFlags.length) return;
+          try {
+            const flagEntries = reviewFlags.map((hash) => ({ hash, tgt: hits.get(hash)!.tgt }));
+            const rep = await tm.markHumanNeedsReview(ctx, site.sourceLang, parsed.lang, flagEntries);
+            Object.assign(tmLog, { tmReviewFlagged: rep.marked, tmReviewFlagSkipped: rep.skipped, tmReviewFlagFailed: rep.failed.length });
+          } catch (err) {
+            tmLog.tmReviewFlagError = err instanceof Error ? err.name : 'Unknown';
+          }
+        };
+        await Promise.all([writeMachine(), flagHuman()]);
       }
 
       // Bước 6: ráp HTML
@@ -291,11 +320,13 @@ export function createProxyHandler(deps: ProxyDeps) {
 
       // Bước 8: trả về CloudFront
       const partial = rb.stats.keptSource > 0;
+      // Dịch không kèm thuật ngữ (đọc thuật ngữ lỗi): cache ngắn như trang dịch dở
+      const shortCache = partial || tmLog.glossaryError !== undefined;
       const headers: Record<string, string> = {
         'content-type': 'text/html; charset=utf-8',
         'content-language': parsed.lang,
         'x-content-type-options': 'nosniff',
-        'cache-control': `public, max-age=0, s-maxage=${partial ? PARTIAL_CACHE_SECONDS : site.cacheSeconds ?? DEFAULT_CACHE_SECONDS}`,
+        'cache-control': `public, max-age=0, s-maxage=${shortCache ? PARTIAL_CACHE_SECONDS : site.cacheSeconds ?? DEFAULT_CACHE_SECONDS}`,
       };
       if (partial) headers['x-translateme-partial'] = '1';
       return finish(
@@ -305,6 +336,7 @@ export function createProxyHandler(deps: ProxyDeps) {
           sentences: ex.sentences.length,
           tmEnabled: Boolean(deps.tm),
           tmHitSentences: ex.sentences.length - missIdx.length,
+          tmHumanNeedsReview: [...hits.values()].filter((h) => h.label === 'HUMAN' && h.needsReview).length,
           tmMissSentences: missIdx.length,
           ...tmLog,
           uniqueSentences: tr.uniqueSentences,
