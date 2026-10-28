@@ -3,8 +3,11 @@
  */
 import type { TranslateTextCommand } from '@aws-sdk/client-translate';
 import { toFetchResult, type SafeFetchCompatResult, type SafeFetchOutcome } from '../../../libs/common/safeFetch.js';
+import { assertTenantKey, type TmDb, type TmKey } from '../../../libs/common/tm.js';
+import type { Ctx } from '../../../libs/common/types.js';
 import type { SiteConfig } from '../sites.js';
-import type { TranslateClientLike } from '../translator.js';
+import type { QuotaApi, Reservation, UsageCounters, UsageSource } from '../usage.js';
+import type { TranslateClientLike } from '../../../libs/common/translator.js';
 
 /** "Dịch" giả: viết HOA phần chữ, giữ nguyên thẻ HTML (giống cách Translate giữ thẻ). */
 export function upperCaseOutsideTags(html: string): string {
@@ -98,3 +101,56 @@ export const SAMPLE_PAGE = `<!DOCTYPE html><html lang="vi"><head><meta charset="
 <div id="booking-widget">Đặt phòng ngay</div>
 <img src="/img/a.jpg" alt="Sân vườn">
 </body></html>`;
+
+/** DynamoDB giả cho TM: điều kiện "không đè HUMAN" đánh giá nguyên tử như DynamoDB. */
+export function memoryTmDb() {
+  const store = new Map<string, Record<string, unknown>>();
+  const id = (k: TmKey) => `${k.PK}|${k.SK}`;
+  const db: TmDb & { store: typeof store } = {
+    store,
+    async batchGet(c, keys) {
+      keys.forEach((k) => assertTenantKey(c, k));
+      return keys.map((k) => store.get(id(k))).filter((x): x is Record<string, unknown> => !!x);
+    },
+    async update(c, key, expr) {
+      assertTenantKey(c, key);
+      const v = expr.ExpressionAttributeValues ?? {};
+      const cur = store.get(id(key));
+      if (v[':human'] !== undefined) {
+        // markHumanNeedsReview: #label = :human AND #tgt = :tgt AND chưa có cờ
+        if (!cur || cur.label !== 'HUMAN' || cur.tgt !== v[':tgt'] || cur.needsReview === true) {
+          throw Object.assign(new Error('x'), { name: 'ConditionalCheckFailedException' });
+        }
+        store.set(id(key), { ...cur, needsReview: true, GSI3PK: v[':g3pk'] });
+        return {};
+      }
+      if (cur && cur.label !== 'MACHINE') throw Object.assign(new Error('x'), { name: 'ConditionalCheckFailedException' });
+      store.set(id(key), { ...key, src: v[':src'], tgt: v[':tgt'], label: 'MACHINE', glossaryVersion: v[':gv'], needsReview: v[':nr'], GSI3PK: v[':g3pk'] });
+      return {};
+    },
+  };
+  return db;
+}
+
+/** Hạn mức giả (B.11): ghi lại mọi lời gọi; `limit` = số ký tự còn lại của tháng. */
+export function fakeQuota(o: { limit?: number; reserveError?: Error; settleError?: Error } = {}) {
+  const q = {
+    reserves: [] as { ctx: Ctx; n: number }[],
+    releases: [] as Reservation[],
+    settles: [] as { ctx: Ctx; r: Reservation; source: UsageSource; u: UsageCounters }[],
+    async reserveChars(ctx: Ctx, n: number): Promise<Reservation> {
+      q.reserves.push({ ctx, n });
+      if (o.reserveError) throw o.reserveError;
+      if (o.limit !== undefined && n > o.limit) throw Object.assign(new Error('quota'), { code: 'CHAR_QUOTA_EXCEEDED' });
+      return { month: '2026-10', reserved: n };
+    },
+    async releaseChars(_ctx: Ctx, r: Reservation) {
+      q.releases.push(r);
+    },
+    async settleUsage(ctx: Ctx, r: Reservation, source: UsageSource, u: UsageCounters) {
+      q.settles.push({ ctx, r, source, u });
+      if (o.settleError) throw o.settleError;
+    },
+  } satisfies QuotaApi & Record<string, unknown>;
+  return q;
+}
