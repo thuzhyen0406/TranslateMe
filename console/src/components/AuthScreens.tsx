@@ -2,8 +2,12 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   completeInvitedMemberPassword,
   confirmEmailAndRefreshSession,
+  confirmForgotPasswordReset,
+  ConsoleAuthError,
+  IS_DEMO_AUTH_MODE,
   mapCognitoErrorToVietnamese,
   registerAccount,
+  requestPasswordResetCode,
   resendConfirmationCode,
   ROLE_DISPLAY_LABEL,
   signInWithEmail,
@@ -45,18 +49,40 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
 
-  // State cho Quên mật khẩu
-  const [resetSent, setResetSent] = useState(false);
+  // State cho Quên mật khẩu (2 bước: 1. Nhập email gửi mã -> 2. Nhập mã 6 số + mật khẩu mới)
+  const [resetStep, setResetStep] = useState<'REQUEST_CODE' | 'CONFIRM_RESET'>('REQUEST_CODE');
+  const [resetCode, setResetCode] = useState('');
+  const [resetNewPassword, setResetNewPassword] = useState('');
+  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
 
   // Trạng thái xử lý & thông báo lỗi/thành công
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
-  useEffect(() => {
+  /**
+   * Chuyển màn hình có kiểm soát thông báo (Mục 3 Review):
+   * - Khi người dùng tự bấm nút chuyển màn hình (`keepInfo = false`), xóa cả lỗi lẫn thông báo cũ.
+   * - Khi tự động chuyển từ Đăng ký sang Xác nhận email (`keepInfo = true`), giữ nguyên `infoMessage` hiển thị mã demo.
+   */
+  const switchScreenMode = (nextMode: AuthScreenMode, keepInfo = false) => {
     setErrorMessage(null);
-    setInfoMessage(null);
-  }, [mode]);
+    setErrorCode(null);
+    if (!keepInfo) {
+      setInfoMessage(null);
+    }
+    onChangeMode(nextMode);
+  };
+
+  const applyError = (err: unknown) => {
+    setErrorMessage(mapCognitoErrorToVietnamese(err));
+    if (err instanceof ConsoleAuthError) {
+      setErrorCode(err.code);
+    } else {
+      setErrorCode(null);
+    }
+  };
 
   useEffect(() => {
     if (mode !== 'CONFIRM_EMAIL' || resendCooldown <= 0) return;
@@ -69,9 +95,9 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   // Xử lý nhập từng ô mã xác nhận 6 chữ số
   const handleOtpChange = (index: number, rawVal: string) => {
     setErrorMessage(null);
+    setErrorCode(null);
     const digitsOnly = rawVal.replace(/\D/g, '');
     if (digitsOnly.length > 1) {
-      // Hỗ trợ dán (paste) cả cụm 6 chữ số
       const next = [...otpDigits];
       for (let i = 0; i < 6; i++) {
         next[i] = digitsOnly[i] ?? next[i] ?? '';
@@ -105,6 +131,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   const handleSignUpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
+    setErrorCode(null);
     setInfoMessage(null);
     setLoading(true);
     try {
@@ -117,10 +144,15 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
       });
       setOtpDigits(['', '', '', '', '', '']);
       setResendCooldown(60);
-      setInfoMessage(`Mã xác nhận 6 chữ số đã được gửi tới ${res.email} (Mã demo: ${res.demoConfirmationCode}).`);
-      onChangeMode('CONFIRM_EMAIL');
+      const demoCodeSuffix = IS_DEMO_AUTH_MODE
+        ? ` (Mã demo: ${res.demoConfirmationCode})`
+        : '';
+      setInfoMessage(
+        `Mã xác nhận 6 chữ số đã được gửi tới ${res.email}${demoCodeSuffix}.`,
+      );
+      switchScreenMode('CONFIRM_EMAIL', true);
     } catch (err) {
-      setErrorMessage(mapCognitoErrorToVietnamese(err));
+      applyError(err);
     } finally {
       setLoading(false);
     }
@@ -130,20 +162,21 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   const handleConfirmEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
+    setErrorCode(null);
     setInfoMessage(null);
     setLoading(true);
     try {
       const code = otpDigits.join('');
       const session = await confirmEmailAndRefreshSession({
-        email: email || 'lan@homestay-abc.example',
+        email: email || (IS_DEMO_AUTH_MODE ? 'lan@homestay-abc.example' : ''),
         code,
-        password: password || 'Password123',
-        organizationName: organizationName || 'Homestay ABC Hội An',
-        fullName: fullName || 'Nguyễn Thị Lan',
+        password: password || (IS_DEMO_AUTH_MODE ? 'Password123' : ''),
+        organizationName: organizationName || (IS_DEMO_AUTH_MODE ? 'Homestay ABC Hội An' : ''),
+        fullName: fullName || (IS_DEMO_AUTH_MODE ? 'Nguyễn Thị Lan' : ''),
       });
       onAuthenticated(session);
     } catch (err) {
-      setErrorMessage(mapCognitoErrorToVietnamese(err));
+      applyError(err);
     } finally {
       setLoading(false);
     }
@@ -152,24 +185,28 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   const handleResendCode = async () => {
     if (resendCooldown > 0) return;
     setErrorMessage(null);
-    const targetEmail = email || 'lan@homestay-abc.example';
+    setErrorCode(null);
+    const targetEmail = email || (IS_DEMO_AUTH_MODE ? 'lan@homestay-abc.example' : '');
     const res = await resendConfirmationCode(targetEmail);
     setResendCooldown(res.expiresInSeconds);
     setOtpDigits(['', '', '', '', '', '']);
-    setInfoMessage(`Đã gửi lại mã xác nhận mới tới ${targetEmail} (Mã demo: 481926).`);
+    const demoHint = IS_DEMO_AUTH_MODE ? ' (Mã demo: 481926)' : '';
+    setInfoMessage(`Đã gửi lại mã xác nhận mới tới ${targetEmail}${demoHint}.`);
   };
 
   // Submit: Đăng nhập (`log-in.jpg`)
   const handleSignInSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
+    setErrorCode(null);
     setInfoMessage(null);
     setLoading(true);
     try {
       const outcome = await signInWithEmail({ email, password });
       if (outcome.status === 'CONFIRMATION_REQUIRED') {
         setOrganizationName(outcome.organizationName);
-        onChangeMode('CONFIRM_EMAIL');
+        setInfoMessage('Tài khoản chưa xác nhận email. Vui lòng nhập mã 6 chữ số đã gửi.');
+        switchScreenMode('CONFIRM_EMAIL', true);
         return;
       }
       if (outcome.status === 'NEW_PASSWORD_REQUIRED') {
@@ -179,12 +216,12 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
         setTempPassword('');
         setNewPassword('');
         setConfirmNewPassword('');
-        onChangeMode('FORCE_CHANGE_PASSWORD');
+        switchScreenMode('FORCE_CHANGE_PASSWORD');
         return;
       }
       onAuthenticated(outcome.session);
     } catch (err) {
-      setErrorMessage(mapCognitoErrorToVietnamese(err));
+      applyError(err);
     } finally {
       setLoading(false);
     }
@@ -194,11 +231,12 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   const handleForceChangePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
+    setErrorCode(null);
     setInfoMessage(null);
     setLoading(true);
     try {
       const session = await completeInvitedMemberPassword({
-        email: invitedEmail || email || 'minh@homestay-abc.example',
+        email: invitedEmail || email || (IS_DEMO_AUTH_MODE ? 'minh@homestay-abc.example' : ''),
         temporaryPassword: tempPassword,
         newPassword,
         confirmNewPassword,
@@ -207,13 +245,61 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
       });
       onAuthenticated(session);
     } catch (err) {
-      setErrorMessage(mapCognitoErrorToVietnamese(err));
+      applyError(err);
     } finally {
       setLoading(false);
     }
   };
 
-  // Nội dung cột tiêu đề bên trái theo từng màn hình đúng 100% thiết kế
+  // Submit Bước 1 Quên mật khẩu: Gửi mã khôi phục
+  const handleRequestPasswordResetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage(null);
+    setErrorCode(null);
+    setInfoMessage(null);
+    setLoading(true);
+    try {
+      const res = await requestPasswordResetCode(email);
+      setResetStep('CONFIRM_RESET');
+      setResetCode('');
+      setResetNewPassword('');
+      setResetConfirmPassword('');
+      const demoHint = IS_DEMO_AUTH_MODE ? ` (Mã demo: ${res.demoResetCode})` : '';
+      setInfoMessage(
+        `Nếu tài khoản tồn tại, mã đặt lại mật khẩu 6 chữ số đã được gửi tới ${res.email}${demoHint}.`,
+      );
+    } catch (err) {
+      applyError(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Submit Bước 2 Quên mật khẩu: Xác nhận mã 6 số & mật khẩu mới
+  const handleConfirmPasswordResetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage(null);
+    setErrorCode(null);
+    setInfoMessage(null);
+    setLoading(true);
+    try {
+      await confirmForgotPasswordReset({
+        email,
+        code: resetCode,
+        newPassword: resetNewPassword,
+        confirmNewPassword: resetConfirmPassword,
+      });
+      setPassword('');
+      setResetStep('REQUEST_CODE');
+      setInfoMessage('Đặt lại mật khẩu thành công. Vui lòng đăng nhập bằng mật khẩu mới.');
+      switchScreenMode('SIGN_IN', true);
+    } catch (err) {
+      applyError(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const renderLeftHero = () => {
     if (mode === 'SIGN_UP') {
       return (
@@ -279,9 +365,35 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
     );
   };
 
-  const pwdCheck = validatePasswordPolicy(
-    mode === 'FORCE_CHANGE_PASSWORD' ? newPassword : password,
-  );
+  const activeTypedPassword =
+    mode === 'FORCE_CHANGE_PASSWORD'
+      ? newPassword
+      : mode === 'FORGOT_PASSWORD'
+        ? resetNewPassword
+        : password;
+  const pwdCheck = validatePasswordPolicy(activeTypedPassword);
+
+  const renderPasswordPolicyHint = (typedValue: string) => {
+    if (!typedValue) {
+      return (
+        <p className="mt-1.5 text-[11px] text-gray-400">
+          Tối thiểu 8 ký tự, có chữ hoa, chữ thường và chữ số
+        </p>
+      );
+    }
+    if (pwdCheck.valid) {
+      return (
+        <p className="mt-1.5 text-[11px] text-[#146c54] font-medium">
+          Mật khẩu hợp lệ (đủ 8+ ký tự, chữ hoa, chữ thường và chữ số)
+        </p>
+      );
+    }
+    return (
+      <p className="mt-1.5 text-[11px] text-amber-600">
+        Còn thiếu: {pwdCheck.missingConditions.join(', ')}
+      </p>
+    );
+  };
 
   return (
     <div className="min-h-[calc(100vh-4rem)] flex flex-col justify-between bg-[#f4f7f6]">
@@ -294,9 +406,31 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
           {errorMessage && (
             <div
               role="alert"
-              className="mb-5 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-xs text-red-700 leading-relaxed"
+              className="mb-5 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-xs text-red-700 leading-relaxed space-y-2"
             >
-              {errorMessage}
+              <div>{errorMessage}</div>
+              {errorCode === 'UsernameExistsException' && mode === 'SIGN_UP' && (
+                <div className="flex items-center gap-3 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => switchScreenMode('SIGN_IN')}
+                    className="font-semibold text-[#146c54] underline hover:text-[#0f5945]"
+                  >
+                    Đăng nhập ngay
+                  </button>
+                  <span className="text-gray-300">•</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResetStep('REQUEST_CODE');
+                      switchScreenMode('FORGOT_PASSWORD');
+                    }}
+                    className="font-semibold text-[#146c54] underline hover:text-[#0f5945]"
+                  >
+                    Quên mật khẩu?
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -348,13 +482,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
                   placeholder="Nhập mật khẩu"
                   className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 focus:border-[#146c54] focus:outline-none focus:ring-2 focus:ring-[#146c54]/20"
                 />
-                <p
-                  className={`mt-1.5 text-[11px] ${
-                    password && !pwdCheck.valid ? 'text-amber-600' : 'text-gray-400'
-                  }`}
-                >
-                  Tối thiểu 8 ký tự, có chữ hoa, chữ thường và chữ số
-                </p>
+                {renderPasswordPolicyHint(password)}
               </div>
 
               <div>
@@ -397,7 +525,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
                 Đã có tài khoản?{' '}
                 <button
                   type="button"
-                  onClick={() => onChangeMode('SIGN_IN')}
+                  onClick={() => switchScreenMode('SIGN_IN')}
                   className="text-[#146c54] font-semibold underline hover:text-[#0f5945]"
                 >
                   Đăng nhập
@@ -520,8 +648,8 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setResetSent(false);
-                    onChangeMode('FORGOT_PASSWORD');
+                    setResetStep('REQUEST_CODE');
+                    switchScreenMode('FORGOT_PASSWORD');
                   }}
                   className="text-xs font-medium text-[#146c54] underline hover:text-[#0f5945]"
                 >
@@ -560,13 +688,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
                   placeholder="Nhập mật khẩu mới"
                   className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 focus:border-[#146c54] focus:outline-none focus:ring-2 focus:ring-[#146c54]/20"
                 />
-                <p
-                  className={`mt-1.5 text-[11px] ${
-                    newPassword && !pwdCheck.valid ? 'text-amber-600' : 'text-gray-400'
-                  }`}
-                >
-                  Tối thiểu 8 ký tự, có chữ hoa, chữ thường và chữ số
-                </p>
+                {renderPasswordPolicyHint(newPassword)}
               </div>
 
               <div>
@@ -592,15 +714,9 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
             </form>
           )}
 
-          {/* 5. MÀN QUÊN MẬT KHẨU */}
-          {mode === 'FORGOT_PASSWORD' && (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                setResetSent(true);
-              }}
-              className="space-y-4"
-            >
+          {/* 5. MÀN QUÊN MẬT KHẨU (Đủ 2 bước: Nhập email nhận mã -> Nhập mã 6 số & đặt mật khẩu mới) */}
+          {mode === 'FORGOT_PASSWORD' && resetStep === 'REQUEST_CODE' && (
+            <form onSubmit={handleRequestPasswordResetSubmit} className="space-y-4" noValidate>
               <h2 className="text-xl font-bold text-gray-800 mb-1">Quên mật khẩu</h2>
               <p className="text-xs text-gray-500">
                 Nhập email công việc của bạn để nhận mã khôi phục mật khẩu gồm 6 chữ số.
@@ -619,24 +735,99 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
                 />
               </div>
 
-              {resetSent && (
-                <div className="rounded-lg bg-[#e6f2ee] px-3.5 py-2.5 text-xs text-[#146c54]">
-                  Nếu tài khoản tồn tại, mã đặt lại mật khẩu đã được gửi tới {email || 'email của bạn'}.
-                </div>
-              )}
-
               <button
                 type="submit"
-                className="w-full py-2.5 px-4 rounded-lg bg-[#146c54] hover:bg-[#0f5945] text-white font-semibold text-sm transition-colors"
+                disabled={loading}
+                className="w-full py-2.5 px-4 rounded-lg bg-[#146c54] hover:bg-[#0f5945] disabled:opacity-60 text-white font-semibold text-sm transition-colors"
               >
-                Gửi mã khôi phục
+                {loading ? 'Đang gửi mã...' : 'Gửi mã khôi phục'}
               </button>
 
               <div className="text-center pt-1">
                 <button
                   type="button"
-                  onClick={() => onChangeMode('SIGN_IN')}
+                  onClick={() => switchScreenMode('SIGN_IN')}
                   className="text-xs font-medium text-[#146c54] underline"
+                >
+                  Quay lại đăng nhập
+                </button>
+              </div>
+            </form>
+          )}
+
+          {mode === 'FORGOT_PASSWORD' && resetStep === 'CONFIRM_RESET' && (
+            <form onSubmit={handleConfirmPasswordResetSubmit} className="space-y-4" noValidate>
+              <h2 className="text-xl font-bold text-gray-800 mb-1">Đặt lại mật khẩu mới</h2>
+              <p className="text-xs text-gray-500">
+                Nhập mã khôi phục 6 chữ số đã gửi tới{' '}
+                <span className="font-semibold text-gray-700">{email}</span> và mật khẩu mới.
+              </p>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1.5">
+                  Mã khôi phục (6 chữ số)
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={resetCode}
+                  onChange={(e) => setResetCode(e.target.value.replace(/\D/g, ''))}
+                  placeholder="Nhập mã 6 chữ số"
+                  className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 focus:border-[#146c54] focus:outline-none focus:ring-2 focus:ring-[#146c54]/20"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1.5">
+                  Mật khẩu mới
+                </label>
+                <input
+                  type="password"
+                  value={resetNewPassword}
+                  onChange={(e) => setResetNewPassword(e.target.value)}
+                  placeholder="Nhập mật khẩu mới"
+                  className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 focus:border-[#146c54] focus:outline-none focus:ring-2 focus:ring-[#146c54]/20"
+                />
+                {renderPasswordPolicyHint(resetNewPassword)}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1.5">
+                  Nhập lại mật khẩu mới
+                </label>
+                <input
+                  type="password"
+                  value={resetConfirmPassword}
+                  onChange={(e) => setResetConfirmPassword(e.target.value)}
+                  placeholder="Nhập lại mật khẩu mới"
+                  className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm text-gray-800 placeholder:text-gray-400 focus:border-[#146c54] focus:outline-none focus:ring-2 focus:ring-[#146c54]/20"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full py-2.5 px-4 rounded-lg bg-[#146c54] hover:bg-[#0f5945] disabled:opacity-60 text-white font-semibold text-sm transition-colors"
+              >
+                {loading ? 'Đang cập nhật...' : 'Xác nhận đặt lại mật khẩu'}
+              </button>
+
+              <div className="flex items-center justify-between text-xs pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setErrorMessage(null);
+                    setResetStep('REQUEST_CODE');
+                  }}
+                  className="text-gray-500 underline hover:text-gray-700"
+                >
+                  Đổi địa chỉ email
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchScreenMode('SIGN_IN')}
+                  className="font-medium text-[#146c54] underline"
                 >
                   Quay lại đăng nhập
                 </button>
@@ -646,38 +837,40 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
         </div>
       </main>
 
-      {/* Thanh chuyển nhanh màn hình phục vụ kiểm thử / demo các trạng thái Q1 */}
-      <footer className="border-t border-gray-200/80 bg-white/70 px-6 py-3">
-        <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-3 text-xs text-gray-500">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-semibold text-gray-600">Chuyển nhanh màn hình Q1:</span>
-            {(
-              [
-                ['SIGN_UP', '1. Đăng ký'],
-                ['CONFIRM_EMAIL', '2. Xác nhận email 6 số'],
-                ['SIGN_IN', '3. Đăng nhập'],
-                ['FORCE_CHANGE_PASSWORD', '4. Đặt mật khẩu mới (Lời mời)'],
-              ] as const
-            ).map(([m, label]) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => onChangeMode(m)}
-                className={`px-2.5 py-1 rounded-md border transition-colors ${
-                  mode === m
-                    ? 'bg-[#e6f2ee] border-[#146c54] text-[#146c54] font-semibold'
-                    : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+      {/* Thanh chuyển nhanh màn hình phục vụ kiểm thử / demo các trạng thái Q1 (Chỉ hiển thị khi VITE_AUTH_MODE=mock) */}
+      {IS_DEMO_AUTH_MODE && (
+        <footer className="border-t border-gray-200/80 bg-white/70 px-6 py-3">
+          <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-3 text-xs text-gray-500">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-gray-600">Chuyển nhanh màn hình Q1:</span>
+              {(
+                [
+                  ['SIGN_UP', '1. Đăng ký'],
+                  ['CONFIRM_EMAIL', '2. Xác nhận email 6 số'],
+                  ['SIGN_IN', '3. Đăng nhập'],
+                  ['FORCE_CHANGE_PASSWORD', '4. Đặt mật khẩu mới (Lời mời)'],
+                ] as const
+              ).map(([m, label]) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => switchScreenMode(m)}
+                  className={`px-2.5 py-1 rounded-md border transition-colors ${
+                    mode === m
+                      ? 'bg-[#e6f2ee] border-[#146c54] text-[#146c54] font-semibold'
+                      : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <span className="text-[11px] text-gray-400">
+              Tài khoản mẫu để thử đăng nhập: lan@homestay-abc.example / Password123 (Mã OTP: 481926)
+            </span>
           </div>
-          <span className="text-[11px] text-gray-400">
-            Tài khoản mẫu để thử đăng nhập: lan@homestay-abc.example / Password123 (Mã OTP: 481926)
-          </span>
-        </div>
-      </footer>
+        </footer>
+      )}
     </div>
   );
 };

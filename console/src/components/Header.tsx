@@ -1,5 +1,5 @@
 import React from 'react';
-import { ROLE_DISPLAY_LABEL } from '../services/cognitoAuth.js';
+import { IS_DEMO_AUTH_MODE, ROLE_DISPLAY_LABEL } from '../services/cognitoAuth.js';
 import type { AuthenticatedSession, AuthScreenMode, ConsoleRole } from '../types/auth.js';
 
 interface HeaderProps {
@@ -52,7 +52,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       ) : (
         <div className="flex items-center gap-4 text-sm">
-          {onSwitchRoleDemo && (
+          {IS_DEMO_AUTH_MODE && onSwitchRoleDemo && (
             <div className="hidden md:flex items-center gap-1.5 text-xs text-gray-500 bg-gray-100 px-2.5 py-1 rounded-md">
               <span>Xem thử vai trò:</span>
               {(['TENANT_ADMIN', 'DEVELOPER', 'REVIEWER'] as ConsoleRole[]).map((r) => (

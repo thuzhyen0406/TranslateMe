@@ -1,26 +1,46 @@
 /**
- * Dịch vụ Xác thực Cognito User Pool, Làm mới Token (B.13), Phân quyền Menu và Quản lý Thành viên (Q1).
+ * Dịch vụ Xác thực, Làm mới Token (B.13), Phân quyền Menu và Quản lý Thành viên cho Màn Q1.
  *
- * Hỗ trợ 2 chế độ:
- *  1. Kết nối trực tiếp Amazon Cognito IDP (`cognito-idp.<region>.amazonaws.com`) & REST API Gateway
- *     khi cấu hình `VITE_COGNITO_CLIENT_ID`.
- *  2. Chế độ giả lập Cognito chuẩn xác tại trình duyệt (Local Cognito Demo Mode) khi chạy độc lập,
- *     tái hiện đầy đủ: SignUp -> Mã 6 chữ số -> Trigger PostConfirmation tạo Tenant -> Refresh Token
- *     lấy `custom:tenant_id` & `custom:role` -> ForceChangePassword cho lời mời -> Mời thành viên.
+ * Phạm vi trong PR hiện tại:
+ *  - Chỉ cài đặt **chế độ giả lập (Local Mock Mode)** tại trình duyệt (bật khi `VITE_AUTH_MODE=mock`, mặc định),
+ *    tái hiện đầy đủ các bước nghiệp vụ của Màn Q1:
+ *    SignUp -> Mã xác nhận 6 chữ số -> Mô phỏng Trigger PostConfirmation tạo Tenant -> Làm mới JWT
+ *    chứa `custom:tenant_id` & `custom:role` -> ForceChangePassword cho lời mời -> Mời thành viên theo từng Tenant.
+ *
+ * Phần việc còn lại của Hạng mục 2.9 sẽ thực hiện ở bước nối hệ thống thật:
+ *  - Gọi trực tiếp Amazon Cognito IDP (`SignUp`, `ConfirmSignUp`, `InitiateAuth`, `RespondToAuthChallenge`,
+ *    `ForgotPassword`, `ConfirmForgotPassword`) sử dụng `VITE_AWS_REGION`, `VITE_COGNITO_USER_POOL_ID`, `VITE_COGNITO_CLIENT_ID`.
+ *  - Làm mới token thật (`REFRESH_TOKEN_AUTH`) ngay sau khi Lambda `PostConfirmation_ConfirmSignUp` tạo tenant.
+ *  - Gọi REST API `GET /console/me` và `GET/POST /console/members` qua `VITE_API_BASE_URL`.
  */
 
 import type {
   AuthenticatedSession,
   ConfirmEmailInput,
+  ConfirmForgotPasswordInput,
   ConsoleMenuItem,
   ConsoleRole,
   ForceChangePasswordInput,
-  InvitableConsoleRole,
   SignInFormInput,
   SignInOutcome,
   SignUpFormInput,
   TenantMember,
 } from '../types/auth.js';
+
+/**
+ * Cờ bật các công cụ hỗ trợ demo (`VITE_AUTH_MODE === 'mock'`).
+ * Khi chuyển sang môi trường kết nối Cognito thật (`VITE_AUTH_MODE=cognito`), toàn bộ thanh chuyển màn hình,
+ * nút đổi nhanh vai trò, mã OTP mẫu `481926` và tự tạo tài khoản demo sẽ tự động tắt.
+ */
+const envAuthMode =
+  (typeof import.meta !== 'undefined' &&
+    (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_AUTH_MODE) ??
+  (typeof process !== 'undefined' ? process.env?.VITE_AUTH_MODE : undefined) ??
+  'mock';
+
+export const IS_DEMO_AUTH_MODE = envAuthMode === 'mock';
+
+export const DEFAULT_DEMO_TENANT_ID = 't_01hxyz987654';
 
 // ============================================================================
 // 1. Chuẩn hóa Vai trò & Danh sách Menu ẩn/hiện theo `custom:role` (Bảng 1.2 & B.6)
@@ -114,12 +134,13 @@ export interface PasswordValidationResult {
   hasUppercase: boolean;
   hasLowercase: boolean;
   hasDigit: boolean;
+  missingConditions: string[];
   message?: string;
 }
 
 /**
- * Kiểm tra mật khẩu theo đúng đặc tả Cognito User Pool (Nhiệm vụ 1.11):
- * Tối thiểu 8 ký tự, có chữ hoa, chữ thường và chữ số.
+ * Kiểm tra mật khẩu theo đúng đặc tả Cognito User Pool (Nhiệm vụ 1.11 & Q1 Report 2):
+ * Tối thiểu 8 ký tự, có chữ hoa, chữ thường và chữ số; trả kèm danh sách cụ thể các điều kiện còn thiếu.
  */
 export function validatePasswordPolicy(password: string): PasswordValidationResult {
   const hasMinLength = password.length >= 8;
@@ -128,15 +149,22 @@ export function validatePasswordPolicy(password: string): PasswordValidationResu
   const hasDigit = /\d/.test(password);
   const valid = hasMinLength && hasUppercase && hasLowercase && hasDigit;
 
+  const missingConditions: string[] = [];
+  if (!hasMinLength) missingConditions.push('tối thiểu 8 ký tự');
+  if (!hasUppercase) missingConditions.push('chữ hoa (A-Z)');
+  if (!hasLowercase) missingConditions.push('chữ thường (a-z)');
+  if (!hasDigit) missingConditions.push('chữ số (0-9)');
+
   return {
     valid,
     hasMinLength,
     hasUppercase,
     hasLowercase,
     hasDigit,
+    missingConditions,
     message: valid
       ? undefined
-      : 'Mật khẩu phải có tối thiểu 8 ký tự, bao gồm chữ hoa, chữ thường và chữ số.',
+      : `Mật khẩu chưa đạt yêu cầu (còn thiếu: ${missingConditions.join(', ')}).`,
   };
 }
 
@@ -152,11 +180,6 @@ export class ConsoleAuthError extends Error {
 
 /**
  * Chuyển mã lỗi của Amazon Cognito / API sang thông báo tiếng Việt rõ ràng cho người dùng.
- * Đáp ứng đầy đủ tiêu chí nghiệm thu Hạng mục 2.9:
- *  - Email đã dùng (`UsernameExistsException`)
- *  - Mật khẩu yếu (`InvalidPasswordException`)
- *  - Mã xác nhận sai/hết hạn (`CodeMismatchException`, `ExpiredCodeException`)
- *  - Đăng nhập sai nhiều lần (`TooManyRequestsException`, `LimitExceededException`, `NotAuthorizedException`)
  */
 export function mapCognitoErrorToVietnamese(err: unknown): string {
   if (err instanceof ConsoleAuthError) {
@@ -165,14 +188,18 @@ export function mapCognitoErrorToVietnamese(err: unknown): string {
 
   const rawCode =
     err && typeof err === 'object' && ('name' in err || '__type' in err || 'code' in err)
-      ? String((err as Record<string, unknown>).code ?? (err as Record<string, unknown>).__type ?? (err as Record<string, unknown>).name)
+      ? String(
+          (err as Record<string, unknown>).code ??
+            (err as Record<string, unknown>).__type ??
+            (err as Record<string, unknown>).name,
+        )
       : '';
   const code = rawCode.includes('#') ? rawCode.split('#').pop()! : rawCode;
   const rawMessage = err instanceof Error ? err.message : String(err ?? '');
 
   switch (code) {
     case 'UsernameExistsException':
-      return 'Email này đã được đăng ký. Vui lòng đăng nhập hoặc sử dụng email công việc khác.';
+      return 'Email này đã được đăng ký. Vui lòng đăng nhập hoặc đặt lại mật khẩu nếu bạn đã quên.';
     case 'InvalidPasswordException':
       return 'Mật khẩu quá yếu: cần tối thiểu 8 ký tự, có chữ hoa, chữ thường và chữ số.';
     case 'CodeMismatchException':
@@ -258,7 +285,7 @@ export function createMockJwt(claims: DecodedJwtClaims): string {
 }
 
 // ============================================================================
-// 4. Kho dữ liệu Giả lập Cognito & Thành viên cho Màn Q1 (Khởi tạo sẵn dữ liệu mẫu khớp ảnh)
+// 4. Kho dữ liệu Giả lập Cognito & Thành viên cô lập theo từng Tenant (Mục 4 Review)
 // ============================================================================
 
 interface SimulatedCognitoUser {
@@ -283,7 +310,7 @@ const initialUsers: SimulatedCognitoUser[] = [
     fullName: 'Nguyễn Thị Lan',
     password: 'Password123',
     organizationName: 'Homestay ABC Hội An',
-    tenantId: 't_01hxyz987654',
+    tenantId: DEFAULT_DEMO_TENANT_ID,
     role: 'TENANT_ADMIN',
     confirmed: true,
     confirmationCode: '481920',
@@ -297,7 +324,7 @@ const initialUsers: SimulatedCognitoUser[] = [
     fullName: 'Trần Minh Khoa',
     password: 'Password123',
     organizationName: 'Homestay ABC Hội An',
-    tenantId: 't_01hxyz987654',
+    tenantId: DEFAULT_DEMO_TENANT_ID,
     role: 'DEVELOPER',
     confirmed: true,
     confirmationCode: '111111',
@@ -311,12 +338,12 @@ const initialUsers: SimulatedCognitoUser[] = [
     fullName: 'Lê Quang Minh',
     password: 'TempPassword123',
     organizationName: 'Homestay ABC Hội An',
-    tenantId: 't_01hxyz987654',
+    tenantId: DEFAULT_DEMO_TENANT_ID,
     role: 'REVIEWER',
     confirmed: true,
     confirmationCode: '222222',
     codeExpiresAt: Date.now() + 15 * 60_000,
-    forceChangePassword: true, // Chờ đăng nhập lần đầu (FORCE_CHANGE_PASSWORD)
+    forceChangePassword: true,
     failedLoginAttempts: 0,
   },
 ];
@@ -324,18 +351,21 @@ const initialUsers: SimulatedCognitoUser[] = [
 const initialMembers: TenantMember[] = [
   {
     id: 'sub-lan-admin-01',
+    tenantId: DEFAULT_DEMO_TENANT_ID,
     email: 'lan@homestay-abc.example',
     role: 'TENANT_ADMIN',
     status: 'ACTIVE',
   },
   {
     id: 'sub-khoa-dev-02',
+    tenantId: DEFAULT_DEMO_TENANT_ID,
     email: 'khoa@homestay-abc.example',
     role: 'DEVELOPER',
     status: 'ACTIVE',
   },
   {
     id: 'sub-minh-rev-03',
+    tenantId: DEFAULT_DEMO_TENANT_ID,
     email: 'minh@homestay-abc.example',
     role: 'REVIEWER',
     status: 'PENDING_FIRST_LOGIN',
@@ -353,7 +383,7 @@ export function resetSimulatedAuthStore(): void {
   for (const u of initialUsers) {
     simulatedUsers.set(u.email.toLowerCase(), { ...u });
   }
-  simulatedMembers = initialUsers.map((u, idx) => ({ ...initialMembers[idx] }));
+  simulatedMembers = initialMembers.map((m) => ({ ...m }));
 }
 
 function buildSessionFromUser(user: SimulatedCognitoUser): AuthenticatedSession {
@@ -381,12 +411,11 @@ function buildSessionFromUser(user: SimulatedCognitoUser): AuthenticatedSession 
 }
 
 // ============================================================================
-// 5. Các hàm Nghiệp vụ Xác thực (SignUp, ConfirmSignUp + RefreshToken, SignIn, ForceChangePassword)
+// 5. Các hàm Nghiệp vụ Xác thực (SignUp, ConfirmSignUp + RefreshToken, SignIn, ForceChangePassword, ForgotPassword)
 // ============================================================================
 
 /**
- * Đăng ký tài khoản mới trên Cognito User Pool (Hình 1.2 / `intro.jpg`).
- * Truyền `organization_name` qua cả `ClientMetadata` để trigger PostConfirmation tạo Tenant.
+ * Đăng ký tài khoản mới (Hình 1.2 / `intro.jpg`).
  */
 export async function registerAccount(input: SignUpFormInput): Promise<{
   email: string;
@@ -412,11 +441,17 @@ export async function registerAccount(input: SignUpFormInput): Promise<{
 
   const pwdCheck = validatePasswordPolicy(input.password);
   if (!pwdCheck.valid) {
-    throw new ConsoleAuthError('InvalidPasswordException', mapCognitoErrorToVietnamese({ code: 'InvalidPasswordException' }));
+    throw new ConsoleAuthError(
+      'InvalidPasswordException',
+      pwdCheck.message ?? mapCognitoErrorToVietnamese({ code: 'InvalidPasswordException' }),
+    );
   }
 
   if (simulatedUsers.has(email)) {
-    throw new ConsoleAuthError('UsernameExistsException', mapCognitoErrorToVietnamese({ code: 'UsernameExistsException' }));
+    throw new ConsoleAuthError(
+      'UsernameExistsException',
+      mapCognitoErrorToVietnamese({ code: 'UsernameExistsException' }),
+    );
   }
 
   const demoCode = '481926';
@@ -446,13 +481,6 @@ export async function registerAccount(input: SignUpFormInput): Promise<{
 
 /**
  * Xác nhận email bằng mã 6 chữ số (Hình 1.3 / `Xác nhận email.jpg`) & Làm mới Token (Mục B.13).
- *
- * Quy trình chuẩn theo B.13:
- *  1. Gọi `ConfirmSignUp` với mã 6 chữ số.
- *  2. Cognito kích hoạt Lambda `PostConfirmation_ConfirmSignUp`: tạo bản ghi `CONFIG` + `MEMBER`
- *     và gọi `AdminUpdateUserAttributes` gán `custom:tenant_id`, `custom:role = TENANT_ADMIN`.
- *  3. Client thực hiện đăng nhập và **bắt buộc gọi `refreshSession`** để lấy bộ JWT mới
- *     có chứa claim `custom:tenant_id` và `custom:role`, sau đó gọi `GET /console/me`.
  */
 export async function confirmEmailAndRefreshSession(
   input: ConfirmEmailInput,
@@ -464,14 +492,22 @@ export async function confirmEmailAndRefreshSession(
     throw new ConsoleAuthError('CodeMismatchException', 'Vui lòng nhập đủ 6 chữ số của mã xác nhận.');
   }
 
-  // Mã đặc biệt "000000" dùng để kiểm thử trạng thái mã hết hạn (ExpiredCodeException)
   if (code === '000000') {
-    throw new ConsoleAuthError('ExpiredCodeException', mapCognitoErrorToVietnamese({ code: 'ExpiredCodeException' }));
+    throw new ConsoleAuthError(
+      'ExpiredCodeException',
+      mapCognitoErrorToVietnamese({ code: 'ExpiredCodeException' }),
+    );
   }
 
   let user = simulatedUsers.get(email);
   if (!user) {
-    // Cho phép xác nhận trực tiếp cả khi người dùng mở thẳng màn hình Xác nhận email để demo
+    if (!IS_DEMO_AUTH_MODE) {
+      throw new ConsoleAuthError(
+        'UserNotFoundException',
+        'Không tìm thấy tài khoản chờ xác nhận với địa chỉ email này.',
+      );
+    }
+    // Chế độ demo (`IS_DEMO_AUTH_MODE`): cho phép mở thẳng màn Xác nhận email để thử nghiệm
     user = {
       sub: `sub-${Math.random().toString(36).slice(2, 10)}`,
       email,
@@ -490,12 +526,18 @@ export async function confirmEmailAndRefreshSession(
   }
 
   if (Date.now() > user.codeExpiresAt) {
-    throw new ConsoleAuthError('ExpiredCodeException', mapCognitoErrorToVietnamese({ code: 'ExpiredCodeException' }));
+    throw new ConsoleAuthError(
+      'ExpiredCodeException',
+      mapCognitoErrorToVietnamese({ code: 'ExpiredCodeException' }),
+    );
   }
 
-  // Chấp nhận mã đúng của user hoặc mã demo trên thiết kế "481926"
-  if (code !== user.confirmationCode && code !== '481926') {
-    throw new ConsoleAuthError('CodeMismatchException', mapCognitoErrorToVietnamese({ code: 'CodeMismatchException' }));
+  const isCodeValid = code === user.confirmationCode || (IS_DEMO_AUTH_MODE && code === '481926');
+  if (!isCodeValid) {
+    throw new ConsoleAuthError(
+      'CodeMismatchException',
+      mapCognitoErrorToVietnamese({ code: 'CodeMismatchException' }),
+    );
   }
 
   // Mô phỏng PostConfirmation_ConfirmSignUp gán custom:tenant_id và custom:role
@@ -505,17 +547,21 @@ export async function confirmEmailAndRefreshSession(
   }
   user.role = 'TENANT_ADMIN';
 
-  // Đảm bảo người dùng có mặt trong danh sách MEMBER của tổ chức
-  if (!simulatedMembers.some((m) => m.email.toLowerCase() === email)) {
+  // Đảm bảo người dùng có mặt trong danh sách MEMBER của đúng tenantId vừa tạo
+  if (
+    !simulatedMembers.some(
+      (m) => m.tenantId === user.tenantId && m.email.toLowerCase() === email,
+    )
+  ) {
     simulatedMembers.unshift({
       id: user.sub,
+      tenantId: user.tenantId,
       email: user.email,
       role: 'TENANT_ADMIN',
       status: 'ACTIVE',
     });
   }
 
-  // Bắt buộc làm mới token (B.13) để JWT chứa custom:tenant_id và custom:role
   const refreshedSession = await refreshTokenForTenantClaims(buildSessionFromUser(user));
   return refreshedSession;
 }
@@ -527,7 +573,7 @@ export async function refreshTokenForTenantClaims(
   session: AuthenticatedSession,
 ): Promise<AuthenticatedSession> {
   const claims = decodeJwtClaims(session.idToken);
-  const tenantId = claims?.['custom:tenant_id'] || session.tenantId || 't_01hxyz987654';
+  const tenantId = claims?.['custom:tenant_id'] || session.tenantId || DEFAULT_DEMO_TENANT_ID;
   const role = normalizeRole(claims?.['custom:role'] || session.role);
 
   const refreshedJwt = createMockJwt({
@@ -562,9 +608,87 @@ export async function resendConfirmationCode(email: string): Promise<{ expiresIn
 }
 
 /**
+ * Bước 1 Quên mật khẩu: Yêu cầu gửi mã khôi phục mật khẩu 6 chữ số tới email.
+ */
+export async function requestPasswordResetCode(emailInput: string): Promise<{
+  email: string;
+  expiresInSeconds: number;
+  demoResetCode: string;
+}> {
+  const email = emailInput.trim().toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new ConsoleAuthError('ValidationError', 'Vui lòng nhập địa chỉ email công việc hợp lệ.');
+  }
+
+  const demoResetCode = '481926';
+  const user = simulatedUsers.get(email);
+  if (user) {
+    user.confirmationCode = demoResetCode;
+    user.codeExpiresAt = Date.now() + 15 * 60_000;
+  }
+
+  return {
+    email,
+    expiresInSeconds: 60,
+    demoResetCode,
+  };
+}
+
+/**
+ * Bước 2 Quên mật khẩu: Xác nhận mã khôi phục 6 chữ số và đặt mật khẩu mới.
+ */
+export async function confirmForgotPasswordReset(
+  input: ConfirmForgotPasswordInput,
+): Promise<void> {
+  const email = input.email.trim().toLowerCase();
+  const code = input.code.trim();
+
+  if (!/^\d{6}$/.test(code)) {
+    throw new ConsoleAuthError('CodeMismatchException', 'Vui lòng nhập đủ 6 chữ số của mã khôi phục.');
+  }
+
+  if (code === '000000') {
+    throw new ConsoleAuthError(
+      'ExpiredCodeException',
+      mapCognitoErrorToVietnamese({ code: 'ExpiredCodeException' }),
+    );
+  }
+
+  const pwdCheck = validatePasswordPolicy(input.newPassword);
+  if (!pwdCheck.valid) {
+    throw new ConsoleAuthError(
+      'InvalidPasswordException',
+      pwdCheck.message ?? mapCognitoErrorToVietnamese({ code: 'InvalidPasswordException' }),
+    );
+  }
+
+  if (input.newPassword !== input.confirmNewPassword) {
+    throw new ConsoleAuthError('ValidationError', 'Mật khẩu nhập lại không khớp với mật khẩu mới.');
+  }
+
+  const user = simulatedUsers.get(email);
+  if (!user) {
+    throw new ConsoleAuthError(
+      'CodeMismatchException',
+      mapCognitoErrorToVietnamese({ code: 'CodeMismatchException' }),
+    );
+  }
+
+  const isCodeValid = code === user.confirmationCode || (IS_DEMO_AUTH_MODE && code === '481926');
+  if (!isCodeValid) {
+    throw new ConsoleAuthError(
+      'CodeMismatchException',
+      mapCognitoErrorToVietnamese({ code: 'CodeMismatchException' }),
+    );
+  }
+
+  user.password = input.newPassword;
+  user.failedLoginAttempts = 0;
+  user.confirmed = true;
+}
+
+/**
  * Đăng nhập vào Web Console (Hình 1.4 / `log-in.jpg`).
- *  - Nếu tài khoản ở trạng thái `FORCE_CHANGE_PASSWORD` (thành viên được mời lần đầu) -> trả về `NEW_PASSWORD_REQUIRED`.
- *  - Nếu đăng nhập sai từ 5 lần trở lên -> trả lỗi khóa tạm thời (`TooManyFailedAttemptsException`).
  */
 export async function signInWithEmail(input: SignInFormInput): Promise<SignInOutcome> {
   const email = input.email.trim().toLowerCase();
@@ -576,8 +700,10 @@ export async function signInWithEmail(input: SignInFormInput): Promise<SignInOut
 
   const user = simulatedUsers.get(email);
   if (!user) {
-    // Bật PreventUserExistenceErrors: trả cùng thông báo như sai mật khẩu
-    throw new ConsoleAuthError('NotAuthorizedException', mapCognitoErrorToVietnamese({ code: 'NotAuthorizedException' }));
+    throw new ConsoleAuthError(
+      'NotAuthorizedException',
+      mapCognitoErrorToVietnamese({ code: 'NotAuthorizedException' }),
+    );
   }
 
   if (user.failedLoginAttempts >= 5) {
@@ -595,7 +721,10 @@ export async function signInWithEmail(input: SignInFormInput): Promise<SignInOut
         mapCognitoErrorToVietnamese({ code: 'TooManyFailedAttemptsException' }),
       );
     }
-    throw new ConsoleAuthError('NotAuthorizedException', mapCognitoErrorToVietnamese({ code: 'NotAuthorizedException' }));
+    throw new ConsoleAuthError(
+      'NotAuthorizedException',
+      mapCognitoErrorToVietnamese({ code: 'NotAuthorizedException' }),
+    );
   }
 
   user.failedLoginAttempts = 0;
@@ -627,7 +756,6 @@ export async function signInWithEmail(input: SignInFormInput): Promise<SignInOut
 
 /**
  * Hoàn tất đặt mật khẩu mới ở lần đăng nhập đầu tiên khi vào bằng lời mời (Hình 1.6 / `Đặt lại mk.jpg`).
- * Sau khi đổi mật khẩu thành công, cập nhật trạng thái bản ghi `MEMBER` từ "Chờ đăng nhập lần đầu" sang "Hoạt động".
  */
 export async function completeInvitedMemberPassword(
   input: ForceChangePasswordInput,
@@ -639,7 +767,10 @@ export async function completeInvitedMemberPassword(
 
   const pwdCheck = validatePasswordPolicy(input.newPassword);
   if (!pwdCheck.valid) {
-    throw new ConsoleAuthError('InvalidPasswordException', mapCognitoErrorToVietnamese({ code: 'InvalidPasswordException' }));
+    throw new ConsoleAuthError(
+      'InvalidPasswordException',
+      pwdCheck.message ?? mapCognitoErrorToVietnamese({ code: 'InvalidPasswordException' }),
+    );
   }
 
   if (input.newPassword !== input.confirmNewPassword) {
@@ -648,13 +779,16 @@ export async function completeInvitedMemberPassword(
 
   let user = simulatedUsers.get(email);
   if (!user) {
+    if (!IS_DEMO_AUTH_MODE) {
+      throw new ConsoleAuthError('NotAuthorizedException', 'Email hoặc mật khẩu tạm thời không chính xác.');
+    }
     user = {
       sub: `sub-invited-${Math.random().toString(36).slice(2, 8)}`,
       email: email || 'minh@homestay-abc.example',
       fullName: email.split('@')[0] || 'Thành viên mới',
       password: input.temporaryPassword,
       organizationName: input.organizationName || 'Homestay ABC Hội An',
-      tenantId: 't_01hxyz987654',
+      tenantId: DEFAULT_DEMO_TENANT_ID,
       role: input.invitedRole || 'REVIEWER',
       confirmed: true,
       confirmationCode: '000000',
@@ -670,13 +804,15 @@ export async function completeInvitedMemberPassword(
   user.password = input.newPassword;
   user.forceChangePassword = false;
 
-  // Chuyển trạng thái MEMBER từ "Chờ đăng nhập lần đầu" -> "Hoạt động" (Hình 2.12)
-  const memberRecord = simulatedMembers.find((m) => m.email.toLowerCase() === user.email.toLowerCase());
+  const memberRecord = simulatedMembers.find(
+    (m) => m.tenantId === user.tenantId && m.email.toLowerCase() === user.email.toLowerCase(),
+  );
   if (memberRecord) {
     memberRecord.status = 'ACTIVE';
   } else {
     simulatedMembers.push({
       id: user.sub,
+      tenantId: user.tenantId,
       email: user.email,
       role: user.role,
       status: 'ACTIVE',
@@ -687,22 +823,30 @@ export async function completeInvitedMemberPassword(
 }
 
 // ============================================================================
-// 6. Quản lý danh sách Thành viên & Mời thành viên (Hình 1.5 / `Mời thành viên.jpg`)
+// 6. Quản lý danh sách Thành viên & Mời thành viên cô lập theo Tenant (Hình 1.5 / `Mời thành viên.jpg`)
 // ============================================================================
 
-export async function listTenantMembers(): Promise<TenantMember[]> {
-  return simulatedMembers.map((m) => ({ ...m }));
+/**
+ * Lấy danh sách thành viên thuộc đúng `tenantId` của tổ chức hiện tại.
+ */
+export async function listTenantMembers(
+  tenantId: string = DEFAULT_DEMO_TENANT_ID,
+): Promise<TenantMember[]> {
+  return simulatedMembers
+    .filter((m) => m.tenantId === tenantId)
+    .map((m) => ({ ...m }));
 }
 
 /**
  * Mời thành viên mới vào tổ chức (`POST /console/members/invite`).
- * Chỉ cho phép vai trò `DEVELOPER` hoặc `REVIEWER` (không cho phép tạo `TENANT_ADMIN` hay `PLATFORM_ADMIN`).
+ * Chỉ cho phép vai trò `DEVELOPER` hoặc `REVIEWER`, gắn đúng `tenantId` của người mời.
  */
 export async function inviteTenantMember(
   actorRole: ConsoleRole,
   emailInput: string,
   invitedRole: string,
   organizationName = 'Homestay ABC Hội An',
+  tenantId: string = DEFAULT_DEMO_TENANT_ID,
 ): Promise<{ member: TenantMember; temporaryPassword: string }> {
   if (actorRole !== 'TENANT_ADMIN') {
     throw new ConsoleAuthError('PERMISSION_DENIED', 'Chỉ Tenant Admin mới có quyền mời thành viên.');
@@ -720,8 +864,14 @@ export async function inviteTenantMember(
     );
   }
 
-  if (simulatedMembers.some((m) => m.email.toLowerCase() === email)) {
-    throw new ConsoleAuthError('UsernameExistsException', 'Thành viên có email này đã tồn tại trong tổ chức.');
+  if (
+    simulatedMembers.some((m) => m.tenantId === tenantId && m.email.toLowerCase() === email) ||
+    simulatedUsers.has(email)
+  ) {
+    throw new ConsoleAuthError(
+      'UsernameExistsException',
+      'Thành viên có email này đã tồn tại trên hệ thống hoặc trong tổ chức.',
+    );
   }
 
   const temporaryPassword = 'TempPassword123';
@@ -729,6 +879,7 @@ export async function inviteTenantMember(
 
   const newMember: TenantMember = {
     id: sub,
+    tenantId,
     email,
     role: invitedRole,
     status: 'PENDING_FIRST_LOGIN',
@@ -743,7 +894,7 @@ export async function inviteTenantMember(
     fullName: email.split('@')[0],
     password: temporaryPassword,
     organizationName,
-    tenantId: 't_01hxyz987654',
+    tenantId,
     role: invitedRole,
     confirmed: true,
     confirmationCode: '000000',

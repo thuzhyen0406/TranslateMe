@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   inviteTenantMember,
+  IS_DEMO_AUTH_MODE,
   listTenantMembers,
   mapCognitoErrorToVietnamese,
   ROLE_DISPLAY_LABEL,
@@ -17,7 +18,7 @@ interface MembersPageProps {
 
 export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
   const [members, setMembers] = useState<TenantMember[]>([]);
-  const [isModalOpen, setIsModalOpen] = useState(true);
+  const [isModalOpen, setIsModalOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<InvitableConsoleRole>('REVIEWER');
   const [modalError, setModalError] = useState<string | null>(null);
@@ -25,8 +26,8 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    void listTenantMembers().then(setMembers);
-  }, []);
+    void listTenantMembers(session.tenantId).then(setMembers);
+  }, [session.tenantId]);
 
   const handleInviteSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -39,13 +40,17 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
         inviteEmail,
         inviteRole,
         session.organizationName,
+        session.tenantId,
       );
-      const updated = await listTenantMembers();
+      const updated = await listTenantMembers(session.tenantId);
       setMembers(updated);
       setIsModalOpen(false);
       setInviteEmail('');
+      const demoPwdHint = IS_DEMO_AUTH_MODE
+        ? ` (Mật khẩu tạm thời demo: ${res.temporaryPassword})`
+        : '';
       setSuccessBanner(
-        `Đã gửi email mời tới ${res.member.email} với vai trò ${ROLE_DISPLAY_LABEL[res.member.role]} (Mật khẩu tạm thời: ${res.temporaryPassword}).`,
+        `Đã gửi email mời tới ${res.member.email} với vai trò ${ROLE_DISPLAY_LABEL[res.member.role]}${demoPwdHint}.`,
       );
     } catch (err) {
       setModalError(mapCognitoErrorToVietnamese(err));

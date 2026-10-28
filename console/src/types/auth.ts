@@ -36,6 +36,7 @@ export type MemberStatus = 'ACTIVE' | 'PENDING_FIRST_LOGIN' | 'DISABLED';
 
 export interface TenantMember {
   id: string;
+  tenantId: string;
   email: string;
   role: ConsoleRole;
   status: MemberStatus;
@@ -85,6 +86,13 @@ export interface ForceChangePasswordInput {
   challengeSession?: string;
   organizationName?: string;
   invitedRole?: InvitableConsoleRole;
+}
+
+export interface ConfirmForgotPasswordInput {
+  email: string;
+  code: string;
+  newPassword: string;
+  confirmNewPassword: string;
 }
 
 export type SignInOutcome =
