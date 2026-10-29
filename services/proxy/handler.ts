@@ -1,7 +1,7 @@
 /**
  * Lambda proxy F2 (Nhiệm vụ 1.6, 2.4, 2.5 – TV2). Thứ tự theo B.10:
  *   resolve website -> safe_fetch -> extract (tách câu {n}) -> hash -> getTM -> reserveChars
- *   -> translateSentences (B.9) -> putMachineTM -> rebuild -> settleUsage -> (worker) -> trả về.
+ *   -> translateSentences (B.9) -> putMachineTM + ghi SEG -> rebuild -> settleUsage -> (worker) -> trả về.
  * Gọi qua Lambda function URL (AWS_IAM) phía sau CloudFront + OAC; đường dẫn luôn có dạng /{slug}/{lang}/{path}.
  *
  * Phản hồi (B.10):
@@ -14,11 +14,13 @@
  * Đọc thuật ngữ (getGlossaryState) lỗi -> xử lý như lỗi tra TM: bỏ qua TM (không tra, không ghi, không gọi worker),
  * dịch không kèm terminology và cache ngắn (s-maxage=60) để sớm dịch lại khi thuật ngữ đọc được.
  * Bản HUMAN lỗi thời theo thuật ngữ vẫn dùng, và được ghi cờ "Cần xem lại" (markHumanNeedsReview).
+ * Bước 7 (3.4): ghi chỉ mục câu–trang SEG cho mọi câu của trang, <path> gồm slug (QC-5). Ghi SEG lỗi không làm
+ * hỏng trang nhưng trả cache ngắn (s-maxage=60): thiếu SEG thì xóa cache chọn lọc (F5) có thể sót trang này.
  *
  * Bản tạm (B.14): hash câu và countChars chờ thư viện 1.8; getGlossaryState chờ 2.8; db chờ batchGet/update của 2.2;
- * reserveChars/settleUsage chờ 2.7 (quotaStub). Chưa làm: ghi SEG (3.4).
+ * reserveChars/settleUsage chờ 2.7 (quotaStub); db của SEG chờ batchWrite/query GSI của 2.2.
  *
- * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), PROXY_SITES_JSON, TABLE_NAME (bật TM),
+ * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), PROXY_SITES_JSON, TABLE_NAME (bật TM và SEG),
  * TRANSLATE_BUDGET_MS (20000), TRANSLATE_CONCURRENCY (4), WORKER_FUNCTION_NAME (bật hoàn tất nền),
  * WORKER_PAYLOAD_BUCKET (S3 cho danh sách câu lớn), WORKER_BUDGET_MS (240000), USE_FETCH_STUB=1.
  */
@@ -31,6 +33,7 @@ import { extract } from '../../libs/common/extract.js';
 import { DEFAULT_PUBLIC_BASE_URL, rebuildDetailed, type BaseMode } from '../../libs/common/rebuild.js';
 import { safe_fetch as realSafeFetch, type SafeFetchCompatResult } from '../../libs/common/safeFetch.js';
 import { safe_fetch as stubSafeFetch } from '../../libs/common/safeFetch.stub.js';
+import { createDynamoSegDb, createSEG, segPath } from '../../libs/common/seg.js';
 import { createDynamoTmDb, createTM, type GlossaryState, type SentenceWithHash, type TmHit } from '../../libs/common/tm.js';
 import {
   DEFAULT_TRANSLATE_CONCURRENCY,
@@ -94,6 +97,8 @@ export interface ProxyDeps {
   logger?: ProxyLogger;
   /** Translation Memory (2.4). Không truyền = không dùng TM (như bản tuần 1). */
   tm?: ReturnType<typeof createTM>;
+  /** Chỉ mục câu–trang SEG (3.4). Không truyền = không ghi SEG. */
+  seg?: ReturnType<typeof createSEG>;
   getGlossaryState?: (ctx: Ctx) => Promise<GlossaryState>;
   hashSentence?: (text: string) => Sha256Hex;
   countChars?: (text: string) => number;
@@ -310,6 +315,19 @@ export function createProxyHandler(deps: ProxyDeps) {
         for (const t of tr.translated) translations[t.id] = t.tgt;
       }
 
+      // Bước 7: ghi chỉ mục câu–trang SEG cho mọi câu của trang (kể cả câu chưa dịch), song song với ghi TM.
+      // Không phụ thuộc thuật ngữ hay hạn mức: câu đã nằm trên trang thì trang phải bị xóa cache khi câu đổi.
+      const segDone = (async () => {
+        if (!deps.seg || !items.length) return;
+        try {
+          const rep = await deps.seg.writePageSegments(ctx, tgt, segPath(site.slug, parsed.rest), items.map((it) => it.hash));
+          extra.segWritten = rep.written;
+          if (rep.failed) Object.assign(extra, { segWriteFailed: rep.failed, segWriteErrors: rep.errors.slice(0, 3) });
+        } catch (err) {
+          extra.segWriteError = err instanceof Error ? err.name : 'Unknown';
+        }
+      })();
+
       // Ghi bản MACHINE mới vào TM (không đè HUMAN) và ghi cờ "Cần xem lại" cho HUMAN lỗi thời, song song
       if (deps.tm && glossary) {
         const tm = deps.tm;
@@ -351,6 +369,7 @@ export function createProxyHandler(deps: ProxyDeps) {
         };
         await Promise.all([writeMachine(), flagHuman()]);
       }
+      await segDone;
 
       // Bước 6: ráp HTML
       const rb = rebuildDetailed(ex.skeletonHtml, translations, ex.placeholders, {
@@ -419,10 +438,12 @@ export function createProxyHandler(deps: ProxyDeps) {
 
       // Bước 8: trả về CloudFront
       const partial = quotaExceeded ? 'quota' : rb.stats.keptSource > 0 ? '1' : null;
-      // Dịch không kèm thuật ngữ (đọc thuật ngữ lỗi): cache ngắn như trang dịch dở
+      // Cache ngắn như trang dịch dở khi: dịch không kèm thuật ngữ (đọc thuật ngữ lỗi), hoặc ghi SEG lỗi
+      // (thiếu SEG thì xóa cache chọn lọc có thể sót trang này, nên không để CloudFront giữ lâu).
+      const segIncomplete = extra.segWriteFailed !== undefined || extra.segWriteError !== undefined;
       const sMaxAge = quotaExceeded
         ? QUOTA_PARTIAL_CACHE_SECONDS
-        : partial || extra.glossaryError !== undefined
+        : partial || extra.glossaryError !== undefined || segIncomplete
           ? PARTIAL_CACHE_SECONDS
           : site.cacheSeconds ?? DEFAULT_CACHE_SECONDS;
       const headers: Record<string, string> = {
@@ -483,14 +504,15 @@ function sharedFromEnv(env: NodeJS.ProcessEnv, logger: ProxyLogger) {
     logger.error({ action: 'INVALID_PROXY_SITES_JSON', message: String(err).slice(0, 200) });
   }
   const tableName = env.TABLE_NAME?.trim();
-  const tm = tableName
-    ? createTM({ db: createDynamoTmDb(DynamoDBDocumentClient.from(new DynamoDBClient({})), tableName), writer: 'proxy' })
-    : undefined;
+  const doc = tableName ? DynamoDBDocumentClient.from(new DynamoDBClient({})) : undefined;
+  const tm = doc && tableName ? createTM({ db: createDynamoTmDb(doc, tableName), writer: 'proxy' }) : undefined;
+  const seg = doc && tableName ? createSEG({ db: createDynamoSegDb(doc, tableName) }) : undefined;
   if (!tm) logger.error({ action: 'TM_DISABLED', reason: 'MISSING_TABLE_NAME' });
   const bucket = env.WORKER_PAYLOAD_BUCKET?.trim();
   return {
     resolveSite: cachedSiteResolver(staticSiteResolver(sites)),
     tm,
+    seg,
     store: bucket ? s3PayloadStore(new S3Client({}), bucket) : undefined,
     quota: quotaStub((e) => logger.info(e)),
     concurrency: positive(env.TRANSLATE_CONCURRENCY, DEFAULT_CONCURRENCY),
@@ -538,6 +560,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env, logger: ProxyL
     concurrency: shared.concurrency,
     logger,
     tm: shared.tm,
+    seg: shared.seg,
     quota: shared.quota,
     invokeWorker: workerName ? lambdaWorkerInvoker(new LambdaClient({}), workerName) : undefined,
     workerStore: shared.store,
