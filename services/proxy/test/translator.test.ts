@@ -26,6 +26,16 @@ describe('translateSentences', () => {
     assert.equal(r.timedOut, false);
   });
 
+  it('hỗ trợ ba cặp vi→en, vi→ko và vi→ja qua cùng hàm dịch', async () => {
+    for (const targetLang of ['en', 'ko', 'ja']) {
+      const client = fakeTranslate();
+      const result = await translateSentences(client, ['Xin chào.'], { ...opts, targetLang });
+      assert.equal(result.translations[0], 'XIN CHÀO.');
+      assert.equal(client.calls[0].SourceLanguageCode, 'vi');
+      assert.equal(client.calls[0].TargetLanguageCode, targetLang);
+    }
+  });
+
   it('câu trùng chỉ gửi một lần; đếm ký tự gửi đi theo code point', async () => {
     const client = fakeTranslate();
     const r = await translateSentences(client, ['Đặt phòng', 'Liên hệ', 'Đặt phòng'], opts);

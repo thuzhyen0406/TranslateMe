@@ -12,8 +12,10 @@
     "test": "tsc -p tsconfig.json && node --test dist/services/api/auth/test/auth.test.js dist/services/api/sites/test/siteManager.test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-comprehend": "^3.650.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.650.0",
     "@aws-sdk/client-dynamodb": "^3.650.0",
+    "@aws-sdk/client-translate": "^3.650.0",
     "@aws-sdk/lib-dynamodb": "^3.1156.0"
   },
   "devDependencies": {

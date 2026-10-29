@@ -229,7 +229,7 @@ Resources:
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
       ResponseTemplates:
-        application/json: '{"code":"UNAUTHORIZED","request_id":"$context.requestId"}'
+        application/json: '{"request_id":"$context.requestId","error":{"code":"UNAUTHORIZED","message":"API key không hợp lệ hoặc không được cung cấp."}}'
 
   InvalidApiKeyGatewayResponse:
     Type: AWS::ApiGateway::GatewayResponse
@@ -240,7 +240,18 @@ Resources:
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
       ResponseTemplates:
-        application/json: '{"code":"UNAUTHORIZED","request_id":"$context.requestId"}'
+        application/json: '{"request_id":"$context.requestId","error":{"code":"UNAUTHORIZED","message":"API key không hợp lệ hoặc không được cung cấp."}}'
+
+  AccessDeniedGatewayResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: ACCESS_DENIED
+      StatusCode: '403'
+      ResponseParameters:
+        gatewayresponse.header.Content-Type: "'application/json'"
+      ResponseTemplates:
+        application/json: '{"request_id":"$context.requestId","error":{"code":"FORBIDDEN","message":"Yêu cầu bị từ chối."}}'
 
   ThrottledGatewayResponse:
     Type: AWS::ApiGateway::GatewayResponse
@@ -251,7 +262,7 @@ Resources:
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
       ResponseTemplates:
-        application/json: '{"code":"RATE_LIMITED","request_id":"$context.requestId"}'
+        application/json: '{"request_id":"$context.requestId","error":{"code":"RATE_LIMITED","message":"Vượt tốc độ yêu cầu của gói API."}}'
 
   QuotaExceededGatewayResponse:
     Type: AWS::ApiGateway::GatewayResponse
@@ -262,7 +273,27 @@ Resources:
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
       ResponseTemplates:
-        application/json: '{"code":"REQUEST_QUOTA_EXCEEDED","request_id":"$context.requestId"}'
+        application/json: '{"request_id":"$context.requestId","error":{"code":"REQUEST_QUOTA_EXCEEDED","message":"Hết hạn ngạch số yêu cầu của gói API trong kỳ."}}'
+
+  Default4xxGatewayResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: DEFAULT_4XX
+      ResponseParameters:
+        gatewayresponse.header.Content-Type: "'application/json'"
+      ResponseTemplates:
+        application/json: '{"request_id":"$context.requestId","error":{"code":"INVALID_REQUEST","message":"Yêu cầu không hợp lệ."}}'
+
+  Default5xxGatewayResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: DEFAULT_5XX
+      ResponseParameters:
+        gatewayresponse.header.Content-Type: "'application/json'"
+      ResponseTemplates:
+        application/json: '{"request_id":"$context.requestId","error":{"code":"INTERNAL_ERROR","message":"Lỗi tạm thời phía hệ thống."}}'
 
 Outputs:
   ApiId:

@@ -18,6 +18,7 @@
   "include": [
     "auth/**/*.ts",
     "sites/**/*.ts",
+    "translate/**/*.ts",
     "../../libs/common/roles.ts"
   ],
   "exclude": ["dist", "node_modules"]
