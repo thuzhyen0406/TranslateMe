@@ -1,9 +1,10 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { ComprehendClient, DetectDominantLanguageCommand } from '@aws-sdk/client-comprehend';
 import { TranslateClient } from '@aws-sdk/client-translate';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { segmentBlock } from '../../../libs/common/segmenter.js';
+import { normalize_hash } from '../../../libs/common/text-utils.js';
 import { CharacterQuotaExceededError, UsageService, type UsageReservation } from '../../../libs/common/usage/usage.js';
 import { translateSentences, type TranslateClientLike } from '../../proxy/translator.js';
 
@@ -42,8 +43,7 @@ export function splitPreservingWhitespace(text: string): Piece[] {
 
 /** Tạo khóa TM dùng chung: chuẩn hóa NFC, gộp khoảng trắng và băm SHA-256. */
 export function translationMemoryKey(tenantId: string, sourceLang: string, targetLang: string, sentence: string) {
-  const normalized = sentence.normalize('NFC').replace(/\s+/gu, ' ').trim();
-  const hash = createHash('sha256').update(normalized, 'utf8').digest('hex');
+  const { hash } = normalize_hash(sentence);
   return { PK: `TENANT#${tenantId}#TM#${sourceLang}#${targetLang}#${hash.slice(0, 2)}`, SK: `HASH#${hash}` };
 }
 
@@ -87,7 +87,10 @@ async function readMemory(deps: RealtimeDeps, keys: Array<{ PK: string; SK: stri
     const batch = keys.slice(i, i + 100);
     let pending: Record<string, any> | undefined = { [deps.tableName]: { Keys: batch } };
     for (let attempt = 0; pending && attempt < 5; attempt++) {
-      const response = await deps.ddb.send(new BatchGetCommand({ RequestItems: pending }));
+      const response = await deps.ddb.send(new BatchGetCommand({ RequestItems: pending })) as {
+        Responses?: Record<string, Array<Record<string, any>>>;
+        UnprocessedKeys?: Record<string, any>;
+      };
       for (const row of response.Responses?.[deps.tableName] ?? []) {
         const key = `${row.PK}|${row.SK}`;
         const translation = row.tgt ?? row.translation;
@@ -189,7 +192,7 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
         else {
           const translation = missIndex.get(uniqueSentences[i])!;
           translations.set(keyString(key), translation);
-          if (useTerminology) writes.push({ ...key, source: uniqueSentences[i].normalize('NFC'), translation, label: 'MACHINE', glossaryVersion: Number(config.Item.glossaryVersion ?? 0), updatedAt: date.toISOString() });
+          if (useTerminology) writes.push({ ...key, source: normalize_hash(uniqueSentences[i]).normalizedText, translation, label: 'MACHINE', glossaryVersion: Number(config.Item.glossaryVersion ?? 0), updatedAt: date.toISOString() });
         }
       }
       if (writes.length) await writeMemory(deps, writes);
