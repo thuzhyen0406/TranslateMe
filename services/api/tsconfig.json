@@ -21,8 +21,11 @@
   "include": [
     "auth/**/*.ts",
     "sites/**/*.ts",
-    "translate/**/*.ts",
-    "../../libs/common/roles.ts"
+    "glossary/**/*.ts",
+    "../../libs/common/roles.ts",
+    "../../libs/common/types.ts",
+    "../../libs/common/db.ts",
+    "../../libs/common/glossary.ts"
   ],
   "exclude": ["dist", "node_modules"]
 }

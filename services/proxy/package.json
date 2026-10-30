@@ -12,7 +12,11 @@
     "test": "tsc -p tsconfig.json && node --test dist/services/proxy/test/*.test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1156.0",
+    "@aws-sdk/client-lambda": "^3.1157.0",
+    "@aws-sdk/client-s3": "^3.1157.0",
     "@aws-sdk/client-translate": "^3.650.0",
+    "@aws-sdk/lib-dynamodb": "^3.1156.0",
     "parse5": "^7.3.0"
   },
   "devDependencies": {
