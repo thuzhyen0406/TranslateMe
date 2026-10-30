@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { BatchGetCommand, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
-import { createRealtimeHandler, translationMemoryKey, type RealtimeDeps } from '../realtime.js';
+import { BatchGetCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { createRealtimeHandler, type RealtimeDeps } from '../realtime.js';
 import { CharacterQuotaExceededError } from '../../../../libs/common/usage/usage.js';
 
 const TABLE = 'TranslateMe';
@@ -20,7 +20,7 @@ function event(body: unknown) {
 }
 
 /** Tạo handler giả cùng các bản ghi nhớ và lệnh AWS đã được gọi trong bài test. */
-function setup(options: { memory?: string; locked?: boolean; quotaExceeded?: boolean; detected?: { language?: string; confidence?: number } } = {}) {
+function setup(options: { memory?: string; locked?: boolean; quotaExceeded?: boolean; tmWriteFails?: boolean; detected?: { language?: string; confidence?: number } } = {}) {
   const calls: Array<{ name: string; input: Record<string, any> }> = [];
   const stored: Array<Record<string, any>> = [];
   const translateInputs: Array<Record<string, any>> = [];
@@ -45,8 +45,31 @@ function setup(options: { memory?: string; locked?: boolean; quotaExceeded?: boo
         });
         return { Responses: { [TABLE]: rows } };
       }
-      if (command instanceof PutCommand) {
-        stored.push(input.Item);
+      if (command instanceof UpdateCommand) {
+        if (options.tmWriteFails) throw Object.assign(new Error('DynamoDB throttled'), { name: 'ThrottlingException' });
+        const key = input.Key as { PK: string; SK: string };
+        const item = stored.find((row) => row.PK === key.PK && row.SK === key.SK) ?? { ...key };
+        if (item.label === 'HUMAN') {
+          throw Object.assign(new Error('Human TM entries cannot be overwritten'), { name: 'ConditionalCheckFailedException' });
+        }
+        const names = input.ExpressionAttributeNames as Record<string, string>;
+        const values = input.ExpressionAttributeValues as Record<string, unknown>;
+        const expression = String(input.UpdateExpression);
+        const [setExpression, addExpression] = expression.split(' ADD ');
+        for (const assignment of setExpression.replace(/^SET /, '').split(', ')) {
+          const [nameToken, valueToken] = assignment.split(' = ');
+          item[names[nameToken]] = values[valueToken];
+        }
+        if (addExpression) {
+          for (const addition of addExpression.split(', ')) {
+            const [nameToken, valueToken] = addition.split(' ');
+            const name = names[nameToken];
+            item[name] = Number(item[name] ?? 0) + Number(values[valueToken]);
+          }
+        }
+        const existingIndex = stored.findIndex((row) => row.PK === key.PK && row.SK === key.SK);
+        if (existingIndex < 0) stored.push(item);
+        else stored[existingIndex] = item;
         return {};
       }
       throw new Error(`Lệnh DynamoDB không được giả lập: ${name}`);
@@ -110,7 +133,11 @@ describe('POST /translate/realtime', () => {
       assert.equal(body.characters_from_memory, 0);
       assert.equal(test.translateCalls, 1);
       assert.equal(test.calls.some((call) => call.name === 'BatchGetCommand'), true);
-      assert.equal(test.calls.some((call) => call.name === 'PutCommand'), true);
+      assert.equal(test.calls.some((call) => call.name === 'UpdateCommand'), true);
+      const batchGet = test.calls.find((call) => call.name === 'BatchGetCommand');
+      assert.equal(batchGet?.input.RequestItems[TABLE].Keys[0].PK, `TENANT#${TENANT}#TM#vi#${targetLang}`);
+      assert.equal(test.stored[0].PK, `TENANT#${TENANT}#TM#vi#${targetLang}`);
+      assert.equal(test.stored[0].GSI3PK, `TENANT#${TENANT}#TM#MACHINE`);
     }
   });
 
@@ -134,7 +161,7 @@ describe('POST /translate/realtime', () => {
     const response = await test.handler(event({ text: 'Xin chào.', source_lang: 'vi', target_lang: 'en', use_terminology: false }));
     assert.equal(response.statusCode, 200);
     assert.equal(test.calls.some((call) => call.name === 'BatchGetCommand'), false);
-    assert.equal(test.calls.some((call) => call.name === 'PutCommand'), false);
+    assert.equal(test.calls.some((call) => call.name === 'UpdateCommand'), false);
     assert.equal(test.translateCalls, 1);
     assert.equal(test.translateInputs[0].TerminologyNames, undefined);
   });
@@ -195,9 +222,16 @@ describe('POST /translate/realtime', () => {
     assert.equal(refunded, true);
   });
 
-  it('tạo TM key theo normalize_hash dùng chung', () => {
-    const a = translationMemoryKey(TENANT, 'vi', 'en', '  Điện   thoại  ');
-    const b = translationMemoryKey(TENANT, 'vi', 'en', 'Điện thoại');
-    assert.deepEqual(a, b);
+  it('quyết toán bản dịch và trả cảnh báo nếu ghi TM thất bại', async () => {
+    const test = setup({ tmWriteFails: true });
+    const response = await test.handler(event({ text: 'Xin chào.', source_lang: 'vi', target_lang: 'en' }));
+    const body = responseBody(response);
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(body.translated_text, 'XIN CHÀO.');
+    assert.deepEqual(body.warnings, ['TM_WRITE_FAILED']);
+    assert.equal(test.settlements.length, 1);
+    assert.equal(test.settlements[0].machineChars, 'Xin chào.'.length);
+    assert.equal(test.calls.some((call) => call.name === 'UpdateCommand'), true);
   });
 });

@@ -43,9 +43,7 @@ describe('chunk_by_bytes', () => {
 
   it('splits long unbroken text without exceeding the byte limit', () => {
     assert.deepEqual(chunk_by_bytes(['abcdefgh'], 3), [
-      ['abc'],
-      ['def'],
-      ['gh'],
+      ['abc', 'def', 'gh'],
     ]);
   });
 

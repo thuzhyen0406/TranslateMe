@@ -22,10 +22,13 @@
     "auth/**/*.ts",
     "sites/**/*.ts",
     "glossary/**/*.ts",
+    "translate/**/*.ts",
     "../../libs/common/roles.ts",
     "../../libs/common/types.ts",
     "../../libs/common/db.ts",
-    "../../libs/common/glossary.ts"
+    "../../libs/common/glossary.ts",
+    "../../libs/common/text-utils.ts",
+    "../../libs/common/usage/usage.ts"
   ],
   "exclude": ["dist", "node_modules"]
 }

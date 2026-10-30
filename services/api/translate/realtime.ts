@@ -1,12 +1,19 @@
+/**
+ * Xử lý API dịch realtime: xác thực tenant, nhận diện ngôn ngữ, tra cứu Translation Memory,
+ * dịch các câu chưa có trong bộ nhớ và hạch toán mức sử dụng trước khi trả JSON.
+ * Các hàm cũng cung cấp điểm tích hợp AWS Lambda cùng các tiện ích chuẩn hóa dữ liệu.
+ */
 import { randomUUID } from 'node:crypto';
 import { ComprehendClient, DetectDominantLanguageCommand } from '@aws-sdk/client-comprehend';
 import { TranslateClient } from '@aws-sdk/client-translate';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { segmentBlock } from '../../../libs/common/segmenter.js';
 import { normalize_hash } from '../../../libs/common/text-utils.js';
+import { createDynamoTmDb, createTM, EMPTY_GLOSSARY_STATE, type SentenceWithHash } from '../../../libs/common/tm.js';
+import type { Ctx } from '../../../libs/common/types.js';
 import { CharacterQuotaExceededError, UsageService, type UsageReservation } from '../../../libs/common/usage/usage.js';
-import { translateSentences, type TranslateClientLike } from '../../proxy/translator.js';
+import { createTranslator, type TranslateClientLike } from '../../../libs/common/translator.js';
 
 const MAX_TEXT_CHARS = 5000;
 const MAX_TRANSLATE_BYTES = 10_000;
@@ -27,37 +34,34 @@ export interface RealtimeDeps {
   detectLanguage: (text: string) => Promise<{ language?: string; confidence?: number }>;
   now?: () => Date;
 }
-type Piece = { kind: 'sentence' | 'gap'; text: string };
-type Memory = { translated: string; label?: string; glossaryVersion?: number };
-
-/** Tách phần văn bản thành câu và khoảng trắng, giữ nguyên để ráp kết quả không đổi định dạng. */
-export function splitPreservingWhitespace(text: string): Piece[] {
-  const out: Piece[] = [];
-  for (const block of text.split(/(\r?\n+)/)) {
-    if (!block) continue;
-    if (/^\r?\n+$/.test(block)) { out.push({ kind: 'gap', text: block }); continue; }
-    for (const part of segmentBlock(block.normalize('NFC'))) out.push({ kind: part.kind, text: part.text });
-  }
-  return out;
-}
-
-/** Tạo khóa TM dùng chung: chuẩn hóa NFC, gộp khoảng trắng và băm SHA-256. */
-export function translationMemoryKey(tenantId: string, sourceLang: string, targetLang: string, sentence: string) {
-  const { hash } = normalize_hash(sentence);
-  return { PK: `TENANT#${tenantId}#TM#${sourceLang}#${targetLang}#${hash.slice(0, 2)}`, SK: `HASH#${hash}` };
-}
-
-/** Tạo JSON API thống nhất cho thành công và lỗi, luôn kèm request_id. */
+/**
+ * Tạo phản hồi JSON thống nhất, thiết lập header nội dung và chính sách không lưu cache.
+ * @param statusCode Mã trạng thái HTTP.
+ * @param payload Dữ liệu cần mã hóa thành JSON trong thân phản hồi.
+ * @returns Phản hồi HTTP gồm status, headers và body.
+ */
 export function realtimeJson(statusCode: number, payload: Record<string, unknown>): RealtimeResponse {
   return { statusCode, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }, body: JSON.stringify(payload) };
 }
 
-/** Tạo phản hồi lỗi theo schema Bảng 1.5 của đặc tả. */
+/**
+ * Tạo phản hồi lỗi theo schema API, kèm mã lỗi, thông báo và mã yêu cầu.
+ * @param status Mã trạng thái HTTP.
+ * @param code Mã lỗi ổn định của API.
+ * @param message Thông báo lỗi hiển thị cho bên gọi.
+ * @param requestId Mã định danh yêu cầu.
+ * @returns Phản hồi JSON lỗi theo định dạng chung.
+ */
 function apiError(status: number, code: string, message: string, requestId: string): RealtimeResponse {
   return realtimeJson(status, { request_id: requestId, error: { code, message } });
 }
 
-/** Cắt văn bản theo giới hạn byte UTF-8 của Comprehend mà không tách đôi ký tự Unicode. */
+/**
+ * Cắt văn bản theo giới hạn byte UTF-8 mà không tách đôi ký tự Unicode.
+ * @param text Văn bản cần cắt.
+ * @param maxBytes Số byte UTF-8 tối đa được giữ lại.
+ * @returns Phần đầu văn bản nằm trong giới hạn byte.
+ */
 function truncateUtf8(text: string, maxBytes: number): string {
   let result = '';
   let bytes = 0;
@@ -70,7 +74,12 @@ function truncateUtf8(text: string, maxBytes: number): string {
   return result;
 }
 
-/** Đọc keyId từ API Gateway authorizer hoặc KEYMAP, sau đó lấy tenantId đáng tin cậy. */
+/**
+ * Lấy thông tin xác thực từ authorizer hoặc tra cứu KEYMAP trong DynamoDB.
+ * @param event Sự kiện API Gateway chứa thông tin authorizer hoặc API key.
+ * @param deps Các phụ thuộc dịch vụ, bao gồm tên bảng và DynamoDB.
+ * @returns Tenant ID và key ID đã xác thực; các trường không có nếu xác thực thất bại.
+ */
 async function resolveTenant(event: RealtimeEvent, deps: RealtimeDeps): Promise<{ tenantId?: string; keyId?: string }> {
   const context = event.requestContext?.authorizer;
   if (context?.tenantId && context.keyId) return { tenantId: context.tenantId, keyId: context.keyId };
@@ -80,51 +89,17 @@ async function resolveTenant(event: RealtimeEvent, deps: RealtimeDeps): Promise<
   return found.Item?.tenantId ? { tenantId: String(found.Item.tenantId), keyId } : {};
 }
 
-/** Tra cứu Translation Memory bằng BatchGetItem và chỉ nhận bản dịch MACHINE/HUMAN còn hiệu lực. */
-async function readMemory(deps: RealtimeDeps, keys: Array<{ PK: string; SK: string }>): Promise<Map<string, Memory>> {
-  const output = new Map<string, Memory>();
-  for (let i = 0; i < keys.length; i += 100) {
-    const batch = keys.slice(i, i + 100);
-    let pending: Record<string, any> | undefined = { [deps.tableName]: { Keys: batch } };
-    for (let attempt = 0; pending && attempt < 5; attempt++) {
-      const response = await deps.ddb.send(new BatchGetCommand({ RequestItems: pending })) as {
-        Responses?: Record<string, Array<Record<string, any>>>;
-        UnprocessedKeys?: Record<string, any>;
-      };
-      for (const row of response.Responses?.[deps.tableName] ?? []) {
-        const key = `${row.PK}|${row.SK}`;
-        const translation = row.tgt ?? row.translation;
-        if (translation && ['MACHINE', 'HUMAN'].includes(String(row.label))) {
-          output.set(key, { translated: String(translation), label: String(row.label), glossaryVersion: Number(row.glossaryVersion ?? 0) });
-        }
-      }
-      pending = response.UnprocessedKeys && Object.keys(response.UnprocessedKeys).length ? response.UnprocessedKeys : undefined;
-    }
-    if (pending) throw new Error('TM_BATCH_GET_UNPROCESSED');
-  }
-  return output;
-}
-
-/** Ghi các câu dịch máy bằng batch write; không ghi đè nội dung đã được con người duyệt. */
-async function writeMemory(deps: RealtimeDeps, rows: Array<Record<string, unknown>>): Promise<void> {
-  for (const Item of rows) {
-    try {
-      await deps.ddb.send(new PutCommand({
-        TableName: deps.tableName,
-        Item: { ...Item, src: Item.source, tgt: Item.translation, GSI3PK: `TENANT#${String(Item.PK).split('#')[1]}#TM#${String(Item.PK).split('#')[4]}#MACHINE`, GSI3SK: Item.updatedAt },
-        ConditionExpression: 'attribute_not_exists(PK) OR #label <> :human',
-        ExpressionAttributeNames: { '#label': 'label' },
-        ExpressionAttributeValues: { ':human': 'HUMAN' },
-      }));
-    } catch (error) {
-      // Bản dịch do người duyệt trong lúc dịch API được giữ nguyên.
-      if ((error as { name?: string }).name !== 'ConditionalCheckFailedException') throw error;
-    }
-  }
-}
-
-/** Xử lý POST realtime theo sáu bước F9: xác thực, nhận diện, TM, dịch, hạch toán và JSON. */
+/**
+ * Tạo bộ xử lý POST realtime gồm xác thực, nhận diện, tra TM, dịch, hạch toán và trả JSON.
+ * @param deps Các phụ thuộc DynamoDB, usage, dịch máy, nhận diện ngôn ngữ và đồng hồ tùy chọn.
+ * @returns Hàm xử lý sự kiện realtime và trả về phản hồi HTTP chuẩn hóa.
+ */
 export function createRealtimeHandler(deps: RealtimeDeps) {
+  /**
+   * Xử lý một yêu cầu dịch realtime, bao gồm kiểm tra đầu vào và hạch toán sử dụng.
+   * @param event Sự kiện API Gateway chứa body và ngữ cảnh yêu cầu.
+   * @returns Phản hồi HTTP JSON chứa bản dịch hoặc thông tin lỗi.
+   */
   return async (event: RealtimeEvent): Promise<RealtimeResponse> => {
     const requestId = event.requestContext?.requestId ?? `req-${randomUUID()}`;
     try {
@@ -148,17 +123,41 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
         detected = true;
         if (!sourceLang || !SUPPORTED_LANGUAGES.has(sourceLang) || (confidence ?? 0) < CONFIDENCE_THRESHOLD) return apiError(400, 'LANGUAGE_NOT_DETECTED', 'Không nhận diện được ngôn ngữ nguồn với độ tin cậy từ 0,70.', requestId);
       }
-      const pieces = splitPreservingWhitespace(body.text);
+      const pieces = segmentBlock(body.text.normalize('NFC'));
       const sentences = pieces.filter((p) => p.kind === 'sentence').map((p) => p.text);
       const useTerminology = body.use_terminology !== false;
       const uniqueSentences = [...new Set(sentences)];
-      const keys = uniqueSentences.map((sentence) => translationMemoryKey(auth.tenantId!, sourceLang!, body.target_lang, sentence));
-      const keysBySentence = new Map(uniqueSentences.map((sentence, index) => [sentence, keys[index]]));
-      const memory = useTerminology ? await readMemory(deps, keys) : new Map<string, Memory>();
-      const keyString = (key: { PK: string; SK: string }) => `${key.PK}|${key.SK}`;
-      const misses = uniqueSentences.filter((_, i) => !memory.has(keyString(keys[i])));
-      const reserved = misses.reduce((sum, sentence) => sum + Array.from(sentence).length, 0);
       const date = (deps.now ?? (() => new Date()))();
+      const ctx: Ctx = { tenantId: auth.tenantId, via: 'KEYMAP', requestId, keyId: auth.keyId };
+      const tm = createTM({
+        db: createDynamoTmDb(deps.ddb, deps.tableName),
+        now: () => date.toISOString(),
+        writer: 'realtime',
+      });
+      const sentenceItems: SentenceWithHash[] = uniqueSentences.map((text, id) => {
+        const normalized = normalize_hash(text);
+        return { id, text: normalized.normalizedText, hash: normalized.hash };
+      });
+      const glossary = {
+        ...EMPTY_GLOSSARY_STATE,
+        version: Number(config.Item.glossaryVersion ?? EMPTY_GLOSSARY_STATE.version),
+      };
+      const lookup = useTerminology
+        ? await tm.getTM(ctx, sourceLang, body.target_lang, sentenceItems, glossary)
+        : { hits: new Map(), misses: sentenceItems, reviewFlags: [] };
+      const translationsById = new Map<number, { tgt: string; needsReview: boolean }>();
+      let memoryChars = 0;
+      let hits = 0;
+      for (const item of sentenceItems) {
+        const found = lookup.hits.get(item.hash);
+        if (found) {
+          translationsById.set(item.id, { tgt: found.tgt, needsReview: found.needsReview });
+          memoryChars += Array.from(uniqueSentences[item.id]).length;
+          hits++;
+        }
+      }
+      const misses = lookup.misses;
+      const reserved = misses.reduce((sum, sentence) => sum + Array.from(sentence.text).length, 0);
       let reservation: UsageReservation;
       try {
         reservation = await deps.usage.reserve({ tenantId: auth.tenantId, requestId, n: reserved, source: { kind: 'API', keyId: auth.keyId }, now: date });
@@ -167,38 +166,61 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
         if (error instanceof CharacterQuotaExceededError) return apiError(429, 'CHAR_QUOTA_EXCEEDED', 'Tenant đã dùng hết hạn mức ký tự của tháng.', requestId);
         throw error;
       }
-      let translatedMisses: string[] = [];
+      const translatedMisses = new Map<number, { tgt: string; needsReview: boolean }>();
       let machineChars = 0;
       if (misses.length) {
         try {
-          const translated = await translateSentences(deps.translate, misses, { sourceLang, targetLang: body.target_lang, deadline: Date.now() + 25_000, maxBytes: MAX_TRANSLATE_BYTES, terminologyNames: useTerminology ? [`tm-${auth.tenantId}`] : [] });
-          if (translated.untranslated || translated.translations.some((item) => item === undefined)) throw new Error('TRANSLATE_INCOMPLETE');
-          translatedMisses = translated.translations as string[];
+          const translated = await createTranslator(deps.translate, { maxBytes: MAX_TRANSLATE_BYTES })({
+            src: sourceLang,
+            tgt: body.target_lang,
+            sentences: misses.map(({ id, text }) => ({ id, text })),
+            terminologyName: useTerminology ? `tm-${auth.tenantId}` : null,
+            deadlineAt: Date.now() + 25_000,
+            concurrency: 4,
+          });
+          if (translated.pending.length || translated.failed.length || translated.translated.length !== misses.length) {
+            throw new Error('TRANSLATE_INCOMPLETE');
+          }
+          const resultsById = new Map(translated.translated.map((item) => [item.id, item]));
+          misses.forEach((item) => {
+            const result = resultsById.get(item.id);
+            if (!result) throw new Error('TRANSLATE_INCOMPLETE');
+            translationsById.set(item.id, { tgt: result.tgt, needsReview: result.needsReview });
+            translatedMisses.set(item.id, { tgt: result.tgt, needsReview: result.needsReview });
+          });
           machineChars = reserved;
         } catch (error) {
           await deps.usage.refund(reservation);
           throw error;
         }
       }
-      const translations = new Map<string, string>();
-      const writes: Array<Record<string, unknown>> = [];
-      let missIndex = new Map(misses.map((sentence, index) => [sentence, translatedMisses[index]]));
-      let memoryChars = 0;
-      let hits = 0;
-      for (let i = 0; i < uniqueSentences.length; i++) {
-        const key = keys[i];
-        const found = memory.get(keyString(key));
-        if (found) { translations.set(keyString(key), found.translated); memoryChars += Array.from(uniqueSentences[i]).length; hits++; }
-        else {
-          const translation = missIndex.get(uniqueSentences[i])!;
-          translations.set(keyString(key), translation);
-          if (useTerminology) writes.push({ ...key, source: normalize_hash(uniqueSentences[i]).normalizedText, translation, label: 'MACHINE', glossaryVersion: Number(config.Item.glossaryVersion ?? 0), updatedAt: date.toISOString() });
+      await deps.usage.settle(reservation, { machineChars, memoryChars, tmHits: hits, tmMisses: misses.length });
+      const idBySentence = new Map(uniqueSentences.map((sentence, id) => [sentence, id]));
+      const translatedText = pieces.map((piece) => {
+        if (piece.kind === 'gap') return piece.text;
+        const id = idBySentence.get(piece.text);
+        return id === undefined ? piece.text : translationsById.get(id)?.tgt ?? piece.text;
+      }).join('');
+      const warnings: string[] = [];
+      if (useTerminology && misses.length) {
+        try {
+          const report = await tm.putMachineTM(ctx, sourceLang, body.target_lang, misses.map((item) => {
+            const translated = translatedMisses.get(item.id);
+            if (!translated) throw new Error('TRANSLATE_INCOMPLETE');
+            return {
+              hash: item.hash,
+              sourceText: item.text,
+              tgt: translated.tgt,
+              glossaryVersion: glossary.version,
+              needsReview: translated.needsReview,
+            };
+          }));
+          if (report.failed.length) warnings.push('TM_WRITE_FAILED');
+        } catch {
+          warnings.push('TM_WRITE_FAILED');
         }
       }
-      if (writes.length) await writeMemory(deps, writes);
-      await deps.usage.settle(reservation, { machineChars, memoryChars, tmHits: hits, tmMisses: misses.length });
-      const translatedText = pieces.map((piece) => piece.kind === 'gap' ? piece.text : translations.get(keyString(keysBySentence.get(piece.text)!)) ?? piece.text).join('');
-      return realtimeJson(200, { request_id: requestId, source_lang: sourceLang, source_lang_detected: detected, ...(detected ? { detection_confidence: confidence } : {}), target_lang: body.target_lang, translated_text: translatedText, characters_machine_translated: machineChars, characters_from_memory: memoryChars, terminology_version: Number(config.Item.glossaryVersion ?? 0) });
+      return realtimeJson(200, { request_id: requestId, source_lang: sourceLang, source_lang_detected: detected, ...(detected ? { detection_confidence: confidence } : {}), target_lang: body.target_lang, translated_text: translatedText, characters_machine_translated: machineChars, characters_from_memory: memoryChars, terminology_version: Number(config.Item.glossaryVersion ?? 0), ...(warnings.length ? { warnings } : {}) });
     } catch (error) {
       if (error instanceof SyntaxError) return apiError(400, 'INVALID_REQUEST', 'JSON không hợp lệ.', requestId);
       return apiError(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
@@ -206,7 +228,11 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
   };
 }
 
-/** Tạo Lambda handler production với AWS SDK v3 và biến môi trường của dịch vụ API. */
+/**
+ * Khởi tạo các AWS client và chuyển sự kiện đến bộ xử lý realtime production.
+ * @param event Sự kiện Lambda/API Gateway cần xử lý.
+ * @returns Promise phản hồi HTTP JSON cho yêu cầu dịch.
+ */
 export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> => {
   const tableName = process.env.TABLE_NAME;
   if (!tableName) return Promise.resolve(apiError(500, 'INTERNAL_ERROR', 'Thiếu cấu hình bảng dữ liệu.', event.requestContext?.requestId ?? 'unknown'));
