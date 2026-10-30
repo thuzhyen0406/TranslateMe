@@ -14,6 +14,8 @@ export interface Ctx {
 export type ErrorCode = 
   | 'FORBIDDEN'
   | 'UNAUTHORIZED'
+  | 'RATE_LIMITED'
+  | 'REQUEST_QUOTA_EXCEEDED'
   | 'SITE_UNREACHABLE'
   | 'VERIFICATION_NOT_FOUND'
   | 'VERIFICATION_CODE_MISMATCH'

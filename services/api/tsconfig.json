@@ -3,6 +3,9 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "paths": {
+      "@aws-sdk/client-translate": ["./node_modules/@aws-sdk/client-translate/dist-types/index.d.ts"]
+    },
     "lib": ["ES2022"],
     "types": ["node"],
     "strict": true,
@@ -19,10 +22,13 @@
     "auth/**/*.ts",
     "sites/**/*.ts",
     "glossary/**/*.ts",
+    "translate/**/*.ts",
     "../../libs/common/roles.ts",
     "../../libs/common/types.ts",
     "../../libs/common/db.ts",
-    "../../libs/common/glossary.ts"
+    "../../libs/common/glossary.ts",
+    "../../libs/common/text-utils.ts",
+    "../../libs/common/usage/usage.ts"
   ],
   "exclude": ["dist", "node_modules"]
 }
