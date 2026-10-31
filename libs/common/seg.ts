@@ -5,7 +5,12 @@
  * Bản ghi SEG (QC-5, Bảng 2.5):
  *   PK     = TENANT#<t>#SEG#<sha256>          SK     = PAGE#<lang>#<path>
  *   GSI2PK = TENANT#<t>#PAGE#<lang>#<path>    GSI2SK = HASH#<sha256>      (GSI2 chiếu KEYS_ONLY)
- *   ttl    = epoch giây, mặc định 30 ngày sau lần ghi gần nhất (lớn hơn thời gian lưu đệm tối đa của website)
+ *   ttl    = epoch giây, mặc định 30 ngày sau lần ghi gần nhất
+ *
+ * Bất biến: TTL của SEG luôn dài hơn thời gian CloudFront giữ trang. Trang được dựng lại (và SEG được ghi lại,
+ * làm mới TTL) ít nhất mỗi MAX_PAGE_CACHE_SECONDS, nên chỉ cần ttlDays · 86400 > MAX_PAGE_CACHE_SECONDS.
+ * Cấu hình website (cacheSeconds) bị giới hạn bởi MAX_PAGE_CACHE_SECONDS khi xác thực, và proxy cũng chặn trên
+ * s-maxage bằng giá trị này; createSEG từ chối ttlDays không thỏa bất biến.
  *
  *  - <sha256>: hash câu nguồn đã chuẩn hóa, cùng hash với khóa TM.
  *  - <lang>: ngôn ngữ đích của trang dịch.
@@ -22,6 +27,8 @@ import type { Ctx, Lang, Sha256Hex } from './types.js';
 /** BatchWriteItem nhận tối đa 25 yêu cầu */
 export const SEG_BATCH_SIZE = 25;
 export const SEG_TTL_DAYS = 30;
+/** Thời gian lưu đệm tối đa của một trang dịch ở CloudFront (cacheSeconds của website): 7 ngày, nhỏ hơn TTL SEG */
+export const MAX_PAGE_CACHE_SECONDS = 7 * 86_400;
 export const SEG_GSI = 'GSI2';
 
 export interface SegKey {
@@ -115,6 +122,9 @@ const hashFromSk = (sk: unknown, prefix: string): string | null => (typeof sk ==
 export function createSEG(deps: SegDeps) {
   const now = deps.now ?? Date.now;
   const ttlDays = deps.ttlDays ?? SEG_TTL_DAYS;
+  if (!(ttlDays * 86_400 > MAX_PAGE_CACHE_SECONDS)) {
+    throw new Error(`ttlDays của SEG (${ttlDays}) phải dài hơn thời gian lưu đệm tối đa của trang (${MAX_PAGE_CACHE_SECONDS} giây)`);
+  }
 
   /** F2 bước 7: ghi (hoặc làm mới) SEG cho mọi câu của một trang. Không ném lỗi theo lô – xem báo cáo. */
   async function writePageSegments(ctx: Ctx, lang: Lang, path: string, hashes: readonly Sha256Hex[]): Promise<WriteSegReport> {

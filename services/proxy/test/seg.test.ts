@@ -87,6 +87,13 @@ describe('proxy + chỉ mục câu–trang SEG (3.4)', () => {
     assert.equal(logger.infos[0].segWritten, undefined);
   });
 
+  it('cacheSeconds vượt 7 ngày (SiteResolver không qua xác thực) -> s-maxage bị chặn ở 7 ngày, ngắn hơn TTL SEG', async () => {
+    const longCache = { ...SITE, cacheSeconds: 100 * 86_400 } as SiteConfig;
+    const { handler } = setup({ resolveSite: staticSiteResolver([longCache]) });
+    const res = await handler(ev('/homestay-abc/en/'));
+    assert.equal(res.headers['cache-control'], `public, max-age=0, s-maxage=${7 * 86_400}`);
+  });
+
   it('câu lặp lại trên trang chỉ có một bản ghi SEG', async () => {
     const page = `<!doctype html><html lang="vi"><head><title>T</title></head><body><p>Xin chào.</p><p>Xin chào.</p><p>Tạm biệt.</p></body></html>`;
     const { handler, segDb, logger } = setup({ fetchPage: fakeFetch((u) => okHtml(page, u)) });

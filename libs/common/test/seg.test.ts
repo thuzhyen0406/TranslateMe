@@ -3,7 +3,9 @@ import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
 import { BatchWriteCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import {
+  MAX_PAGE_CACHE_SECONDS,
   SEG_BATCH_SIZE,
+  SEG_TTL_DAYS,
   createDynamoSegDb,
   createSEG,
   pageGsiPk,
@@ -136,6 +138,19 @@ describe('writePageSegments', () => {
     await seg.writePageSegments(ctxA, 'en', '/homestay-abc/', [h('a')]);
     assert.equal(db.store.size, 1);
     assert.equal([...db.store.values()][0].ttl, t / 1000 + 30 * 86_400);
+  });
+});
+
+describe('TTL SEG dài hơn thời gian lưu đệm tối đa của trang', () => {
+  it('mặc định 30 ngày > 7 ngày', () => {
+    assert.equal(MAX_PAGE_CACHE_SECONDS, 7 * 86_400);
+    assert.ok(SEG_TTL_DAYS * 86_400 > MAX_PAGE_CACHE_SECONDS);
+  });
+
+  it('createSEG từ chối ttlDays không dài hơn thời gian lưu đệm tối đa', () => {
+    assert.throws(() => createSEG({ db: memorySegDb(), ttlDays: 7 }));
+    assert.throws(() => createSEG({ db: memorySegDb(), ttlDays: 1 }));
+    assert.doesNotThrow(() => createSEG({ db: memorySegDb(), ttlDays: 8 }));
   });
 });
 

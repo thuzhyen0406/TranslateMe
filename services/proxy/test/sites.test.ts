@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { DEFAULT_CACHE_SECONDS, cachedSiteResolver, parseSitesJson, staticSiteResolver, validateSiteConfig } from '../sites.js';
+import { DEFAULT_CACHE_SECONDS, MAX_PAGE_CACHE_SECONDS, cachedSiteResolver, parseSitesJson, staticSiteResolver, validateSiteConfig } from '../sites.js';
 
 const base = { slug: 'homestay-abc', tenantId: 't_1', homeUrl: 'https://homestay-abc.vn/blog', sourceLang: 'vi', targetLangs: ['en', 'vi', 'ko', 'en'] };
 
@@ -38,6 +38,14 @@ describe('validateSiteConfig / parseSitesJson', () => {
     assert.throws(() => parseSitesJson('{"slug":"a"}'), /mảng/);
     assert.throws(() => parseSitesJson('[{'), SyntaxError);
     assert.throws(() => parseSitesJson(JSON.stringify([base, base])), /trùng/);
+  });
+});
+
+describe('cacheSeconds tối đa 7 ngày (ngắn hơn TTL SEG)', () => {
+  it('nhận đúng 7 ngày, từ chối dài hơn', () => {
+    assert.equal(validateSiteConfig({ ...base, cacheSeconds: MAX_PAGE_CACHE_SECONDS }).cacheSeconds, 7 * 86_400);
+    assert.throws(() => validateSiteConfig({ ...base, cacheSeconds: MAX_PAGE_CACHE_SECONDS + 1 }), /cacheSeconds/);
+    assert.throws(() => parseSitesJson(JSON.stringify([{ ...base, cacheSeconds: 31 * 86_400 }])), /cacheSeconds/);
   });
 });
 
