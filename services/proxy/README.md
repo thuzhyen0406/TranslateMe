@@ -32,7 +32,7 @@ cd ../../services/proxy && npm ci && npm test
 | `PUBLIC_BASE_URL` | Có | Ví dụ `https://d1abc.cloudfront.net`. Dùng làm URL tuyệt đối của canonical, hreflang, og:url |
 | `BASE_MODE` | Không | `path` (mặc định) cho `/{slug}/{lang}/…`; `host` cho `{slug}.<tên miền>/{lang}/…` khi có tên miền riêng |
 | `PROXY_SITES_JSON` | Tuần 1 | Danh sách website, xem ví dụ dưới. Từ tuần 2 thay bằng tra DynamoDB (SLUG → HOST + CONFIG) |
-| `TABLE_NAME` | Có (bật TM và SEG) | Tên bảng DynamoDB chính. Không có thì proxy chạy không TM, không ghi SEG và ghi log `TM_DISABLED` |
+| `TABLE_NAME` | Có (bật TM và SEG) | Tên bảng DynamoDB chính. Không có thì proxy chạy không TM, không ghi SEG và ghi log `TM_DISABLED`, `SEG_DISABLED` |
 | `TRANSLATE_BUDGET_MS` | Không | Ngân sách dịch, mặc định 20000 |
 | `TRANSLATE_CONCURRENCY` | Không | Số lời gọi TranslateText song song, mặc định 4 |
 | `WORKER_FUNCTION_NAME` | Không | Tên Lambda worker C13. Không có thì không hoàn tất nền, ghi log `WORKER_DISABLED` |
@@ -98,6 +98,7 @@ Thư viện: `libs/common/seg.ts`. Bước 7 của F2: mỗi lần dựng trang,
 
 - `<path>` luôn gồm slug (QC-5): `segPath('homestay-abc', 'phong-nghi/')` = `/homestay-abc/phong-nghi/`, trang chủ là `/homestay-abc/`. Không có query; giữ nguyên dạng mã hóa `%`. `<lang>` là ngôn ngữ đích của trang.
 - Đọc: `sentencesOfPage(ctx, lang, path)` qua GSI2; `pagesOfSentence(ctx, hash, lang)` qua bảng chính (dùng cho xóa cache chọn lọc 3.5).
+- TTL của SEG (30 ngày) luôn dài hơn thời gian CloudFront giữ trang: `cacheSeconds` của website tối đa 7 ngày (`MAX_PAGE_CACHE_SECONDS`, kiểm tra khi xác thực cấu hình website; proxy cũng chặn trên `s-maxage` bằng giá trị này). Trang được dựng lại ít nhất mỗi 7 ngày và mỗi lần dựng đều làm mới `ttl`, nên SEG không bao giờ hết hạn trước cache.
 - Ghi lại cùng trang chỉ làm mới `ttl`. Câu đã bị gỡ khỏi trang còn bản ghi tới khi hết `ttl`, nên xóa cache có thể thừa một trang nhưng không sót.
 - Ghi SEG lỗi không làm hỏng trang, nhưng trang trả `s-maxage=60` để không bị CloudFront giữ lâu khi chỉ mục còn thiếu. Log: `segWritten`, `segWriteFailed`, `segWriteErrors`, `segWriteError`.
 - Đọc ghi DynamoDB tạm qua `createDynamoSegDb` (stub của 2.2, giống TM) cho tới khi lớp `data` có `batchWrite` và query GSI.

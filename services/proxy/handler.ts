@@ -33,7 +33,7 @@ import { extract } from '../../libs/common/extract.js';
 import { DEFAULT_PUBLIC_BASE_URL, rebuildDetailed, type BaseMode } from '../../libs/common/rebuild.js';
 import { safe_fetch as realSafeFetch, type SafeFetchCompatResult } from '../../libs/common/safeFetch.js';
 import { safe_fetch as stubSafeFetch } from '../../libs/common/safeFetch.stub.js';
-import { createDynamoSegDb, createSEG, segPath } from '../../libs/common/seg.js';
+import { MAX_PAGE_CACHE_SECONDS, createDynamoSegDb, createSEG, segPath } from '../../libs/common/seg.js';
 import { createDynamoTmDb, createTM, type GlossaryState, type SentenceWithHash, type TmHit } from '../../libs/common/tm.js';
 import {
   DEFAULT_TRANSLATE_CONCURRENCY,
@@ -445,7 +445,8 @@ export function createProxyHandler(deps: ProxyDeps) {
         ? QUOTA_PARTIAL_CACHE_SECONDS
         : partial || extra.glossaryError !== undefined || segIncomplete
           ? PARTIAL_CACHE_SECONDS
-          : site.cacheSeconds ?? DEFAULT_CACHE_SECONDS;
+          : // Chặn trên cả khi SiteResolver không qua validateSiteConfig: cache phải ngắn hơn TTL của SEG
+            Math.min(site.cacheSeconds ?? DEFAULT_CACHE_SECONDS, MAX_PAGE_CACHE_SECONDS);
       const headers: Record<string, string> = {
         'content-type': 'text/html; charset=utf-8',
         'content-language': parsed.lang,
@@ -508,6 +509,7 @@ function sharedFromEnv(env: NodeJS.ProcessEnv, logger: ProxyLogger) {
   const tm = doc && tableName ? createTM({ db: createDynamoTmDb(doc, tableName), writer: 'proxy' }) : undefined;
   const seg = doc && tableName ? createSEG({ db: createDynamoSegDb(doc, tableName) }) : undefined;
   if (!tm) logger.error({ action: 'TM_DISABLED', reason: 'MISSING_TABLE_NAME' });
+  if (!seg) logger.error({ action: 'SEG_DISABLED', reason: 'MISSING_TABLE_NAME' });
   const bucket = env.WORKER_PAYLOAD_BUCKET?.trim();
   return {
     resolveSite: cachedSiteResolver(staticSiteResolver(sites)),

@@ -232,7 +232,7 @@ describe('depsFromEnv', () => {
     const d = depsFromEnv({ PROXY_SITES_JSON: '[{', BASE_MODE: 'abc' }, logger);
     assert.equal(d.baseMode, 'path');
     assert.equal(await d.resolveSite('homestay-abc'), null);
-    assert.deepEqual(logger.errors.map((e) => e.action), ['INVALID_PROXY_SITES_JSON', 'TM_DISABLED', 'MISSING_PUBLIC_BASE_URL', 'WORKER_DISABLED']);
+    assert.deepEqual(logger.errors.map((e) => e.action), ['INVALID_PROXY_SITES_JSON', 'TM_DISABLED', 'SEG_DISABLED', 'MISSING_PUBLIC_BASE_URL', 'WORKER_DISABLED']);
     assert.equal(d.tm, undefined);
     assert.equal(d.invokeWorker, undefined);
     assert.equal(d.workerStore, undefined);
