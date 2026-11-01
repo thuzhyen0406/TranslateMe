@@ -22,6 +22,7 @@
     "auth/**/*.ts",
     "sites/**/*.ts",
     "glossary/**/*.ts",
+    "keys/**/*.ts",
     "translate/**/*.ts",
     "../../libs/common/roles.ts",
     "../../libs/common/types.ts",
