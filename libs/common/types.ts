@@ -6,6 +6,8 @@ export interface Ctx {
   tenantId: string;
   via: 'JWT' | 'SLUG' | 'KEYMAP';
   requestId: string;
+  /** Cognito sub lấy từ JWT đã được authorizer xác thực; dùng đối chiếu MEMBER hiện hành. */
+  sub?: string;
   role?: Role;
   slug?: string;
   keyId?: string;

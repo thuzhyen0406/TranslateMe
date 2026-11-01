@@ -14,6 +14,7 @@ import {
 
 const TABLE_CTX: Ctx = {
   tenantId: 't1',
+  sub: 'user-1',
   role: 'TENANT_ADMIN',
   via: 'JWT',
   requestId: 'req-test',
@@ -28,6 +29,10 @@ type StoredItem = Item & { PK: string; SK: string };
 function createHarness(options: {
   tenantPlan?: string;
   configStatus?: string;
+  memberStatus?: string;
+  memberRole?: string;
+  memberExists?: boolean;
+  failDisable?: boolean;
   fail?: 'attach' | 'enable' | 'detach' | 'dbUpdate' | 'transaction';
   failCleanup?: boolean;
 } = {}) {
@@ -46,6 +51,16 @@ function createHarness(options: {
     plan: options.tenantPlan ?? 'Pro',
     status: options.configStatus ?? 'ACTIVE',
   });
+  if (options.memberExists !== false) {
+    const memberKey = keys.member(TABLE_CTX, TABLE_CTX.sub!);
+    store.set(id(memberKey), {
+      ...memberKey,
+      tenantId: TABLE_CTX.tenantId,
+      userSub: TABLE_CTX.sub,
+      role: options.memberRole ?? 'Tenant Admin',
+      status: options.memberStatus ?? 'ACTIVE',
+    });
+  }
 
   const db = {
     async get(_ctx: Ctx, key: { PK: string; SK: string }) {
@@ -123,6 +138,7 @@ function createHarness(options: {
     async setKeyEnabled(keyId, enabled) {
       gatewayCalls.push({ operation: 'setKeyEnabled', args: [keyId, enabled] });
       if (enabled && fail === 'enable') throw new Error('API key enable failed');
+      if (!enabled && options.failDisable) throw new Error('API key revoke disable failed');
       if (!enabled && options.failCleanup) throw new Error('API key disable cleanup failed');
     },
     async deleteApiKey(keyId) {
@@ -218,6 +234,34 @@ describe('API key manager', () => {
       'TENANT_SUSPENDED',
     );
     assert.equal(harness.gatewayCalls.length, 0);
+  });
+
+  it('rejects create and rotate when the current MEMBER is missing, inactive, or has a changed role', async () => {
+    const removedMember = createHarness({ memberExists: false });
+    await assertAppError(
+      () => createApiKey(TABLE_CTX, { name: 'key', plan: 'Basic' }, removedMember.deps),
+      'PERMISSION_DENIED',
+    );
+
+    const inactiveMember = createHarness({ memberStatus: 'REVOKED' });
+    inactiveMember.seedKey('key-to-rotate');
+    await assertAppError(
+      () => rotateApiKey(TABLE_CTX, 'key-to-rotate', inactiveMember.deps),
+      'PERMISSION_DENIED',
+    );
+
+    const changedRole = createHarness({ memberRole: 'Reviewer' });
+    await assertAppError(
+      () => createApiKey(TABLE_CTX, { name: 'key', plan: 'Basic' }, changedRole.deps),
+      'PERMISSION_DENIED',
+    );
+    await assertAppError(
+      () => createApiKey({ ...TABLE_CTX, sub: undefined }, { name: 'key', plan: 'Basic' }, createHarness().deps),
+      'PERMISSION_DENIED',
+    );
+    assert.equal(removedMember.gatewayCalls.length, 0);
+    assert.equal(inactiveMember.gatewayCalls.length, 0);
+    assert.equal(changedRole.gatewayCalls.length, 0);
   });
 
   it('requires configured Usage Plan IDs and compensates a failed provisioning operation', async () => {
@@ -344,11 +388,48 @@ describe('API key manager', () => {
     assert.equal(created.statusCode, 201);
     assert.equal(JSON.parse(created.body).api_key.value, 'secret-value-1');
 
+    const revoke = await handleApiKeyRoute({
+      httpMethod: 'POST',
+      path: '/console/api-keys/gw-key-1/revoke',
+    }, TABLE_CTX, harness.deps);
+    assert.equal(revoke.statusCode, 200);
+    assert.equal(JSON.parse(revoke.body).api_key.status, 'REVOKED');
+
+    harness.seedKey('route-plan-key');
+    const changePlan = await handleApiKeyRoute({
+      httpMethod: 'PATCH',
+      path: '/console/api-keys/route-plan-key',
+      body: JSON.stringify({ plan: 'Standard' }),
+    }, TABLE_CTX, harness.deps);
+    assert.equal(changePlan.statusCode, 200);
+    assert.equal(JSON.parse(changePlan.body).api_key.plan, 'Standard');
+
     const missing = await handleApiKeyRoute({
-      httpMethod: 'DELETE',
-      path: '/console/api-keys/missing',
+      httpMethod: 'POST',
+      path: '/console/api-keys/missing/revoke',
     }, TABLE_CTX, harness.deps);
     assert.equal(missing.statusCode, 404);
     assert.equal(JSON.parse(missing.body).error.code, 'NOT_FOUND');
+  });
+
+  it('logs revoke failures from API Gateway and DynamoDB with request and key identifiers', async () => {
+    const scenarios = [
+      { options: { failDisable: true }, action: 'API_KEY_REVOKE_DISABLE_FAILED' },
+      { options: { fail: 'detach' as const }, action: 'API_KEY_REVOKE_DETACH_FAILED' },
+      { options: { fail: 'transaction' as const }, action: 'API_KEY_REVOKE_DATABASE_FAILED' },
+    ];
+    for (const scenario of scenarios) {
+      const harness = createHarness(scenario.options);
+      harness.seedKey('key-revoke-fail');
+      const response = await handleApiKeyRoute({
+        httpMethod: 'POST',
+        path: '/console/api-keys/key-revoke-fail/revoke',
+      }, TABLE_CTX, harness.deps);
+      assert.equal(response.statusCode, 500);
+      assert.ok(harness.logErrors.some((entry) =>
+        entry.action === scenario.action && entry.keyId === 'key-revoke-fail' &&
+        entry.request_id === TABLE_CTX.requestId,
+      ));
+    }
   });
 });

@@ -144,6 +144,21 @@ function requireApiKeyManagerRole(ctx: Ctx): void {
   }
 }
 
+/** Đọc MEMBER theo Cognito sub và xác nhận còn hiệu lực/đúng role; input là Ctx và DB deps, output void hoặc PERMISSION_DENIED. */
+async function requireActiveMember(ctx: Ctx, deps: ApiKeyManagerDependencies): Promise<void> {
+  if (!ctx.sub) throw new AppError('PERMISSION_DENIED', 'Không xác định được thành viên hiện tại.');
+  const member = await deps.db.get(ctx, keys.member(ctx, ctx.sub), { consistent: true });
+  const persistedRoles: Record<NonNullable<Ctx['role']>, string[]> = {
+    TENANT_ADMIN: ['Tenant Admin', 'TENANT_ADMIN'],
+    DEVELOPER: ['Developer', 'DEVELOPER'],
+    REVIEWER: ['Reviewer', 'REVIEWER'],
+  };
+  if (!member || member.status !== 'ACTIVE' || member.tenantId !== ctx.tenantId ||
+      member.userSub !== ctx.sub || !ctx.role || !persistedRoles[ctx.role]?.includes(member.role)) {
+    throw new AppError('PERMISSION_DENIED', 'MEMBER không còn hiệu lực hoặc vai trò đã thay đổi.');
+  }
+}
+
 /** Kiểm tra tenant tồn tại, chưa bị khóa và được phép thực hiện thao tác ghi key. */
 async function requireActiveTenant(ctx: Ctx, deps: ApiKeyManagerDependencies): Promise<Record<string, any>> {
   const config = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
@@ -320,6 +335,7 @@ export async function createApiKey(
 ): Promise<{ key: ApiKeySummary; value: string }> {
   requireApiKeyManagerRole(ctx);
   const config = await requireActiveTenant(ctx, deps);
+  await requireActiveMember(ctx, deps);
   const name = typeof input?.name === 'string' ? input.name.trim() : '';
   if (!name || name.length > 128) throw new AppError('INVALID_REQUEST', 'Tên API key phải dài từ 1 đến 128 ký tự.');
   validatePlan(input?.plan, config.plan);
@@ -352,6 +368,7 @@ export async function rotateApiKey(
 ): Promise<{ key: ApiKeySummary; value: string }> {
   requireApiKeyManagerRole(ctx);
   const config = await requireActiveTenant(ctx, deps);
+  await requireActiveMember(ctx, deps);
   const current = await getTenantApiKey(ctx, validateKeyId(keyId), deps);
   if (current.status !== 'ACTIVE') throw new AppError('INVALID_REQUEST', 'Chỉ có thể xoay API key đang hoạt động.');
   validatePlan(current.plan, config.plan);
@@ -372,27 +389,42 @@ export async function revokeApiKey(
   if (current.plan !== 'Basic' && current.plan !== 'Standard') throw new AppError('INTERNAL_ERROR', 'Bản ghi API key có gói không hợp lệ.');
   const usagePlanId = requireUsagePlanId(current.plan, deps);
 
-  await deps.apiGateway.setKeyEnabled(cleanKeyId, false);
-  await deps.apiGateway.detachKey(cleanKeyId, usagePlanId);
+  try {
+    await deps.apiGateway.setKeyEnabled(cleanKeyId, false);
+  } catch (error) {
+    logKeyError(ctx, deps, 'API_KEY_REVOKE_DISABLE_FAILED', cleanKeyId, error);
+    throw error;
+  }
+  try {
+    await deps.apiGateway.detachKey(cleanKeyId, usagePlanId);
+  } catch (error) {
+    logKeyError(ctx, deps, 'API_KEY_REVOKE_DETACH_FAILED', cleanKeyId, error);
+    throw error;
+  }
   const revokedAt = deps.now().toISOString();
-  await deps.db.transactApiKey(ctx, [
-    {
-      Update: {
-        Key: keys.apiKey(ctx, cleanKeyId),
-        UpdateExpression: 'SET #status = :revoked, revokedAt = :now',
-        ConditionExpression: '#status <> :revoked',
-        ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: { ':revoked': 'REVOKED', ':now': revokedAt },
+  try {
+    await deps.db.transactApiKey(ctx, [
+      {
+        Update: {
+          Key: keys.apiKey(ctx, cleanKeyId),
+          UpdateExpression: 'SET #status = :revoked, revokedAt = :now',
+          ConditionExpression: '#status <> :revoked',
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: { ':revoked': 'REVOKED', ':now': revokedAt },
+        },
       },
-    },
-    {
-      Delete: {
-        Key: keys.keymap(cleanKeyId),
-        ConditionExpression: 'attribute_not_exists(PK) OR tenantId = :tenantId',
-        ExpressionAttributeValues: { ':tenantId': ctx.tenantId },
+      {
+        Delete: {
+          Key: keys.keymap(cleanKeyId),
+          ConditionExpression: 'attribute_not_exists(PK) OR tenantId = :tenantId',
+          ExpressionAttributeValues: { ':tenantId': ctx.tenantId },
+        },
       },
-    },
-  ]);
+    ]);
+  } catch (error) {
+    logKeyError(ctx, deps, 'API_KEY_REVOKE_DATABASE_FAILED', cleanKeyId, error);
+    throw error;
+  }
 
   return toSummary({ ...current, status: 'REVOKED', revokedAt });
 }
