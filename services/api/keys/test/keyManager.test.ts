@@ -29,10 +29,12 @@ function createHarness(options: {
   tenantPlan?: string;
   configStatus?: string;
   fail?: 'attach' | 'enable' | 'detach' | 'dbUpdate' | 'transaction';
+  failCleanup?: boolean;
 } = {}) {
   const store = new Map<string, Item>();
   const dbCalls: Array<{ operation: string; args: unknown[] }> = [];
   const gatewayCalls: Array<{ operation: string; args: unknown[] }> = [];
+  const logErrors: Array<Record<string, unknown>> = [];
   let createdKeys = 0;
   let fail = options.fail;
 
@@ -121,6 +123,7 @@ function createHarness(options: {
     async setKeyEnabled(keyId, enabled) {
       gatewayCalls.push({ operation: 'setKeyEnabled', args: [keyId, enabled] });
       if (enabled && fail === 'enable') throw new Error('API key enable failed');
+      if (!enabled && options.failCleanup) throw new Error('API key disable cleanup failed');
     },
     async deleteApiKey(keyId) {
       gatewayCalls.push({ operation: 'deleteApiKey', args: [keyId] });
@@ -132,6 +135,7 @@ function createHarness(options: {
     apiGateway,
     usagePlanIds: { Basic: 'plan-basic', Standard: 'plan-standard' },
     now: () => new Date(NOW),
+    logger: { error: (entry) => logErrors.push(entry) },
   };
 
   function seedKey(keyId: string, overrides: Item = {}) {
@@ -156,7 +160,7 @@ function createHarness(options: {
     return key;
   }
 
-  return { deps, store, dbCalls, gatewayCalls, seedKey, get createdKeys() { return createdKeys; } };
+  return { deps, store, dbCalls, gatewayCalls, logErrors, seedKey, get createdKeys() { return createdKeys; } };
 }
 
 async function assertAppError(action: () => Promise<unknown>, code: string): Promise<void> {
@@ -233,6 +237,23 @@ describe('API key manager', () => {
     assert.equal(failedProvision.store.has(`${keys.apiKey(TABLE_CTX, 'gw-key-1').PK}|${keys.apiKey(TABLE_CTX, 'gw-key-1').SK}`), false);
     assert.equal(failedProvision.store.has(`${keys.keymap('gw-key-1').PK}|${keys.keymap('gw-key-1').SK}`), false);
     assert.ok(failedProvision.gatewayCalls.some((call) => call.operation === 'deleteApiKey'));
+    assert.ok(failedProvision.logErrors.some((entry) =>
+      entry.action === 'API_KEY_PROVISION_FAILED' && entry.keyId === 'gw-key-1' && entry.request_id === TABLE_CTX.requestId,
+    ));
+    assert.equal(JSON.stringify(failedProvision.logErrors).includes('secret-value'), false);
+  });
+
+  it('logs cleanup failures with key and request identifiers without logging the key value', async () => {
+    const failedCleanup = createHarness({ fail: 'enable', failCleanup: true });
+    await assertAppError(
+      () => createApiKey(TABLE_CTX, { name: 'key', plan: 'Basic' }, failedCleanup.deps),
+      'INTERNAL_ERROR',
+    );
+    assert.ok(failedCleanup.logErrors.some((entry) =>
+      entry.action === 'API_KEY_CLEANUP_DISABLE_FAILED' && entry.errorName === 'Error' &&
+      entry.keyId === 'gw-key-1' && entry.request_id === TABLE_CTX.requestId,
+    ));
+    assert.equal(JSON.stringify(failedCleanup.logErrors).includes('secret-value'), false);
   });
 
   it('lists safe summaries without exposing key secrets', async () => {
@@ -290,6 +311,9 @@ describe('API key manager', () => {
     assert.deepEqual(failed.gatewayCalls.map((call) => call.operation), [
       'detachKey', 'attachKey', 'detachKey', 'attachKey',
     ]);
+    assert.ok(failed.logErrors.some((entry) =>
+      entry.action === 'API_KEY_PLAN_CHANGE_FAILED' && entry.keyId === 'key-2' && entry.request_id === TABLE_CTX.requestId,
+    ));
   });
 
   it('does not disclose or mutate another tenant key', async () => {

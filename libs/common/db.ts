@@ -9,6 +9,7 @@ import {
   BatchGetCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { Ctx, AppError, keys, type Role } from './types.js';
+import { validateApiKeyTransaction } from './api-key-transaction.js';
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -124,37 +125,7 @@ export const db = {
    * output không có giá trị, lỗi nếu tenant/khóa không khớp hoặc giao dịch DynamoDB thất bại.
    */
   async transactApiKey(ctx: Ctx, ops: any[]) {
-    if (ctx.via !== 'JWT' || !ctx.tenantId) {
-      throw new AppError('FORBIDDEN', 'Chỉ phiên console đã xác thực mới được thay đổi API key.');
-    }
-    if (!Array.isArray(ops) || ops.length !== 2) {
-      throw new AppError('INVALID_REQUEST', 'Giao dịch API key phải gồm đúng hai thao tác.');
-    }
-
-    const tenantPk = `TENANT#${ctx.tenantId}#APIKEY`;
-    const localOperation = ops.find((op) => op.Put?.Item?.PK === tenantPk || op.Update?.Key?.PK === tenantPk || op.Delete?.Key?.PK === tenantPk);
-    const mappingOperation = ops.find((op) => op.Put?.Item?.PK?.startsWith('TENANT#PLATFORM#KEY#') || op.Delete?.Key?.PK?.startsWith('TENANT#PLATFORM#KEY#'));
-    const local = localOperation?.Put?.Item ?? localOperation?.Update?.Key ?? localOperation?.Delete?.Key;
-    const mapping = mappingOperation?.Put?.Item ?? mappingOperation?.Delete?.Key;
-    const keyId = typeof local?.SK === 'string' && local.SK.startsWith('KEY#') ? local.SK.slice(4) : '';
-    const expectedMappingKey = keyId ? keys.keymap(keyId) : null;
-    if (!localOperation || !mappingOperation || !expectedMappingKey ||
-        localOperation === mappingOperation || mapping.PK !== expectedMappingKey.PK || mapping.SK !== expectedMappingKey.SK) {
-      throw new AppError('FORBIDDEN', 'Cặp APIKEY/KEYMAP không hợp lệ hoặc không thuộc tenant hiện tại.');
-    }
-
-    const isCreate = Boolean(localOperation.Put?.Item && mappingOperation.Put?.Item);
-    const isDelete = Boolean(localOperation.Delete?.Key && mappingOperation.Delete?.Key);
-    const isRevoke = Boolean(localOperation.Update?.Key && mappingOperation.Delete?.Key);
-    if (!isCreate && !isDelete && !isRevoke) {
-      throw new AppError('INVALID_REQUEST', 'Kiểu giao dịch APIKEY/KEYMAP không được hỗ trợ.');
-    }
-    if (isCreate && mappingOperation.Put.Item.tenantId !== ctx.tenantId) {
-      throw new AppError('FORBIDDEN', 'KEYMAP phải trỏ tới tenant trong ngữ cảnh đã xác thực.');
-    }
-    if (isCreate && localOperation.Put.Item.keyId !== keyId) {
-      throw new AppError('FORBIDDEN', 'keyId trong APIKEY không khớp với khóa lưu trữ.');
-    }
+    validateApiKeyTransaction(ctx, ops);
 
     const transactItems = ops.map((op) => {
       const operation = op.Put ? 'Put' : op.Update ? 'Update' : op.Delete ? 'Delete' : op.ConditionCheck ? 'ConditionCheck' : undefined;

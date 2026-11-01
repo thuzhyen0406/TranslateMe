@@ -33,6 +33,39 @@ export interface ApiKeyManagerDependencies {
   apiGateway: ApiGatewayKeyAdmin;
   usagePlanIds: Record<ApiKeyPlan, string>;
   now: () => Date;
+  logger?: ApiKeyManagerLogger;
+}
+
+/** Logger cấu trúc cho lỗi vòng đời key; mỗi entry chỉ chứa metadata an toàn, không chứa secret. */
+export interface ApiKeyManagerLogger {
+  error(entry: Record<string, unknown>): void;
+}
+
+/** Trả tên lỗi ổn định để log; input là lỗi bất kỳ, output là tên class hoặc UnknownError. */
+function getErrorName(error: unknown): string {
+  return error instanceof Error && error.name ? error.name : 'UnknownError';
+}
+
+/** Ghi lỗi API key theo QC-9 với định danh request/key; không ghi message hoặc giá trị secret. */
+function logKeyError(
+  ctx: Ctx,
+  deps: ApiKeyManagerDependencies,
+  action: string,
+  keyId: string,
+  error: unknown,
+  extra: Record<string, unknown> = {},
+): void {
+  const entry = {
+    level: 'ERROR',
+    service: 'api-key-manager',
+    action,
+    errorName: getErrorName(error),
+    keyId,
+    request_id: ctx.requestId,
+    ...extra,
+  };
+  if (deps.logger) deps.logger.error(entry);
+  else console.error(JSON.stringify(entry));
 }
 
 /** Dữ liệu an toàn có thể trả về khi liệt kê key, không chứa giá trị bí mật của key. */
@@ -182,17 +215,29 @@ async function cleanupProvisionedKey(
   deps: ApiKeyManagerDependencies,
 ): Promise<boolean> {
   let cleanupFailed = false;
-  try { await deps.apiGateway.setKeyEnabled(keyId, false); } catch { cleanupFailed = true; }
-  try { await deps.apiGateway.detachKey(keyId, usagePlanId); } catch { cleanupFailed = true; }
+  try { await deps.apiGateway.setKeyEnabled(keyId, false); } catch (error) {
+    cleanupFailed = true;
+    logKeyError(ctx, deps, 'API_KEY_CLEANUP_DISABLE_FAILED', keyId, error);
+  }
+  try { await deps.apiGateway.detachKey(keyId, usagePlanId); } catch (error) {
+    cleanupFailed = true;
+    logKeyError(ctx, deps, 'API_KEY_CLEANUP_DETACH_FAILED', keyId, error);
+  }
   if (databaseWritten) {
     try {
       await deps.db.transactApiKey(ctx, [
         { Delete: { Key: keys.apiKey(ctx, keyId) } },
         { Delete: { Key: keys.keymap(keyId), ConditionExpression: 'attribute_not_exists(PK) OR tenantId = :tenantId', ExpressionAttributeValues: { ':tenantId': ctx.tenantId } } },
       ]);
-    } catch { cleanupFailed = true; }
+    } catch (error) {
+      cleanupFailed = true;
+      logKeyError(ctx, deps, 'API_KEY_CLEANUP_DATABASE_FAILED', keyId, error);
+    }
   }
-  try { await deps.apiGateway.deleteApiKey(keyId); } catch { cleanupFailed = true; }
+  try { await deps.apiGateway.deleteApiKey(keyId); } catch (error) {
+    cleanupFailed = true;
+    logKeyError(ctx, deps, 'API_KEY_CLEANUP_DELETE_FAILED', keyId, error);
+  }
   return !cleanupFailed;
 }
 
@@ -203,13 +248,20 @@ async function provisionApiKey(
   deps: ApiKeyManagerDependencies,
 ): Promise<{ key: ApiKeySummary; value: string }> {
   const usagePlanId = requireUsagePlanId(input.plan, deps);
-  const gatewayKey = await deps.apiGateway.createApiKey({
-    name: input.name,
-    description: `TranslateMe tenant ${ctx.tenantId}`,
-  });
+  let gatewayKey: { id?: string; value?: string };
+  try {
+    gatewayKey = await deps.apiGateway.createApiKey({
+      name: input.name,
+      description: `TranslateMe tenant ${ctx.tenantId}`,
+    });
+  } catch (error) {
+    logKeyError(ctx, deps, 'API_KEY_CREATE_FAILED', 'not-issued', error);
+    throw new AppError('INTERNAL_ERROR', 'Không thể tạo API key.', { cause: getErrorName(error) });
+  }
   const keyId = gatewayKey.id;
   const value = gatewayKey.value;
   if (!keyId || !value) {
+    logKeyError(ctx, deps, 'API_KEY_CREATE_RESPONSE_INVALID', keyId ?? 'not-issued', new Error('Missing key id or value'));
     if (keyId) await cleanupProvisionedKey(ctx, keyId, usagePlanId, false, deps);
     throw new AppError('INTERNAL_ERROR', 'API Gateway không trả đủ thông tin tạo key.');
   }
@@ -241,10 +293,11 @@ async function provisionApiKey(
       ExpressionAttributeValues: { ':active': 'ACTIVE', ':pending': 'PENDING', ':now': deps.now().toISOString() },
     });
     await deps.apiGateway.setKeyEnabled(keyId, true);
-  } catch {
+  } catch (error) {
+    logKeyError(ctx, deps, 'API_KEY_PROVISION_FAILED', keyId, error);
     const clean = await cleanupProvisionedKey(ctx, keyId, usagePlanId, databaseWritten, deps);
-    if (!clean) throw new AppError('INTERNAL_ERROR', 'Không hoàn tất được khởi tạo key; cần kiểm tra trạng thái tài nguyên AWS.');
-    throw new AppError('INTERNAL_ERROR', 'Không thể hoàn tất tạo API key.');
+    if (!clean) throw new AppError('INTERNAL_ERROR', 'Không hoàn tất được khởi tạo key; cần kiểm tra trạng thái tài nguyên AWS.', { cause: getErrorName(error), keyId });
+    throw new AppError('INTERNAL_ERROR', 'Không thể hoàn tất tạo API key.', { cause: getErrorName(error) });
   }
 
   const summary: ApiKeySummary = {
@@ -377,16 +430,23 @@ export async function changeApiKeyPlan(
       ExpressionAttributeNames: { '#plan': 'plan', '#status': 'status' },
       ExpressionAttributeValues: { ':newPlan': requestedPlan, ':oldPlan': oldPlan, ':active': 'ACTIVE', ':now': deps.now().toISOString() },
     });
-  } catch {
+  } catch (error) {
+    logKeyError(ctx, deps, 'API_KEY_PLAN_CHANGE_FAILED', cleanKeyId, error);
     let restored = true;
     if (newPlanAttached) {
-      try { await deps.apiGateway.detachKey(cleanKeyId, newUsagePlanId); } catch { restored = false; }
+      try { await deps.apiGateway.detachKey(cleanKeyId, newUsagePlanId); } catch (rollbackError) {
+        restored = false;
+        logKeyError(ctx, deps, 'API_KEY_PLAN_ROLLBACK_DETACH_FAILED', cleanKeyId, rollbackError, { originalErrorName: getErrorName(error) });
+      }
     }
     if (oldPlanDetached) {
-      try { await deps.apiGateway.attachKey(cleanKeyId, oldUsagePlanId); } catch { restored = false; }
+      try { await deps.apiGateway.attachKey(cleanKeyId, oldUsagePlanId); } catch (rollbackError) {
+        restored = false;
+        logKeyError(ctx, deps, 'API_KEY_PLAN_ROLLBACK_ATTACH_FAILED', cleanKeyId, rollbackError, { originalErrorName: getErrorName(error) });
+      }
     }
-    if (!restored) throw new AppError('INTERNAL_ERROR', 'Không đổi được gói và không khôi phục được Usage Plan cũ.');
-    throw new AppError('INTERNAL_ERROR', 'Không thể hoàn tất đổi gói API key.');
+    if (!restored) throw new AppError('INTERNAL_ERROR', 'Không đổi được gói và không khôi phục được Usage Plan cũ.', { cause: getErrorName(error), keyId });
+    throw new AppError('INTERNAL_ERROR', 'Không thể hoàn tất đổi gói API key.', { cause: getErrorName(error) });
   }
 
   return toSummary({ ...current, plan: requestedPlan, updatedAt: deps.now().toISOString() });
@@ -437,7 +497,7 @@ export async function handleApiKeyRoute(
   try {
     const method = (event.httpMethod ?? 'GET').toUpperCase();
     const path = event.path ?? event.rawPath ?? '';
-    const route = /\/console\/api-keys(?:\/([^/]+)(?:\/(rotate|plan))?)?$/.exec(path);
+    const route = /\/console\/api-keys(?:\/([^/]+)(?:\/(rotate|revoke))?)?$/.exec(path);
     if (!route) throw new AppError('NOT_FOUND', 'Không tìm thấy endpoint.');
     let keyId: string | undefined;
     try {
@@ -459,11 +519,13 @@ export async function handleApiKeyRoute(
       const result = await rotateApiKey(ctx, keyId, deps);
       return respond(201, { api_key: { ...result.key, value: result.value } });
     }
-    if (method === 'DELETE' && keyId && !action) {
+    if (method === 'POST' && keyId && action === 'revoke') {
       return respond(200, { api_key: await revokeApiKey(ctx, keyId, deps) });
     }
-    if (method === 'PATCH' && keyId && action === 'plan') {
-      return respond(200, { api_key: await changeApiKeyPlan(ctx, keyId, body.plan as ApiKeyPlan, deps) });
+    if (method === 'PATCH' && keyId && !action) {
+      return respond(200, {
+        api_key: await changeApiKeyPlan(ctx, keyId, body.plan as ApiKeyPlan, deps),
+      });
     }
     throw new AppError('NOT_FOUND', 'Không tìm thấy endpoint.');
   } catch (error) {
