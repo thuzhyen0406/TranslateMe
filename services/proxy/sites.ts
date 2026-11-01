@@ -7,6 +7,10 @@
  * Handler không phải sửa. Kết quả được lưu đệm trong bộ nhớ Lambda 60 giây (cachedSiteResolver).
  */
 
+import { MAX_PAGE_CACHE_SECONDS } from '../../libs/common/seg.js';
+
+export { MAX_PAGE_CACHE_SECONDS };
+
 export type SiteStatus = 'PENDING' | 'ACTIVE' | 'PAUSED';
 export type TenantStatus = 'ACTIVE' | 'LOCKED';
 
@@ -21,7 +25,11 @@ export interface SiteConfig {
   targetLangs: string[];
   /** Bộ chọn CSS vùng không dịch (Q2) */
   exclusionSelectors?: string[];
-  /** Thời gian lưu đệm trang dịch đầy đủ ở CloudFront (giây). Mặc định DEFAULT_CACHE_SECONDS */
+  /**
+   * Thời gian lưu đệm trang dịch đầy đủ ở CloudFront (giây). Mặc định DEFAULT_CACHE_SECONDS, tối đa
+   * MAX_PAGE_CACHE_SECONDS (7 ngày) để luôn ngắn hơn TTL của SEG (30 ngày) – nếu không, SEG có thể hết hạn
+   * trước cache và xóa cache chọn lọc sẽ sót trang.
+   */
   cacheSeconds?: number;
   /** Trạng thái HOST */
   status: SiteStatus;
@@ -70,6 +78,9 @@ export function validateSiteConfig(raw: unknown): SiteConfig {
     ? o.exclusionSelectors.filter((s): s is string => typeof s === 'string' && s.trim() !== '')
     : [];
   const cacheSeconds = typeof o.cacheSeconds === 'number' && o.cacheSeconds > 0 ? Math.floor(o.cacheSeconds) : DEFAULT_CACHE_SECONDS;
+  if (cacheSeconds > MAX_PAGE_CACHE_SECONDS) {
+    throw new Error(`cacheSeconds tối đa ${MAX_PAGE_CACHE_SECONDS} giây (7 ngày), ngắn hơn TTL của chỉ mục SEG (${slug})`);
+  }
   const status = (o.status ?? 'ACTIVE') as SiteStatus;
   if (!['PENDING', 'ACTIVE', 'PAUSED'].includes(status)) throw new Error(`status không hợp lệ (${slug})`);
   const tenantStatus = (o.tenantStatus ?? 'ACTIVE') as TenantStatus;

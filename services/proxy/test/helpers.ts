@@ -3,6 +3,7 @@
  */
 import type { TranslateTextCommand } from '@aws-sdk/client-translate';
 import { toFetchResult, type SafeFetchCompatResult, type SafeFetchOutcome } from '../../../libs/common/safeFetch.js';
+import type { SegDb, SegItem } from '../../../libs/common/seg.js';
 import { assertTenantKey, type TmDb, type TmKey } from '../../../libs/common/tm.js';
 import type { Ctx } from '../../../libs/common/types.js';
 import type { SiteConfig } from '../sites.js';
@@ -127,6 +128,31 @@ export function memoryTmDb() {
       if (cur && cur.label !== 'MACHINE') throw Object.assign(new Error('x'), { name: 'ConditionalCheckFailedException' });
       store.set(id(key), { ...key, src: v[':src'], tgt: v[':tgt'], label: 'MACHINE', glossaryVersion: v[':gv'], needsReview: v[':nr'], GSI3PK: v[':g3pk'] });
       return {};
+    },
+  };
+  return db;
+}
+
+/** DynamoDB giả cho SEG: bảng chính + GSI2, kiểm tra khóa thuộc tenant. `failWith` làm mọi BatchWriteItem lỗi. */
+export function memorySegDb(o: { failWith?: string } = {}) {
+  const store = new Map<string, SegItem>();
+  const db: SegDb & { store: typeof store } = {
+    store,
+    async batchWrite(c, items) {
+      if (o.failWith) throw Object.assign(new Error('x'), { name: o.failWith });
+      for (const it of items) {
+        assertTenantKey(c, it);
+        assertTenantKey(c, { PK: it.GSI2PK, SK: it.GSI2SK });
+        store.set(`${it.PK}|${it.SK}`, { ...it });
+      }
+    },
+    async query(c, pk, skPrefix) {
+      assertTenantKey(c, { PK: pk, SK: skPrefix });
+      return [...store.values()].filter((i) => i.PK === pk && i.SK.startsWith(skPrefix)).map((i) => ({ ...i }));
+    },
+    async queryGsi2(c, gsi2pk) {
+      assertTenantKey(c, { PK: gsi2pk, SK: '' });
+      return [...store.values()].filter((i) => i.GSI2PK === gsi2pk).map((i) => ({ ...i }));
     },
   };
   return db;
