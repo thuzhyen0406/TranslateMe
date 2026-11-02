@@ -1,5 +1,5 @@
 /**
- * Worker C13 (FINISH_PAGE) và cách proxy đóng gói sự kiện gửi worker (B.10, 2.5).
+ * Worker C13 (FINISH_PAGE) và cách proxy đóng gói sự kiện gửi worker (B.10, 2.5 & 3.9).
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
@@ -154,10 +154,50 @@ describe('worker C13 – FINISH_PAGE', () => {
     assert.equal(second.quota.reserves.length, 0);
   });
 
-  it('dùng thuật ngữ hiện hành từ getGlossaryState', async () => {
-    const { worker, client } = setup({ getGlossaryState: async () => ({ version: 5, terminologyName: 'tm-t_new', terms: [] }) });
-    await worker({ ...BASE, sentences: withHash(['Một']) });
+  it('dùng thuật ngữ hiện hành từ getGlossaryState, gắn cờ HUMAN lỗi thời và hậu kiểm câu MACHINE mới (3.9)', async () => {
+    const db = memoryTmDb();
+    const humanHash = hashSentenceStub('Ở phố cổ Hội An');
+    const humanKey = tmKey(ctx, 'vi', 'en', humanHash);
+    db.store.set(`${humanKey.PK}|${humanKey.SK}`, {
+      ...humanKey,
+      src: 'Ở phố cổ Hội An',
+      tgt: 'In the old town',
+      label: 'HUMAN',
+      glossaryVersion: 1,
+      GSI3PK: `TENANT#${SITE.tenantId}#TM#HUMAN`,
+    });
+
+    const { worker, client, logger } = setup({
+      db,
+      getGlossaryState: async () => ({
+        version: 5,
+        terminologyName: 'tm-t_new',
+        terms: [
+          {
+            normalized: 'phố cổ hội an',
+            sourceTerm: 'phố cổ Hội An',
+            type: 'FIXED',
+            translations: { en: 'Hoi An Ancient Town' },
+            sinceVersion: 4,
+          },
+        ],
+      }),
+    });
+    await worker({ ...BASE, sentences: withHash(['Ở phố cổ Hội An', 'Đường đi phố cổ Hội An']) });
     assert.deepEqual(client.calls[0].TerminologyNames, ['tm-t_new']);
+
+    // Bản HUMAN lỗi thời được gắn cờ Cần xem lại
+    const updatedHuman = db.store.get(`${humanKey.PK}|${humanKey.SK}`)!;
+    assert.equal(updatedHuman.needsReview, true);
+    assert.equal(updatedHuman.GSI3PK, `TENANT#${SITE.tenantId}#TM#REVIEW`);
+
+    // Bản MACHINE mới dịch thiếu "Hoi An Ancient Town" bị hậu kiểm gắn cờ Cần xem lại
+    const machineHash = hashSentenceStub('Đường đi phố cổ Hội An');
+    const machineKey = tmKey(ctx, 'vi', 'en', machineHash);
+    const machineItem = db.store.get(`${machineKey.PK}|${machineKey.SK}`)!;
+    assert.equal(machineItem.needsReview, true);
+    assert.equal(machineItem.GSI3PK, `TENANT#${SITE.tenantId}#TM#REVIEW`);
+    assert.equal(logger.infos[0].glossaryPostCheckFlagged, 1);
   });
 
   it('hết hạn mức -> QUOTA_EXCEEDED, không gọi Translate', async () => {
