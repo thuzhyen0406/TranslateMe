@@ -305,6 +305,33 @@ describe('siteManager', () => {
     assert.deepEqual(harness.invalidations, []);
   });
 
+  it('cho phép thử lại invalidation sau khi trạng thái đã đổi', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+    const host = hostFor(harness.records, 'tenant-a', created.slug);
+    assert.ok(host);
+    host.status = 'ACTIVE';
+
+    let attempts = 0;
+    harness.dependencies.invalidateSites = async (_ctx, options) => {
+      attempts += 1;
+      if (attempts === 1) throw new AppError('CACHE_INVALIDATION_FAILED', 'CloudFront unavailable');
+      return { paths: [`/${options.slugs[0]}/*`], mode: 'WILDCARD' };
+    };
+
+    await assert.rejects(
+      pauseSite(tenantA, created.slug, harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'CACHE_INVALIDATION_FAILED',
+    );
+    assert.equal(host.status, 'PAUSED');
+
+    assert.deepEqual(await pauseSite(tenantA, created.slug, harness.dependencies), {
+      status: 'PAUSED',
+      invalidation: { paths: [`/${created.slug}/*`], mode: 'WILDCARD' },
+    });
+    assert.equal(attempts, 2);
+  });
+
   it('chỉ một tenant đăng ký thành công khi hai tenant cùng đăng ký slug', async () => {
     const harness = createHarness();
 

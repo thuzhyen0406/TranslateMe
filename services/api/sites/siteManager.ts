@@ -84,6 +84,9 @@ async function updateSiteStatus(
     await deps.db.updateSiteStatus(ctx, slug, expectedStatus, nextStatus);
   } catch (error: any) {
     if (error?.name === 'ConditionalCheckFailedException') {
+      // Cho phép lặp lại thao tác nếu trạng thái đã đổi nhưng lần xóa cache trước thất bại.
+      const current = await deps.db.get(ctx, keys.host(ctx, slug));
+      if (current?.status === nextStatus) return;
       throw new AppError('VERSION_CONFLICT', 'Trạng thái website đã thay đổi');
     }
     throw error;
