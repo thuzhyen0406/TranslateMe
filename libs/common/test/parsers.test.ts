@@ -1,14 +1,19 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { deflateRawSync } from 'node:zlib';
 import { parse as parseHtml, serialize } from 'parse5';
+import { computeCrc32 } from '../docx.js';
 import {
   CorruptFile,
   UnsupportedFormat,
+  countDocxStructure,
+  createDocxPackage,
   formatFromFileName,
   parse,
   rebuild,
   rebuildDetailed,
   translatedFileName,
+  type DocxSkeleton,
   type HtmlSkeleton,
   type TxtSkeleton,
 } from '../parsers.js';
@@ -135,10 +140,364 @@ describe('HTML – dùng lại extract của F2, bỏ việc riêng của websit
   });
 });
 
+// ============================================================================
+// Kiểm thử DOCX (Nhiệm vụ 4.9 – TV4)
+// ============================================================================
+
+const SAMPLE_DOCX_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      <w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+      <w:r><w:rPr><w:b/></w:rPr><w:t>Homestay Sông Hàn</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t xml:space="preserve">Phòng có </w:t></w:r>
+      <w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">ban </w:t></w:r>
+      <w:r><w:rPr><w:b/></w:rPr><w:t>công</w:t></w:r>
+      <w:r><w:t xml:space="preserve"> nhìn ra sông. Xem </w:t></w:r>
+      <w:hyperlink r:id="rId5" w:history="1">
+        <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>bảng giá</w:t></w:r>
+      </w:hyperlink>
+      <w:r><w:t> chi tiết.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t>Giờ nhận phòng:</w:t><w:tab/><w:t>14:00</w:t><w:br/><w:t>Giờ trả phòng: 12:00.</w:t></w:r>
+    </w:p>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>Loại phòng</w:t></w:r></w:p></w:tc>
+        <w:tc>
+          <w:p><w:r><w:t>Mô tả tiện nghi</w:t></w:r></w:p>
+          <w:tbl>
+            <w:tr>
+              <w:tc><w:p><w:r><w:t>Bao gồm ăn sáng miễn phí.</w:t></w:r></w:p></w:tc>
+            </w:tr>
+          </w:tbl>
+        </w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>2026</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>Phòng đôi có cửa sổ lớn.</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+  </w:body>
+</w:document>`;
+
+describe('DOCX (4.9) – phân tích đoạn văn, bảng lồng nhau, gộp run và dựng lại', () => {
+  it('parse rồi rebuild không dịch (translations = []) cho tệp DOCX tương đương và giữ nguyên tệp nhị phân khác trong gói', () => {
+    const fakePng = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    const docxBytes = createDocxPackage({
+      'word/document.xml': SAMPLE_DOCX_XML,
+      'word/styles.xml': '<?xml version="1.0" encoding="UTF-8"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:styleId="Heading1"/></w:styles>',
+      'word/media/image1.png': fakePng,
+    });
+
+    const doc = parse('DOCX', docxBytes);
+    const sk = doc.skeleton as DocxSkeleton;
+    assert.equal(sk.format, 'DOCX');
+    assert.deepEqual(JSON.parse(JSON.stringify(sk)), sk, 'skeleton DOCX phải thuần JSON để ghi S3');
+
+    // Gộp run: "ban " và "công" có cùng <w:rPr><w:b/></w:rPr> phải gộp thành {1}ban công{/1}
+    // Đoạn 1 toàn bộ là chữ đậm -> chữ đậm là định dạng nền, không bọc {1} thừa
+    assert.deepEqual(
+      doc.blocks.map((b) => b.text),
+      [
+        'Homestay Sông Hàn',
+        'Phòng có {1}ban công{/1} nhìn ra sông.',
+        'Xem {1}bảng giá{/1} chi tiết.',
+        'Giờ nhận phòng:\t14:00\nGiờ trả phòng: 12:00.',
+        'Loại phòng',
+        'Mô tả tiện nghi',
+        'Bao gồm ăn sáng miễn phí.',
+        'Phòng đôi có cửa sổ lớn.',
+      ],
+    );
+
+    // Rebuild không dịch (translations = []) qua cả skeleton trực tiếp và skeleton sau JSON.parse
+    const rebuiltBytes = rebuild(JSON.parse(JSON.stringify(sk)), []);
+    const reparsed = parse('DOCX', rebuiltBytes);
+    assert.deepEqual(reparsed.blocks, doc.blocks);
+    assert.deepEqual(reparsed.warnings, doc.warnings);
+
+    const reparsedSk = reparsed.skeleton as DocxSkeleton;
+    assert.equal(reparsedSk.expectedParagraphCount, sk.expectedParagraphCount);
+    assert.equal(reparsedSk.expectedTableCellCount, sk.expectedTableCellCount);
+
+    // Kiểm tra ảnh trong gói ZIP được sao chép nguyên vẹn từng byte
+    const origImg = sk.entries.find((e) => e.name === 'word/media/image1.png')!;
+    const newImg = reparsedSk.entries.find((e) => e.name === 'word/media/image1.png')!;
+    assert.equal(newImg.compressedBase64, origImg.compressedBase64);
+    assert.equal(newImg.crc32, origImg.crc32);
+  });
+
+  it('dịch sang en và ko (Kịch bản 7): bảo toàn định dạng {n}, đích hyperlink, tab/br, số w:p & w:tc và đặt phông Đông Á', () => {
+    const docxBytes = createDocxPackage({
+      'word/document.xml': SAMPLE_DOCX_XML,
+    });
+    const doc = parse('DOCX', docxBytes);
+
+    const enTranslations = [
+      'Han River Homestay',
+      'The room has a {1}balcony{/1} overlooking the river.',
+      'See the {1}price list{/1} in detail.',
+      'Check-in time:\t14:00\nCheck-out time: 12:00.',
+      'Room type',
+      'Amenities description',
+      'Free breakfast included.',
+      'Double room with large window.',
+    ];
+    const enResult = rebuildDetailed(doc.skeleton, enTranslations, { targetLang: 'en' });
+    assert.deepEqual(enResult.stats, {
+      sentences: 8,
+      translated: 8,
+      keptSource: 0,
+      tagFallback: 0,
+    });
+
+    const enParsed = parse('DOCX', enResult.bytes);
+    const enSk = enParsed.skeleton as DocxSkeleton;
+    assert.equal(enSk.expectedParagraphCount, (doc.skeleton as DocxSkeleton).expectedParagraphCount);
+    assert.equal(enSk.expectedTableCellCount, (doc.skeleton as DocxSkeleton).expectedTableCellCount);
+    assert.ok(enSk.documentXml.includes('<w:hyperlink r:id="rId5" w:history="1">'));
+    assert.ok(enSk.documentXml.includes('<w:tab/>'));
+    assert.ok(enSk.documentXml.includes('<w:br/>'));
+    assert.ok(enSk.documentXml.includes('xml:space="preserve"'));
+
+    // Dịch sang tiếng Hàn (ko): kiểm tra gán phông Đông Á w:eastAsia="Malgun Gothic" và w:lang w:eastAsia="ko-KR"
+    const koTranslations = [
+      '한강 홈스테이',
+      '강이 보이는 {1}발코니{/1}가 있는 객실입니다.',
+      '자세한 {1}요금표{/1}를 확인하세요.',
+      '체크인:\t14:00\n체크아웃: 12:00.',
+      '객실 유형',
+      '편의시설 설명',
+      '무료 조식이 포함되어 있습니다.',
+      '큰 창문이 있는 더블룸입니다.',
+    ];
+    const koBytes = rebuild(doc.skeleton, koTranslations, { targetLang: 'ko' });
+    const koSk = parse('DOCX', koBytes).skeleton as DocxSkeleton;
+    assert.equal(koSk.expectedParagraphCount, (doc.skeleton as DocxSkeleton).expectedParagraphCount);
+    assert.equal(koSk.expectedTableCellCount, (doc.skeleton as DocxSkeleton).expectedTableCellCount);
+    assert.ok(koSk.documentXml.includes('w:eastAsia="Malgun Gothic"'));
+    assert.ok(koSk.documentXml.includes('w:eastAsia="ko-KR"'));
+
+    // Dịch sang tiếng Nhật (ja) và tiếng Trung (zh, zh-TW)
+    const jaSk = parse('DOCX', rebuild(doc.skeleton, koTranslations, { targetLang: 'ja' })).skeleton as DocxSkeleton;
+    assert.ok(jaSk.documentXml.includes('w:eastAsia="MS Mincho"'));
+    assert.ok(jaSk.documentXml.includes('w:eastAsia="ja-JP"'));
+
+    const zhSk = parse('DOCX', rebuild(doc.skeleton, koTranslations, { targetLang: 'zh' })).skeleton as DocxSkeleton;
+    assert.ok(zhSk.documentXml.includes('w:eastAsia="SimSun"'));
+    assert.ok(zhSk.documentXml.includes('w:eastAsia="zh-CN"'));
+  });
+
+  it('khi bản dịch đảo thứ tự {1} và {2} vẫn khôi phục đúng định dạng; khi mất {1} thì fallback văn bản thuần và báo tagFallback', () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+      <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+        <w:body>
+          <w:p>
+            <w:r><w:t xml:space="preserve">Đặt </w:t></w:r>
+            <w:r><w:rPr><w:b/></w:rPr><w:t>phòng VIP</w:t></w:r>
+            <w:r><w:t xml:space="preserve"> tại </w:t></w:r>
+            <w:hyperlink r:id="rId9"><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>trang chủ</w:t></w:r></w:hyperlink>
+            <w:r><w:t> ngay hôm nay.</w:t></w:r>
+          </w:p>
+        </w:body>
+      </w:document>`;
+    const doc = parse('DOCX', createDocxPackage({ 'word/document.xml': xml }));
+    assert.deepEqual(doc.blocks.map((b) => b.text), ['Đặt {1}phòng VIP{/1} tại {2}trang chủ{/2} ngay hôm nay.']);
+
+    // Đảo thứ tự {2} lên trước {1}
+    const reorderedBytes = rebuild(doc.skeleton, ['Tại {2}homepage{/2} đặt {1}VIP room{/1} ngay.']);
+    const reorderedSk = parse('DOCX', reorderedBytes).skeleton as DocxSkeleton;
+    assert.ok(reorderedSk.documentXml.includes('<w:hyperlink r:id="rId9"><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">homepage</w:t></w:r></w:hyperlink>'));
+    assert.ok(reorderedSk.documentXml.includes('<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">VIP room</w:t></w:r>'));
+
+    // Bản dịch làm mất {/1} -> fallback văn bản thuần và tăng stats.tagFallback
+    const brokenRes = rebuildDetailed(doc.skeleton, ['Book {1}VIP room at homepage today.']);
+    assert.equal(brokenRes.stats.tagFallback, 1);
+    const brokenSk = parse('DOCX', brokenRes.bytes).skeleton as DocxSkeleton;
+    assert.ok(brokenSk.documentXml.includes('Book VIP room at homepage today.'));
+  });
+
+  it('ngoặc nhọn có thật {ten}, {1} và ký tự đặc biệt XML (&, <, >) trong DOCX được thoát và khôi phục chính xác; kiểm tra REBUILD_VERIFICATION_FAILED', () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+      <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+          <w:p>
+            <w:r><w:t xml:space="preserve">Điền {ten} &amp; {1} vào </w:t></w:r>
+            <w:r><w:rPr><w:i/></w:rPr><w:t>ô &lt;A&gt;</w:t></w:r>
+            <w:r><w:t>.</w:t></w:r>
+          </w:p>
+        </w:body>
+      </w:document>`;
+    const doc = parse('DOCX', createDocxPackage({ 'word/document.xml': xml }));
+    assert.deepEqual(doc.blocks.map((b) => b.text), ['Điền {{ten}} & {{1}} vào {1}ô <A>{/1}.']);
+
+    const rebuilt = rebuild(doc.skeleton, ['Fill {{name}} & {{1}} into {1}box <A>{/1}.'], { targetLang: 'en' });
+    const reparsed = parse('DOCX', rebuilt);
+    assert.deepEqual(reparsed.blocks.map((b) => b.text), ['Fill {{name}} & {{1}} into {1}box <A>{/1}.']);
+
+    // Kiểm tra REBUILD_VERIFICATION_FAILED khi số w:p hoặc w:tc không khớp với expectedParagraphCount
+    const tamperedSkeleton: DocxSkeleton = {
+      ...(doc.skeleton as DocxSkeleton),
+      expectedParagraphCount: 99,
+    };
+    assert.throws(
+      () => rebuild(tamperedSkeleton, []),
+      (e: unknown) => e instanceof CorruptFile && e.reason === 'REBUILD_VERIFICATION_FAILED',
+    );
+  });
+});
+
+describe('DOCX (4.9) – cảnh báo thành phần ngoài phạm vi theo Bảng 2.17', () => {
+  it('phát hiện UNSUPPORTED_PART (header, footer, footnotes, endnotes), UNSUPPORTED_ELEMENT (drawing, txbxContent, fldSimple, oMath) và TRACKED_CHANGES (w:ins, w:del)', () => {
+    const complexXml = `<?xml version="1.0" encoding="UTF-8"?>
+      <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                  xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+        <w:body>
+          <w:p>
+            <w:r><w:t xml:space="preserve">Giá phòng đã </w:t></w:r>
+            <w:ins w:id="1" w:author="Admin"><w:r><w:t>giảm 20%</w:t></w:r></w:ins>
+            <w:del w:id="2" w:author="Admin"><w:r><w:delText>tăng 10%</w:delText></w:r></w:del>
+            <w:r><w:t> trong tháng này.</w:t></w:r>
+          </w:p>
+          <w:p>
+            <w:r>
+              <w:drawing>
+                <w:txbxContent>
+                  <w:p><w:r><w:t>Chữ trong hộp văn bản không dịch.</w:t></w:r></w:p>
+                </w:txbxContent>
+              </w:drawing>
+            </w:r>
+            <w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>
+            <m:oMath><m:r><m:t>x+y=z</m:t></m:r></m:oMath>
+          </w:p>
+        </w:body>
+      </w:document>`;
+
+    const docxBytes = createDocxPackage({
+      'word/document.xml': complexXml,
+      'word/header1.xml': '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Đầu trang</w:t></w:r></w:p></w:hdr>',
+      'word/footer1.xml': '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Chân trang</w:t></w:r></w:p></w:ftr>',
+      'word/footnotes.xml': '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:t>Chú thích 1</w:t></w:r></w:p></w:footnote></w:footnotes>',
+    });
+
+    const doc = parse('DOCX', docxBytes);
+
+    // Chỉ câu ở đoạn 1 (gồm phần w:ins "giảm 20%", bỏ qua phần w:del "tăng 10%") được trích xuất dịch;
+    // chữ trong w:txbxContent ("Chữ trong hộp văn bản không dịch.") được giữ nguyên, không đưa vào blocks
+    assert.deepEqual(doc.blocks.map((b) => b.text), ['Giá phòng đã giảm 20% trong tháng này.']);
+
+    const codes = new Set(doc.warnings.map((w) => w.code));
+    assert.ok(codes.has('UNSUPPORTED_PART'), 'phải có cảnh báo UNSUPPORTED_PART');
+    assert.ok(codes.has('UNSUPPORTED_ELEMENT'), 'phải có cảnh báo UNSUPPORTED_ELEMENT');
+    assert.ok(codes.has('TRACKED_CHANGES'), 'phải có cảnh báo TRACKED_CHANGES');
+
+    // Khi dựng lại, phần w:drawing/w:txbxContent vẫn còn nguyên và tổng số w:p (gồm cả w:p trong txbxContent) không đổi
+    const rebuilt = rebuild(doc.skeleton, ['Room price has been reduced by 20% this month.'], { targetLang: 'en' });
+    const reparsedSk = parse('DOCX', rebuilt).skeleton as DocxSkeleton;
+    assert.equal(reparsedSk.expectedParagraphCount, 3);
+    assert.ok(reparsedSk.documentXml.includes('Chữ trong hộp văn bản không dịch.'));
+    assert.ok(!reparsedSk.documentXml.includes('tăng 10%'));
+  });
+});
+
+describe('DOCX (4.9) – bảo mật chống XXE và tệp nén độc hại (ZIP bomb)', () => {
+  it('chặn mẫu XXE (<!DOCTYPE / <!ENTITY) trong word/document.xml và [Content_Types].xml', () => {
+    const xxeXml = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [
+  <!ELEMENT foo ANY >
+  <!ENTITY xxe SYSTEM "file:///etc/passwd" >
+]>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body><w:p><w:r><w:t>&xxe;</w:t></w:r></w:p></w:body>
+</w:document>`;
+
+    const xxeDocx = createDocxPackage({ 'word/document.xml': xxeXml });
+    assert.throws(
+      () => parse('DOCX', xxeDocx),
+      (e: unknown) => e instanceof CorruptFile && e.reason === 'XXE_DETECTED',
+    );
+
+    const xxeInContentTypes = createDocxPackage({
+      '[Content_Types].xml': '<?xml version="1.0"?><!DOCTYPE Types [<!ENTITY x SYSTEM "http://169.254.169.254/">]><Types/>',
+      'word/document.xml': SAMPLE_DOCX_XML,
+    });
+    assert.throws(
+      () => parse('DOCX', xxeInContentTypes),
+      (e: unknown) => e instanceof CorruptFile && e.reason === 'XXE_DETECTED',
+    );
+  });
+
+  it('chặn tệp nén độc hại (ZIP bomb) vượt tỷ lệ nén 100:1, kể cả khi giả mạo uncompressedSize nhỏ trong header', () => {
+    // Tạo một XML lặp rất dài nén cực nhỏ (tỷ lệ nén > 200:1)
+    const hugeRepeatedXml =
+      '<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+      '<w:p><w:r><w:t>' +
+      'A'.repeat(300_000) +
+      '</w:t></w:r></w:p></w:body></w:document>';
+    const bombDocx = createDocxPackage({ 'word/document.xml': hugeRepeatedXml });
+    assert.throws(
+      () => parse('DOCX', bombDocx),
+      (e: unknown) => e instanceof CorruptFile && e.reason === 'ZIP_BOMB',
+    );
+
+    // Giả mạo header Central Directory: ghi uncompressedSize = 500 byte để qua mặt kiểm tra header nhưng luồng deflate thực tế bung ra 300 KB
+    const spoofed = new Uint8Array(bombDocx);
+    const rawBytes = enc(hugeRepeatedXml);
+    const compressedLen = deflateRawSync(rawBytes).byteLength;
+    assert.ok(rawBytes.byteLength / compressedLen > 100);
+    // Tìm các vị trí chứa rawBytes.byteLength (300161) trong ZIP và ghi đè thành 500
+    for (let i = 0; i <= spoofed.byteLength - 4; i++) {
+      const val =
+        (spoofed[i] | (spoofed[i + 1] << 8) | (spoofed[i + 2] << 16) | (spoofed[i + 3] << 24)) >>> 0;
+      if (val === rawBytes.byteLength) {
+        spoofed[i] = 500 & 0xff;
+        spoofed[i + 1] = (500 >>> 8) & 0xff;
+        spoofed[i + 2] = 0;
+        spoofed[i + 3] = 0;
+      }
+    }
+    assert.throws(
+      () => parse('DOCX', spoofed),
+      (e: unknown) => e instanceof CorruptFile && e.reason === 'ZIP_BOMB',
+      'phải chặn ngay trong lúc inflate bằng maxOutputLength kể cả khi header khai gian',
+    );
+  });
+
+  it('chặn gói ZIP vượt quá 2.000 mục (ZIP_TOO_MANY_ENTRIES) hoặc chứa đường dẫn ../ (Zip Slip)', () => {
+    const manyFiles: Record<string, string> = { 'word/document.xml': SAMPLE_DOCX_XML };
+    for (let i = 0; i < 2001; i++) {
+      manyFiles[`word/extra/item_${i}.txt`] = 'x';
+    }
+    const tooManyEntriesZip = createDocxPackage(manyFiles, { compressionMethod: 0 });
+    assert.throws(
+      () => parse('DOCX', tooManyEntriesZip),
+      (e: unknown) => e instanceof CorruptFile && e.reason === 'ZIP_TOO_MANY_ENTRIES',
+    );
+
+    const zipSlipDocx = createDocxPackage({
+      'word/document.xml': SAMPLE_DOCX_XML,
+      'word/../../etc/passwd': 'root:x:0:0',
+    });
+    assert.throws(
+      () => parse('DOCX', zipSlipDocx),
+      (e: unknown) => e instanceof CorruptFile && e.reason === 'INVALID_DOCX',
+    );
+  });
+});
+
 describe('parse / rebuild – giao diện chung', () => {
-  it('DOCX chưa cắm vào (4.9) và định dạng lạ -> UnsupportedFormat', () => {
-    assert.throws(() => parse('DOCX', enc('x')), UnsupportedFormat);
+  it('định dạng lạ -> UnsupportedFormat; DOCX hỏng -> CorruptFile INVALID_DOCX', () => {
+    assert.throws(() => parse('DOCX', enc('x')), (e: unknown) => e instanceof CorruptFile && e.reason === 'INVALID_DOCX');
     assert.throws(() => parse('PDF', enc('x')), (e: unknown) => e instanceof UnsupportedFormat && e.format === 'PDF');
+    void computeCrc32;
+    void countDocxStructure;
   });
 
   it('không phải UTF-8 -> CorruptFile NOT_UTF8; quá kích thước -> TOO_LARGE', () => {
@@ -155,7 +514,8 @@ describe('parse / rebuild – giao diện chung', () => {
     bad({ v: 1, format: 'TXT', bom: false, parts: [3], sources: ['a'] });
     bad({ v: 1, format: 'HTML', skeletonHtml: 1, placeholders: {} });
     bad({ v: 2, format: 'TXT', bom: false, parts: [], sources: [] });
-    assert.throws(() => rebuild({ v: 1, format: 'DOCX' }, []), UnsupportedFormat);
+    bad({ v: 1, format: 'DOCX' });
+    assert.throws(() => rebuild({ v: 1, format: 'PDF' as never }, []), UnsupportedFormat);
   });
 
   it('định dạng theo tên tệp và tên tệp kết quả tên-gốc.lang.đuôi', () => {
