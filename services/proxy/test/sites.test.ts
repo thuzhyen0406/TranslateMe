@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { DEFAULT_CACHE_SECONDS, MAX_PAGE_CACHE_SECONDS, cachedSiteResolver, parseSitesJson, staticSiteResolver, validateSiteConfig } from '../sites.js';
+import {
+  DEFAULT_CACHE_SECONDS,
+  MAX_PAGE_CACHE_SECONDS,
+  cachedSiteResolver,
+  dynamoSiteResolver,
+  parseSitesJson,
+  staticSiteResolver,
+  validateSiteConfig,
+} from '../sites.js';
 
 const base = { slug: 'homestay-abc', tenantId: 't_1', homeUrl: 'https://homestay-abc.vn/blog', sourceLang: 'vi', targetLangs: ['en', 'vi', 'ko', 'en'] };
 
@@ -54,6 +62,37 @@ describe('SiteResolver', () => {
     const r = staticSiteResolver(parseSitesJson(JSON.stringify([base])));
     assert.equal((await r('homestay-abc'))?.tenantId, 't_1');
     assert.equal(await r('khong-co'), null);
+  });
+
+  it('dynamo resolver đọc slug, HOST, CONFIG và giữ tenant LOCKED', async () => {
+    const resolver = dynamoSiteResolver({
+      send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+        if (command.constructor.name === 'GetCommand') {
+          return Promise.resolve({ Item: { tenantId: 't_1' } });
+        }
+        return Promise.resolve({
+          Responses: {
+            'translate-data': [
+              { PK: 'TENANT#t_1', SK: 'HOST#homestay-abc', homeUrl: 'https://homestay-abc.vn', sourceLang: 'vi', targetLangs: ['en'], status: 'ACTIVE', noTranslateSelectors: ['.nav'] },
+              { PK: 'TENANT#t_1', SK: 'CONFIG', status: 'LOCKED' },
+            ],
+          },
+        });
+      },
+    } as never, 'translate-data');
+
+    assert.deepEqual(
+      await resolver('homestay-abc'),
+      validateSiteConfig({
+        ...base,
+        noTranslateSelectors: undefined,
+        exclusionSelectors: ['.nav'],
+        tenantStatus: 'LOCKED',
+        homeUrl: 'https://homestay-abc.vn',
+        targetLangs: ['en'],
+      }),
+    );
+    assert.equal(await resolver('missing-site'), null);
   });
 
   it('lưu đệm 60 giây, kể cả kết quả không tìm thấy', async () => {

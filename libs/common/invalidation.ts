@@ -60,6 +60,23 @@ export interface InvalidationStatus {
   createdAt?: string;
 }
 
+export interface SiteInvalidationResult {
+  paths: string[];
+  mode: 'WILDCARD';
+}
+
+/** Làm mới toàn bộ cache của các website khi cấu hình hoặc trạng thái tenant thay đổi. */
+export async function invalidateForSites(
+  _ctx: Ctx,
+  req: { slugs: readonly string[] },
+): Promise<SiteInvalidationResult> {
+  const slugs = [...new Set(req.slugs)].sort();
+  return {
+    paths: slugs.map((slug) => `/${slug}/*`),
+    mode: 'WILDCARD',
+  };
+}
+
 /** Cổng tới CloudFront (C1). Bản thật: cloudFrontCdn(); bản giả cho dev/test: createMemoryCdn(). */
 export interface CdnClient {
   createInvalidation(input: { callerReference: string; paths: string[] }): Promise<{ id: string }>;

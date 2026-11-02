@@ -9,6 +9,7 @@ import {
   COGNITO_CUSTOM_ATTRIBUTES,
   INVITABLE_ROLES,
   ROLES,
+  claimForRole,
   isInvitableRole,
 } from '../../../../libs/common/roles.js';
 import { generateTemporaryPassword, inviteMember } from '../inviteMember.js';
@@ -188,7 +189,7 @@ describe('PostConfirmation Trigger Handler', () => {
     assert.equal(cognitoInput.Username, 'user-sub-001');
     assert.deepEqual(cognitoInput.UserAttributes, [
       { Name: COGNITO_CUSTOM_ATTRIBUTES.TENANT_ID, Value: expectedTenantId },
-      { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: ROLES.TENANT_ADMIN },
+      { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: claimForRole(ROLES.TENANT_ADMIN) },
     ]);
   });
 
@@ -369,7 +370,7 @@ describe('inviteMember', () => {
       },
     };
 
-    for (const invalidRole of [ROLES.TENANT_ADMIN, ROLES.PLATFORM_ADMIN, 'SuperAdmin', '', 'admin']) {
+    for (const invalidRole of [ROLES.TENANT_ADMIN, 'PLATFORM_ADMIN', 'SuperAdmin', '', 'admin']) {
       await assert.rejects(
         () =>
           inviteMember('t_123456', 'dev@acme.io', invalidRole, {
@@ -417,7 +418,7 @@ describe('inviteMember', () => {
         { Name: 'email', Value: 'member@acme.io' },
         { Name: 'email_verified', Value: 'true' },
         { Name: COGNITO_CUSTOM_ATTRIBUTES.TENANT_ID, Value: 't_tenant_abc' },
-        { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: validRole },
+        { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: claimForRole(validRole) },
       ]);
 
       assert.equal(res.userSub, 'invited-sub-999');
@@ -441,6 +442,6 @@ describe('inviteMember', () => {
     assert.equal(isInvitableRole(ROLES.DEVELOPER), true);
     assert.equal(isInvitableRole(ROLES.REVIEWER), true);
     assert.equal(isInvitableRole(ROLES.TENANT_ADMIN), false);
-    assert.equal(isInvitableRole(ROLES.PLATFORM_ADMIN), false);
+    assert.equal(isInvitableRole('PLATFORM_ADMIN'), false);
   });
 });

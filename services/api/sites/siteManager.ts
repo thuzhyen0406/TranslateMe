@@ -1,5 +1,7 @@
 import { Ctx, AppError, keys, Lang } from '../../../libs/common/types.js';
-import { db } from '../../../libs/common/db.js';
+import { db, requireRole } from '../../../libs/common/db.js';
+import { assertTenantWritable } from '../../../libs/common/tenant.js';
+import { invalidateForSites } from '../../../libs/common/invalidation.js';
 import {
   defaultResolver,
   isBlockedIp,
@@ -23,9 +25,17 @@ export interface SiteManagerDependencies {
   db: Pick<typeof db, 'transact' | 'get' | 'put'>;
   resolver: Resolver;
   safeFetch: typeof safeFetch;
+  assertTenantWritable?: typeof assertTenantWritable;
+  invalidateSites?: typeof invalidateForSites;
 }
 
-const defaultDependencies: SiteManagerDependencies = { db, resolver: defaultResolver, safeFetch };
+const defaultDependencies: SiteManagerDependencies = {
+  db,
+  resolver: defaultResolver,
+  safeFetch,
+  assertTenantWritable,
+  invalidateSites: invalidateForSites,
+};
 
 async function validatePublicUrl(urlStr: string, resolver: Resolver): Promise<URL> {
   const result = validateUrl(urlStr);
@@ -68,6 +78,8 @@ export async function createSite(
   input: CreateSiteInput,
   deps: SiteManagerDependencies = defaultDependencies,
 ) {
+  requireRole(ctx, ['TENANT_ADMIN']);
+  await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
   const url = await validatePublicUrl(input.homeUrl, deps.resolver);
   
   // Sinh slug chuẩn hóa từ hostname
@@ -110,7 +122,7 @@ export async function createSite(
   ];
 
   try {
-    await deps.db.transact(ctx, transactOps);
+    await deps.db.transact(ctx, transactOps, { platformSlugReservation: true });
   } catch (err: any) {
     if (err.name === 'TransactionCanceledException') {
       throw new AppError('DUPLICATE_SLUG', 'Slug đã tồn tại trên hệ thống');
@@ -127,6 +139,8 @@ export async function verifySite(
   method: 'META' | 'FILE',
   deps: SiteManagerDependencies = defaultDependencies,
 ) {
+  requireRole(ctx, ['TENANT_ADMIN']);
+  await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
   const hostKey = keys.host(ctx, slug);
   const host = await deps.db.get(ctx, hostKey);
 
@@ -183,4 +197,48 @@ export async function verifySite(
   });
 
   return { status: 'ACTIVE' as const };
+}
+
+export async function pauseSite(
+  ctx: Ctx,
+  slug: string,
+  deps: SiteManagerDependencies = defaultDependencies,
+) {
+  requireRole(ctx, ['TENANT_ADMIN']);
+  await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
+
+  const host = await deps.db.get(ctx, keys.host(ctx, slug));
+  if (!host) {
+    throw new AppError('NOT_FOUND', 'Không tìm thấy website');
+  }
+
+  await deps.db.put(ctx, {
+    ...host,
+    status: 'PAUSED',
+    updatedAt: new Date().toISOString(),
+  });
+  const invalidation = await (deps.invalidateSites ?? invalidateForSites)(ctx, { slugs: [slug] });
+  return { status: 'PAUSED' as const, invalidation };
+}
+
+export async function resumeSite(
+  ctx: Ctx,
+  slug: string,
+  deps: SiteManagerDependencies = defaultDependencies,
+) {
+  requireRole(ctx, ['TENANT_ADMIN']);
+  await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
+
+  const host = await deps.db.get(ctx, keys.host(ctx, slug));
+  if (!host) {
+    throw new AppError('NOT_FOUND', 'Không tìm thấy website');
+  }
+
+  await deps.db.put(ctx, {
+    ...host,
+    status: 'ACTIVE',
+    updatedAt: new Date().toISOString(),
+  });
+  const invalidation = await (deps.invalidateSites ?? invalidateForSites)(ctx, { slugs: [slug] });
+  return { status: 'ACTIVE' as const, invalidation };
 }

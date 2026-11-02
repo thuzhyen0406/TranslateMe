@@ -20,7 +20,7 @@
  * Bản tạm (B.14): hash câu và countChars chờ thư viện 1.8; getGlossaryState chờ 2.8; db chờ batchGet/update của 2.2;
  * reserveChars/settleUsage chờ 2.7 (quotaStub); db của SEG chờ batchWrite/query GSI của 2.2.
  *
- * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), PROXY_SITES_JSON, TABLE_NAME (bật TM và SEG),
+ * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), TABLE_NAME (DynamoDB; website/TM và SEG),
  * TRANSLATE_BUDGET_MS (20000), TRANSLATE_CONCURRENCY (4), WORKER_FUNCTION_NAME (bật hoàn tất nền),
  * WORKER_PAYLOAD_BUCKET (S3 cho danh sách câu lớn), WORKER_BUDGET_MS (240000), USE_FETCH_STUB=1.
  */
@@ -48,9 +48,11 @@ import {
   LANG_RE,
   SLUG_RE,
   cachedSiteResolver,
+  SITE_CACHE_TTL_MS,
+  dynamoSiteResolver,
   parseSitesJson,
-  staticSiteResolver,
   type SiteResolver,
+  staticSiteResolver,
 } from './sites.js';
 import { countCharsStub, getGlossaryStateStub, hashSentenceStub } from './stubs.js';
 import { emptyReservation, isCharQuotaExceeded, quotaStub, type QuotaApi, type Reservation } from './usage.js';
@@ -497,22 +499,44 @@ export function createProxyHandler(deps: ProxyDeps) {
 const positive = (v: string | undefined, d: number): number => (Number(v) > 0 ? Number(v) : d);
 
 /** Phần cấu hình proxy và worker dùng chung. */
-function sharedFromEnv(env: NodeJS.ProcessEnv, logger: ProxyLogger) {
-  let sites: ReturnType<typeof parseSitesJson> = [];
-  try {
-    sites = parseSitesJson(env.PROXY_SITES_JSON);
-  } catch (err) {
-    logger.error({ action: 'INVALID_PROXY_SITES_JSON', message: String(err).slice(0, 200) });
-  }
+function sharedFromEnv(
+  env: NodeJS.ProcessEnv,
+  logger: ProxyLogger,
+  resolveSiteOverride?: SiteResolver,
+) {
   const tableName = env.TABLE_NAME?.trim();
-  const doc = tableName ? DynamoDBDocumentClient.from(new DynamoDBClient({})) : undefined;
-  const tm = doc && tableName ? createTM({ db: createDynamoTmDb(doc, tableName), writer: 'proxy' }) : undefined;
-  const seg = doc && tableName ? createSEG({ db: createDynamoSegDb(doc, tableName) }) : undefined;
+  let staticResolver: SiteResolver = cachedSiteResolver(async () => null);
+  if (!resolveSiteOverride) {
+    try {
+      if (!env.PROXY_SITES_JSON?.trim()) throw new Error('Thiếu PROXY_SITES_JSON');
+      staticResolver = staticSiteResolver(parseSitesJson(env.PROXY_SITES_JSON));
+    } catch (err) {
+      logger.error({
+        action: 'INVALID_PROXY_SITES_JSON',
+        error: err instanceof Error ? err.name : 'Unknown',
+      });
+    }
+  }
+  const documentClient = tableName
+    ? DynamoDBDocumentClient.from(new DynamoDBClient({}))
+    : undefined;
+  const tm = tableName
+    ? createTM({ db: createDynamoTmDb(documentClient!, tableName), writer: 'proxy' })
+    : undefined;
+  const seg = tableName
+    ? createSEG({ db: createDynamoSegDb(documentClient!, tableName) })
+    : undefined;
   if (!tm) logger.error({ action: 'TM_DISABLED', reason: 'MISSING_TABLE_NAME' });
   if (!seg) logger.error({ action: 'SEG_DISABLED', reason: 'MISSING_TABLE_NAME' });
   const bucket = env.WORKER_PAYLOAD_BUCKET?.trim();
   return {
-    resolveSite: cachedSiteResolver(staticSiteResolver(sites)),
+    resolveSite: resolveSiteOverride ?? (
+      env.PROXY_SITES_JSON?.trim()
+        ? staticResolver
+        : documentClient && tableName
+          ? cachedSiteResolver(dynamoSiteResolver(documentClient, tableName), SITE_CACHE_TTL_MS)
+          : staticResolver
+    ),
     tm,
     seg,
     store: bucket ? s3PayloadStore(new S3Client({}), bucket) : undefined,
@@ -546,8 +570,12 @@ export function lambdaWorkerInvoker(lambda: Pick<LambdaClient, 'send'>, function
   };
 }
 
-export function depsFromEnv(env: NodeJS.ProcessEnv = process.env, logger: ProxyLogger = defaultLogger): ProxyDeps {
-  const shared = sharedFromEnv(env, logger);
+export function depsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  logger: ProxyLogger = defaultLogger,
+  resolveSiteOverride?: SiteResolver,
+): ProxyDeps {
+  const shared = sharedFromEnv(env, logger, resolveSiteOverride);
   const baseMode: BaseMode = env.BASE_MODE === 'host' ? 'host' : 'path';
   if (!env.PUBLIC_BASE_URL) logger.error({ action: 'MISSING_PUBLIC_BASE_URL', fallback: DEFAULT_PUBLIC_BASE_URL });
   const workerName = env.WORKER_FUNCTION_NAME?.trim();
@@ -570,8 +598,12 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env, logger: ProxyL
 }
 
 /** Cấu hình worker C13 (worker.ts gọi khi khởi động). Worker bắt buộc có TM. */
-export function workerDepsFromEnv(env: NodeJS.ProcessEnv = process.env, logger: ProxyLogger = defaultLogger): WorkerDeps {
-  const shared = sharedFromEnv(env, logger);
+export function workerDepsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  logger: ProxyLogger = defaultLogger,
+  resolveSiteOverride?: SiteResolver,
+): WorkerDeps {
+  const shared = sharedFromEnv(env, logger, resolveSiteOverride);
   if (!shared.tm) throw new Error('Worker cần TABLE_NAME (Translation Memory)');
   return {
     resolveSite: shared.resolveSite,

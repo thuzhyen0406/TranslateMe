@@ -23,6 +23,7 @@ import {
 import {
   COGNITO_CUSTOM_ATTRIBUTES,
   INVITABLE_ROLES,
+  claimForRole,
   isInvitableRole,
   type InvitableRole,
 } from '../../../libs/common/roles.js';
@@ -94,7 +95,7 @@ function getDefaultCognitoClient(): CognitoIdentityProviderClient {
  *
  * @param tenantId Mã tenant của người mời (không được rỗng)
  * @param email    Địa chỉ email của thành viên được mời
- * @param role     Vai trò được mời (chỉ chấp nhận `Developer` hoặc `Reviewer`)
+ * @param role     Vai trò được mời (chỉ chấp nhận `DEVELOPER` hoặc `REVIEWER`)
  * @param deps     Tham số tùy chọn để tiêm client/userPoolId khi test
  */
 export async function inviteMember(
@@ -140,7 +141,7 @@ export async function inviteMember(
         { Name: 'email', Value: cleanEmail },
         { Name: 'email_verified', Value: 'true' },
         { Name: COGNITO_CUSTOM_ATTRIBUTES.TENANT_ID, Value: cleanTenantId },
-        { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: role },
+        { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: claimForRole(role) },
       ],
     }),
   );

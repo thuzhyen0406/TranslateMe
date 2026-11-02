@@ -14,19 +14,26 @@ const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
 const TABLE_NAME = process.env.TABLE_NAME || 'translate-data';
 
-// Kiểm tra bảo mật cô lập tenant (B.1 & B.5 Phần B):
-// Cho phép PK === "TENANT#<t>" hoặc bắt đầu bằng "TENANT#<t>#", chặn truy cập chéo (kể cả tenant-1 vs tenant-10).
-function assertTenantAccess(ctx: Ctx, key: { PK: string }) {
-  const allowedPrefix = `TENANT#${ctx.tenantId}`;
-  if (key.PK !== allowedPrefix && !key.PK.startsWith(`${allowedPrefix}#`)) {
-    throw new AppError('FORBIDDEN', `Bị từ chối: Ctx Tenant (${ctx.tenantId}) không có quyền truy cập PK (${key.PK})`);
+function assertTenantAccess(ctx: Ctx, key: { PK: string }): void {
+  const tenantId = ctx.tenantId;
+  const base = `TENANT#${tenantId}`;
+
+  if (
+    !tenantId ||
+    tenantId === 'PLATFORM' ||
+    (key.PK !== base && !key.PK.startsWith(`${base}#`))
+  ) {
+    throw new AppError('NOT_FOUND', 'Không tìm thấy tài nguyên');
   }
 }
 
-/** Kiểm tra vai trò theo ma trận quyền ở máy chủ (B.5 Phần B: ném FORBIDDEN). */
+/** Kiểm tra vai trò theo ma trận quyền ở máy chủ. */
 export function requireRole(ctx: Ctx, allowed: readonly Role[]): void {
   if (!ctx.role || !allowed.includes(ctx.role)) {
-    throw new AppError('FORBIDDEN', `Vai trò ${ctx.role ?? 'NONE'} không được phép thực hiện thao tác này`);
+    throw new AppError(
+      'PERMISSION_DENIED',
+      'Vai trò không được phép thực hiện thao tác này',
+    );
   }
 }
 
@@ -107,12 +114,57 @@ export const db = {
     return allItems;
   },
 
-  async transact(ctx: Ctx, ops: any[]) {
-    // Đảm bảo mọi tác vụ trong transaction thuộc tenant (trừ thao tác tạo SLUG hệ thống)
+  async updateTenantStatus(ctx: Ctx, tenantId: string, status: 'ACTIVE' | 'LOCKED') {
+    if (!tenantId || tenantId === 'PLATFORM' || ctx.tenantId !== tenantId) {
+      throw new AppError('NOT_FOUND', 'Không tìm thấy tài nguyên');
+    }
+
+    const key = keys.config(ctx);
+    try {
+      await docClient.send(new UpdateCommand({
+        TableName: TABLE_NAME,
+        Key: key,
+        UpdateExpression: 'SET #status = :status, updatedAt = :updatedAt',
+        ConditionExpression: 'attribute_exists(PK)',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':status': status,
+          ':updatedAt': new Date().toISOString(),
+        },
+      }));
+    } catch (error: any) {
+      if (error?.name === 'ConditionalCheckFailedException') {
+        throw new AppError('NOT_FOUND', 'Không tìm thấy tài nguyên');
+      }
+      throw error;
+    }
+  },
+
+  async listTenantSites(ctx: Ctx): Promise<Array<Record<string, any>>> {
+    return db.query(ctx, `TENANT#${ctx.tenantId}`, 'HOST#');
+  },
+
+  async transact(
+    ctx: Ctx,
+    ops: any[],
+    options?: { platformSlugReservation?: boolean },
+  ) {
     for (const op of ops) {
       const item = op.Put?.Item || op.Delete?.Key || op.Update?.Key || op.ConditionCheck?.Key;
-      if (item && !item.PK.startsWith('TENANT#PLATFORM#SLUG#')) {
+      const isPlatformSlug =
+        options?.platformSlugReservation === true &&
+        item?.PK?.startsWith('TENANT#PLATFORM#SLUG#');
+
+      if (item && !isPlatformSlug) {
         assertTenantAccess(ctx, { PK: item.PK });
+      } else if (isPlatformSlug) {
+        if (
+          !ctx.tenantId ||
+          ctx.tenantId === 'PLATFORM' ||
+          item.tenantId !== ctx.tenantId
+        ) {
+          throw new AppError('NOT_FOUND', 'Không tìm thấy tài nguyên');
+        }
       }
     }
     await docClient.send(new TransactWriteCommand({ TransactItems: ops }));

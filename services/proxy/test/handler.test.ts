@@ -152,6 +152,7 @@ describe('proxy – từ chối và chuyển hướng', () => {
       const res = await handler(ev('/homestay-abc/en/lien-he', 'GET', 'x=1'));
       assert.equal(res.statusCode, 302, JSON.stringify(patch));
       assert.equal(res.headers.location, 'https://homestay-abc.vn/lien-he?x=1');
+      assert.equal(res.headers['cache-control'], 'public, max-age=0, s-maxage=60');
       assert.equal(fetchPage.urls.length, 0);
     }
   });
@@ -215,6 +216,7 @@ describe('depsFromEnv', () => {
         WORKER_PAYLOAD_BUCKET: 'translateme-dev-worker-payload',
       },
       logger,
+      staticSiteResolver([SITE]),
     );
     assert.equal(d.baseMode, 'host');
     assert.equal(d.publicBaseUrl, CF);
@@ -229,7 +231,7 @@ describe('depsFromEnv', () => {
 
   it('JSON hỏng hoặc thiếu PUBLIC_BASE_URL -> ghi log lỗi, mặc định path, không có website nào', async () => {
     const logger = fakeLogger();
-    const d = depsFromEnv({ PROXY_SITES_JSON: '[{', BASE_MODE: 'abc' }, logger);
+    const d = depsFromEnv({ BASE_MODE: 'abc' }, logger);
     assert.equal(d.baseMode, 'path');
     assert.equal(await d.resolveSite('homestay-abc'), null);
     assert.deepEqual(logger.errors.map((e) => e.action), ['INVALID_PROXY_SITES_JSON', 'TM_DISABLED', 'SEG_DISABLED', 'MISSING_PUBLIC_BASE_URL', 'WORKER_DISABLED']);

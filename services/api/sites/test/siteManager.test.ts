@@ -9,8 +9,8 @@ import {
   type SiteManagerDependencies,
 } from '../siteManager.js';
 
-const tenantA: Ctx = { tenantId: 'tenant-a', via: 'JWT', requestId: 'test-a' };
-const tenantB: Ctx = { tenantId: 'tenant-b', via: 'JWT', requestId: 'test-b' };
+const tenantA: Ctx = { tenantId: 'tenant-a', via: 'JWT', requestId: 'test-a', role: 'TENANT_ADMIN' };
+const tenantB: Ctx = { tenantId: 'tenant-b', via: 'JWT', requestId: 'test-b', role: 'TENANT_ADMIN' };
 
 const siteInput: CreateSiteInput = {
   homeUrl: 'https://site.example/',
@@ -38,6 +38,7 @@ function createHarness() {
   const keyOf = (item: { PK: string; SK: string }) => `${item.PK}::${item.SK}`;
 
   const dependencies: SiteManagerDependencies = {
+    async assertTenantWritable() {},
     db: {
       async transact(_ctx, operations) {
         transactions.push(operations);
@@ -83,6 +84,14 @@ function hostFor(records: Map<string, Record<string, any>>, tenantId: string, sl
 }
 
 describe('siteManager', () => {
+  it('kiểm tra role trước khi truy cập hoặc xác thực tài nguyên website', async () => {
+    const developerCtx: Ctx = { ...tenantA, role: 'DEVELOPER' };
+    await assert.rejects(
+      createSite(developerCtx, siteInput),
+      (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
+    );
+  });
+
   it('tạo site PENDING và ghi HOST + SLUG nguyên tử với điều kiện không trùng', async () => {
     const harness = createHarness();
 

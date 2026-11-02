@@ -19,6 +19,7 @@
     "exp:5": "tsc -p tsconfig.json && node dist/experiments/runExperiments.js --exp=5"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudfront": "^3.1161.0",
     "@aws-sdk/client-comprehend": "^3.650.0",
     "@aws-sdk/client-dynamodb": "^3.1156.0",
     "@aws-sdk/client-translate": "^3.650.0",

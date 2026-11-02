@@ -159,15 +159,15 @@ describe('db.ts', () => {
   it('từ chối đọc, ghi và query partition key thuộc tenant khác', async () => {
     await assert.rejects(
       dbApi.db.get(ctx, { PK: 'TENANT#other-tenant', SK: 'CONFIG' }),
-      (error: unknown) => error instanceof AppError && error.code === 'FORBIDDEN',
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
     await assert.rejects(
       dbApi.db.put(ctx, { PK: 'TENANT#other-tenant', SK: 'CONFIG' }),
-      (error: unknown) => error instanceof AppError && error.code === 'FORBIDDEN',
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
     await assert.rejects(
       dbApi.db.query(ctx, 'TENANT#other-tenant'),
-      (error: unknown) => error instanceof AppError && error.code === 'FORBIDDEN',
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
     assert.equal(requests.length, 0);
   });
@@ -175,8 +175,18 @@ describe('db.ts', () => {
   it('từ chối tenant có ID chỉ khác phần hậu tố của ID hiện tại', async () => {
     await assert.rejects(
       dbApi.db.get(ctx, { PK: 'TENANT#tenant-10', SK: 'CONFIG' }),
-      (error: unknown) => error instanceof AppError && error.code === 'FORBIDDEN',
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
+    assert.equal(requests.length, 0);
+  });
+
+  it('trả NOT_FOUND khi tenant rỗng hoặc dùng namespace nền tảng', async () => {
+    for (const tenantId of ['', 'PLATFORM']) {
+      await assert.rejects(
+        dbApi.db.get({ ...ctx, tenantId }, { PK: `TENANT#${tenantId}`, SK: 'CONFIG' }),
+        (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
+      );
+    }
     assert.equal(requests.length, 0);
   });
 
@@ -193,9 +203,9 @@ describe('db.ts', () => {
     await dbApi.db.transact(ctx, [{
       Put: {
         TableName: 'translate-data',
-        Item: { PK: 'TENANT#PLATFORM#SLUG#demo', SK: 'META' },
+        Item: { PK: 'TENANT#PLATFORM#SLUG#demo', SK: 'META', tenantId: ctx.tenantId },
       },
-    }]);
+    }], { platformSlugReservation: true });
     assert.equal(requests[1].target.endsWith('.TransactWriteItems'), true);
 
     await assert.rejects(
@@ -205,7 +215,7 @@ describe('db.ts', () => {
           Item: { PK: 'TENANT#other-tenant', SK: 'CONFIG' },
         },
       }]),
-      (error: unknown) => error instanceof AppError && error.code === 'FORBIDDEN',
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
     assert.equal(requests.length, 2);
   });

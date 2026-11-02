@@ -55,15 +55,24 @@ export const ROLE_DISPLAY_LABEL: Record<ConsoleRole, string> = Object.freeze({
 
 /**
  * Chuẩn hóa chuỗi vai trò từ JWT (`custom:role` hoặc `cognito:groups`) về mã chuẩn `ConsoleRole`.
- * Tương thích với cả giá trị Tuần 1 ('Tenant Admin', 'Developer', 'Reviewer') và Hợp đồng B.2 ('TENANT_ADMIN', ...).
+ * Claim Cognito tenant-role có giá trị lowercase; role lưu trong session là mã nội bộ uppercase.
  */
 export function normalizeRole(raw?: string | null): ConsoleRole {
   const cleaned = (raw ?? '').trim().toUpperCase().replace(/\s+/g, '_');
   if (cleaned === 'TENANT_ADMIN') return 'TENANT_ADMIN';
   if (cleaned === 'DEVELOPER') return 'DEVELOPER';
   if (cleaned === 'REVIEWER') return 'REVIEWER';
-  if (cleaned === 'PLATFORM_ADMIN' || cleaned === 'PLATFORMADMIN') return 'PLATFORM_ADMIN';
   return 'TENANT_ADMIN';
+}
+
+const ROLE_CLAIM: Record<Exclude<ConsoleRole, 'PLATFORM_ADMIN'>, string> = {
+  TENANT_ADMIN: 'tenant_admin',
+  DEVELOPER: 'developer',
+  REVIEWER: 'reviewer',
+};
+
+function claimForConsoleRole(role: ConsoleRole): string | undefined {
+  return role === 'PLATFORM_ADMIN' ? undefined : ROLE_CLAIM[role];
 }
 
 export const CONSOLE_MENU_ITEMS: readonly ConsoleMenuItem[] = Object.freeze([
@@ -392,7 +401,7 @@ function buildSessionFromUser(user: SimulatedCognitoUser): AuthenticatedSession 
     email: user.email,
     name: user.fullName,
     'custom:tenant_id': user.tenantId,
-    'custom:role': user.role,
+    'custom:role': claimForConsoleRole(user.role),
   });
 
   return {
@@ -404,7 +413,7 @@ function buildSessionFromUser(user: SimulatedCognitoUser): AuthenticatedSession 
     plan: 'FREE',
     role: user.role,
     idToken,
-    accessToken: idToken,
+    accessToken: `at_mock_${user.sub}_${Date.now()}`,
     refreshToken: `rt_${user.sub}_${Date.now()}`,
     tokenRefreshedAt: new Date().toISOString(),
   };
@@ -581,7 +590,7 @@ export async function refreshTokenForTenantClaims(
     email: session.email,
     name: session.fullName,
     'custom:tenant_id': tenantId,
-    'custom:role': role,
+    'custom:role': claimForConsoleRole(role),
   });
 
   return {
@@ -589,7 +598,7 @@ export async function refreshTokenForTenantClaims(
     tenantId,
     role,
     idToken: refreshedJwt,
-    accessToken: refreshedJwt,
+    accessToken: `at_mock_${session.sub}_${Date.now()}`,
     tokenRefreshedAt: new Date().toISOString(),
   };
 }

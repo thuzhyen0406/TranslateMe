@@ -1,11 +1,10 @@
 /**
- * sites – tra cấu hình website theo slug cho Lambda proxy (F2 bước 1 – Nhiệm vụ 1.6, TV2).
- *
- * Tuần 1 chưa có lớp truy cập DynamoDB (1.7 của TV3, 2.2 của TV1), nên proxy đọc danh sách website
- * từ biến môi trường PROXY_SITES_JSON. Khi có DynamoDB, chỉ cần viết một SiteResolver khác:
- *   GetItem (đọc nhất quán) TENANT#PLATFORM#SLUG#<slug> -> tenantId, rồi BatchGetItem HOST + CONFIG.
- * Handler không phải sửa. Kết quả được lưu đệm trong bộ nhớ Lambda 60 giây (cachedSiteResolver).
+ * Tra cứu website cho Lambda proxy bằng DynamoDB.
+ * Resolver được lưu đệm tối đa 60 giây bởi cachedSiteResolver.
  */
+import { GetCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { keys } from '../../libs/common/types.js';
 
 import { MAX_PAGE_CACHE_SECONDS } from '../../libs/common/seg.js';
 
@@ -127,5 +126,55 @@ export function cachedSiteResolver(inner: SiteResolver, ttlMs = SITE_CACHE_TTL_M
     const value = await inner(slug);
     cache.set(slug, { at: now(), value });
     return value;
+  };
+}
+
+export function dynamoSiteResolver(
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+): SiteResolver {
+  return async (slug: string): Promise<SiteConfig | null> => {
+    if (!SLUG_RE.test(slug)) return null;
+
+    const slugResult = await docClient.send(new GetCommand({
+      TableName: tableName,
+      Key: keys.slug(slug),
+      ConsistentRead: true,
+    }));
+    if (!slugResult.Item) return null;
+
+    const tenantId = slugResult.Item.tenantId;
+    if (typeof tenantId !== 'string' || !tenantId || tenantId === 'PLATFORM') return null;
+
+    const batch = await docClient.send(new BatchGetCommand({
+      RequestItems: {
+        [tableName]: {
+          Keys: [
+            { PK: `TENANT#${tenantId}`, SK: `HOST#${slug}` },
+            { PK: `TENANT#${tenantId}`, SK: 'CONFIG' },
+          ],
+          ConsistentRead: true,
+        },
+      },
+    }));
+    const items = batch.Responses?.[tableName] ?? [];
+    const host = items.find((item) => item.SK === `HOST#${slug}`);
+    const config = items.find((item) => item.SK === 'CONFIG');
+    if (!host || !config) return null;
+
+    const tenantStatus = config.status === 'LOCKED' ? 'LOCKED' : config.status === 'ACTIVE' ? 'ACTIVE' : null;
+    if (!tenantStatus) return null;
+
+    return validateSiteConfig({
+      slug,
+      tenantId,
+      homeUrl: host.homeUrl,
+      sourceLang: host.sourceLang,
+      targetLangs: host.targetLangs,
+      exclusionSelectors: host.noTranslateSelectors ?? host.exclusionSelectors,
+      cacheSeconds: host.cacheTtlSec ?? host.cacheSeconds,
+      status: host.status,
+      tenantStatus,
+    });
   };
 }
