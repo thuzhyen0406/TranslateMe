@@ -51,6 +51,7 @@ import {
   SITE_CACHE_TTL_MS,
   dynamoSiteResolver,
   parseSitesJson,
+  type SiteConfig,
   type SiteResolver,
   staticSiteResolver,
 } from './sites.js';
@@ -225,8 +226,17 @@ export function createProxyHandler(deps: ProxyDeps) {
     if (!parsed) return finish(textResponse(404, 'Not Found'), { outcome: 'BAD_PATH' });
     Object.assign(log, { slug: parsed.slug, lang: parsed.lang });
 
-    // Bước 1: tra website
-    const site = await deps.resolveSite(parsed.slug);
+    // Bước 1: tra website. Lỗi tra cứu (DynamoDB lỗi, bị bóp băng thông, bug) không được thành 404 bị cache
+    // hay 502: trả 503 no-store để CloudFront không lưu và Visitor tải lại là được (QC-8).
+    let site: SiteConfig | null;
+    try {
+      site = await deps.resolveSite(parsed.slug);
+    } catch (err) {
+      logger.error({ ...log, action: 'SITE_LOOKUP_FAILED', error: err instanceof Error ? err.name : 'Unknown' });
+      const res = textResponse(503, 'Service Unavailable');
+      res.headers['retry-after'] = '5';
+      return finish(res, { outcome: 'SITE_LOOKUP_FAILED' });
+    }
     if (!site) return finish(textResponse(404, 'Not Found', 'public, max-age=0, s-maxage=60'), { outcome: 'UNKNOWN_SLUG' });
     const originUrl = buildOriginUrl(site.homeUrl, parsed.rest, event.rawQueryString ?? '');
     if (!originUrl) return finish(textResponse(404, 'Not Found'), { outcome: 'OUTSIDE_SITE' });
@@ -507,14 +517,18 @@ function sharedFromEnv(
   const tableName = env.TABLE_NAME?.trim();
   let staticResolver: SiteResolver = cachedSiteResolver(async () => null);
   if (!resolveSiteOverride) {
-    try {
-      if (!env.PROXY_SITES_JSON?.trim()) throw new Error('Thiếu PROXY_SITES_JSON');
-      staticResolver = staticSiteResolver(parseSitesJson(env.PROXY_SITES_JSON));
-    } catch (err) {
-      logger.error({
-        action: 'INVALID_PROXY_SITES_JSON',
-        error: err instanceof Error ? err.name : 'Unknown',
-      });
+    if (env.PROXY_SITES_JSON?.trim()) {
+      try {
+        staticResolver = staticSiteResolver(parseSitesJson(env.PROXY_SITES_JSON));
+      } catch (err) {
+        logger.error({
+          action: 'INVALID_PROXY_SITES_JSON',
+          error: err instanceof Error ? err.name : 'Unknown',
+        });
+      }
+    } else if (!tableName) {
+      // Chế độ DynamoDB (có TABLE_NAME) không cần PROXY_SITES_JSON nên không ghi log lỗi
+      logger.error({ action: 'NO_SITE_SOURCE', reason: 'MISSING_TABLE_NAME_AND_PROXY_SITES_JSON' });
     }
   }
   const documentClient = tableName
@@ -534,7 +548,12 @@ function sharedFromEnv(
       env.PROXY_SITES_JSON?.trim()
         ? staticResolver
         : documentClient && tableName
-          ? cachedSiteResolver(dynamoSiteResolver(documentClient, tableName), SITE_CACHE_TTL_MS)
+          ? cachedSiteResolver(
+              dynamoSiteResolver(documentClient, tableName, {
+                onInvalidConfig: (e) => logger.error({ action: 'INVALID_SITE_CONFIG', ...e }),
+              }),
+              SITE_CACHE_TTL_MS,
+            )
           : staticResolver
     ),
     tm,

@@ -195,6 +195,21 @@ describe('proxy – từ chối và chuyển hướng', () => {
     assert.equal(logger.errors[0].action, 'PROXY_UNEXPECTED_ERROR');
   });
 
+  it('tra website lỗi (DynamoDB lỗi, bị bóp băng thông) -> 503 no-store, không tải trang, ghi log', async () => {
+    const { handler, fetchPage, logger } = setup({
+      resolveSite: async () => {
+        throw Object.assign(new Error('x'), { name: 'SiteLookupUnavailable' });
+      },
+    });
+    const res = await handler(ev('/homestay-abc/en/'));
+    assert.equal(res.statusCode, 503);
+    assert.equal(res.headers['cache-control'], 'no-store');
+    assert.equal(res.headers['retry-after'], '5');
+    assert.equal(fetchPage.urls.length, 0);
+    assert.equal(logger.errors[0].action, 'SITE_LOOKUP_FAILED');
+    assert.equal(logger.errors[0].error, 'SiteLookupUnavailable');
+  });
+
   it('trang dịch vượt giới hạn phản hồi 6 MB của Lambda -> 302 về trang gốc', async () => {
     const big = `<html><body><p>Xin chào</p><pre>${'x'.repeat(MAX_RESPONSE_BYTES)}</pre></body></html>`;
     const res = await setup({ outcome: (u) => okHtml(big, u) }).handler(ev('/homestay-abc/en/'));
@@ -234,10 +249,19 @@ describe('depsFromEnv', () => {
     const d = depsFromEnv({ BASE_MODE: 'abc' }, logger);
     assert.equal(d.baseMode, 'path');
     assert.equal(await d.resolveSite('homestay-abc'), null);
-    assert.deepEqual(logger.errors.map((e) => e.action), ['INVALID_PROXY_SITES_JSON', 'TM_DISABLED', 'SEG_DISABLED', 'MISSING_PUBLIC_BASE_URL', 'WORKER_DISABLED']);
+    assert.deepEqual(logger.errors.map((e) => e.action), ['NO_SITE_SOURCE', 'TM_DISABLED', 'SEG_DISABLED', 'MISSING_PUBLIC_BASE_URL', 'WORKER_DISABLED']);
     assert.equal(d.tm, undefined);
     assert.equal(d.invokeWorker, undefined);
     assert.equal(d.workerStore, undefined);
+  });
+
+  it('PROXY_SITES_JSON hỏng -> INVALID_PROXY_SITES_JSON; chế độ DynamoDB (có TABLE_NAME, không JSON) -> không ghi log này', () => {
+    const bad = fakeLogger();
+    depsFromEnv({ PROXY_SITES_JSON: '[{', PUBLIC_BASE_URL: CF }, bad);
+    assert.ok(bad.errors.some((e) => e.action === 'INVALID_PROXY_SITES_JSON'));
+    const dynamo = fakeLogger();
+    depsFromEnv({ TABLE_NAME: 'translate-data', PUBLIC_BASE_URL: CF }, dynamo);
+    assert.deepEqual(dynamo.errors.filter((e) => e.action === 'INVALID_PROXY_SITES_JSON' || e.action === 'NO_SITE_SOURCE'), []);
   });
 
   it('USE_FETCH_STUB=1 -> dùng safe_fetch stub (trang mẫu cố định, không gọi mạng)', async () => {

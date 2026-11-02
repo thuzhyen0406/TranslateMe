@@ -4,6 +4,7 @@ import {
   DEFAULT_CACHE_SECONDS,
   MAX_PAGE_CACHE_SECONDS,
   cachedSiteResolver,
+  SiteLookupUnavailable,
   dynamoSiteResolver,
   parseSitesJson,
   staticSiteResolver,
@@ -114,5 +115,68 @@ describe('SiteResolver', () => {
     t = 60_000;
     await r('a');
     assert.equal(calls, 3);
+  });
+
+  describe('dynamoSiteResolver – lỗi và bóp băng thông', () => {
+    const HOST = { PK: 'TENANT#t_1', SK: 'HOST#homestay-abc', homeUrl: 'https://homestay-abc.vn', sourceLang: 'vi', targetLangs: ['en'], status: 'ACTIVE' };
+    const CONFIG = { PK: 'TENANT#t_1', SK: 'CONFIG', status: 'ACTIVE' };
+    type Cmd = { constructor: { name: string }; input: { RequestItems?: Record<string, { Keys: Array<{ SK: string }> }> } };
+    function client(batches: Array<(cmd: Cmd) => unknown>, getItem: () => unknown = () => ({ Item: { tenantId: 't_1' } })) {
+      const sent: Cmd[] = [];
+      return {
+        sent,
+        send(cmd: Cmd) {
+          if (cmd.constructor.name === 'GetCommand') return Promise.resolve().then(getItem);
+          sent.push(cmd);
+          const next = batches.shift();
+          if (!next) throw new Error('quá số lần gọi');
+          return Promise.resolve().then(() => next(cmd));
+        },
+      };
+    }
+    const noSleep = async () => {};
+
+    it('gửi lại UnprocessedKeys (có backoff) rồi ghép kết quả', async () => {
+      const waits: number[] = [];
+      const c = client([
+        () => ({ Responses: { t: [HOST] }, UnprocessedKeys: { t: { Keys: [{ PK: 'TENANT#t_1', SK: 'CONFIG' }] } } }),
+        () => ({ Responses: { t: [] }, UnprocessedKeys: { t: { Keys: [{ PK: 'TENANT#t_1', SK: 'CONFIG' }] } } }),
+        () => ({ Responses: { t: [CONFIG] } }),
+      ]);
+      const r = dynamoSiteResolver(c as never, 't', { sleep: async (ms) => void waits.push(ms) });
+      assert.equal((await r('homestay-abc'))?.tenantId, 't_1');
+      assert.equal(c.sent.length, 3);
+      assert.deepEqual(c.sent[1].input.RequestItems!.t.Keys.map((k) => k.SK), ['CONFIG']);
+      assert.deepEqual(waits, [50, 100]);
+    });
+
+    it('vẫn còn UnprocessedKeys sau maxAttempts -> ném SiteLookupUnavailable, không trả null', async () => {
+      const throttled = () => ({ Responses: { t: [] }, UnprocessedKeys: { t: { Keys: [{ PK: 'TENANT#t_1', SK: 'CONFIG' }] } } });
+      const r = dynamoSiteResolver(client([throttled, throttled]) as never, 't', { maxAttempts: 2, sleep: noSleep });
+      await assert.rejects(r('homestay-abc'), (e: unknown) => e instanceof SiteLookupUnavailable && /UnprocessedKeys/.test(e.message));
+    });
+
+    it('DynamoDB lỗi (GetItem hoặc BatchGet) -> SiteLookupUnavailable; cachedSiteResolver không lưu đệm lỗi', async () => {
+      const failGet = dynamoSiteResolver(client([], () => { throw Object.assign(new Error('x'), { name: 'ProvisionedThroughputExceededException' }); }) as never, 't');
+      await assert.rejects(failGet('homestay-abc'), (e: unknown) => e instanceof SiteLookupUnavailable && /ProvisionedThroughput/.test(e.message));
+
+      const c = client([
+        () => { throw Object.assign(new Error('x'), { name: 'InternalServerError' }); },
+        () => ({ Responses: { t: [HOST, CONFIG] } }),
+      ]);
+      const cached = cachedSiteResolver(dynamoSiteResolver(c as never, 't', { sleep: noSleep }));
+      await assert.rejects(cached('homestay-abc'), SiteLookupUnavailable);
+      assert.equal((await cached('homestay-abc'))?.slug, 'homestay-abc', 'lần sau tra lại, không dính null');
+    });
+
+    it('HOST sai dạng (cacheTtlSec > 7 ngày, homeUrl hỏng) -> ghi log INVALID và trả null, không ném', async () => {
+      const logs: Array<{ slug: string; tenantId: string; error: string }> = [];
+      for (const bad of [{ ...HOST, cacheTtlSec: MAX_PAGE_CACHE_SECONDS + 1 }, { ...HOST, homeUrl: 'không phải url' }]) {
+        const r = dynamoSiteResolver(client([() => ({ Responses: { t: [bad, CONFIG] } })]) as never, 't', { onInvalidConfig: (e) => void logs.push(e) });
+        assert.equal(await r('homestay-abc'), null);
+      }
+      assert.equal(logs.length, 2);
+      assert.deepEqual([logs[0].slug, logs[0].tenantId], ['homestay-abc', 't_1']);
+    });
   });
 });
