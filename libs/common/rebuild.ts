@@ -370,6 +370,30 @@ export function rebuildDetailed(
   return { html, stats };
 }
 
+/**
+ * Ráp một tài liệu HTML độc lập (F10 – dịch tệp hàng loạt, Nhiệm vụ 4.4; mục 2.6.6 báo cáo).
+ * Dùng lại bước điền bản dịch của rebuildDetailed nhưng bỏ mọi việc chỉ dành cho website: không viết lại liên kết,
+ * không chèn canonical, hreflang hay nút chọn ngôn ngữ. Chỉ đặt <html lang> (và dir với ngôn ngữ RTL) theo
+ * targetLang; không truyền targetLang thì giữ nguyên <html> (dùng để kiểm tra parse rồi rebuild cho tài liệu tương đương).
+ */
+export function rebuildDocument(
+  skeletonHtml: string,
+  translations: readonly (string | null | undefined)[],
+  placeholders: Readonly<Record<string, string>>,
+  options: { targetLang?: string } = {},
+): { html: string; stats: RebuildStats } {
+  const stats: RebuildStats = { sentences: 0, translated: 0, keptSource: 0, tagFallback: 0 };
+  const doc = parse(fillSlots(skeletonHtml, translations, placeholders, stats));
+  const lang = options.targetLang;
+  const htmlEl = findFirst(doc, (el) => el.tagName === 'html');
+  if (lang && htmlEl) {
+    setAttr(htmlEl, 'lang', lang);
+    if (RTL_LANGS.has(lang.split('-')[0])) setAttr(htmlEl, 'dir', 'rtl');
+    else if (getAttr(htmlEl, 'dir') === 'rtl') removeAttr(htmlEl, 'dir');
+  }
+  return { html: serialize(doc), stats };
+}
+
 export function rebuild(
   skeletonHtml: string,
   translations: string[],
