@@ -140,6 +140,36 @@ export const db = {
     }
   },
 
+  async updateSiteStatus(
+    ctx: Ctx,
+    slug: string,
+    expectedStatus: 'ACTIVE' | 'PAUSED',
+    nextStatus: 'ACTIVE' | 'PAUSED',
+  ) {
+    const key = keys.host(ctx, slug);
+    assertTenantAccess(ctx, key);
+
+    try {
+      await docClient.send(new UpdateCommand({
+        TableName: TABLE_NAME,
+        Key: key,
+        UpdateExpression: 'SET #status = :next, updatedAt = :updatedAt',
+        ConditionExpression: 'attribute_exists(PK) AND #status = :expected',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':expected': expectedStatus,
+          ':next': nextStatus,
+          ':updatedAt': new Date().toISOString(),
+        },
+      }));
+    } catch (error: any) {
+      if (error?.name === 'ConditionalCheckFailedException') {
+        throw new AppError('VERSION_CONFLICT', 'Trạng thái website đã thay đổi');
+      }
+      throw error;
+    }
+  },
+
   async listTenantSites(ctx: Ctx): Promise<Array<Record<string, any>>> {
     return db.query(ctx, `TENANT#${ctx.tenantId}`, 'HOST#');
   },

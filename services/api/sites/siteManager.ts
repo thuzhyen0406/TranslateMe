@@ -22,7 +22,7 @@ export interface CreateSiteInput {
 }
 
 export interface SiteManagerDependencies {
-  db: Pick<typeof db, 'transact' | 'get' | 'put'>;
+  db: Pick<typeof db, 'transact' | 'get' | 'put' | 'updateSiteStatus'>;
   resolver: Resolver;
   safeFetch: typeof safeFetch;
   assertTenantWritable?: typeof assertTenantWritable;
@@ -71,6 +71,23 @@ async function validatePublicUrl(urlStr: string, resolver: Resolver): Promise<UR
   }
 
   return result.url;
+}
+
+async function updateSiteStatus(
+  ctx: Ctx,
+  slug: string,
+  expectedStatus: 'ACTIVE' | 'PAUSED',
+  nextStatus: 'ACTIVE' | 'PAUSED',
+  deps: SiteManagerDependencies,
+): Promise<void> {
+  try {
+    await deps.db.updateSiteStatus(ctx, slug, expectedStatus, nextStatus);
+  } catch (error: any) {
+    if (error?.name === 'ConditionalCheckFailedException') {
+      throw new AppError('VERSION_CONFLICT', 'Trạng thái website đã thay đổi');
+    }
+    throw error;
+  }
 }
 
 export async function createSite(
@@ -207,17 +224,10 @@ export async function pauseSite(
   requireRole(ctx, ['TENANT_ADMIN']);
   await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
 
-  const host = await deps.db.get(ctx, keys.host(ctx, slug));
-  if (!host) {
-    throw new AppError('NOT_FOUND', 'Không tìm thấy website');
-  }
-
-  await deps.db.put(ctx, {
-    ...host,
-    status: 'PAUSED',
-    updatedAt: new Date().toISOString(),
+  await updateSiteStatus(ctx, slug, 'ACTIVE', 'PAUSED', deps);
+  const invalidation = await (deps.invalidateSites ?? invalidateForSites)(ctx, {
+    slugs: [slug],
   });
-  const invalidation = await (deps.invalidateSites ?? invalidateForSites)(ctx, { slugs: [slug] });
   return { status: 'PAUSED' as const, invalidation };
 }
 
@@ -229,16 +239,9 @@ export async function resumeSite(
   requireRole(ctx, ['TENANT_ADMIN']);
   await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
 
-  const host = await deps.db.get(ctx, keys.host(ctx, slug));
-  if (!host) {
-    throw new AppError('NOT_FOUND', 'Không tìm thấy website');
-  }
-
-  await deps.db.put(ctx, {
-    ...host,
-    status: 'ACTIVE',
-    updatedAt: new Date().toISOString(),
+  await updateSiteStatus(ctx, slug, 'PAUSED', 'ACTIVE', deps);
+  const invalidation = await (deps.invalidateSites ?? invalidateForSites)(ctx, {
+    slugs: [slug],
   });
-  const invalidation = await (deps.invalidateSites ?? invalidateForSites)(ctx, { slugs: [slug] });
   return { status: 'ACTIVE' as const, invalidation };
 }

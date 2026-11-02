@@ -115,7 +115,12 @@ describe('Task 2.9 – Web Console: Khung, Đăng nhập & Màn Q1', () => {
 
   it('ẩn/hiện đúng danh sách menu bên trái theo từng vai trò (TENANT_ADMIN, DEVELOPER, REVIEWER)', () => {
     assert.equal(normalizeRole('tenant_admin'), 'TENANT_ADMIN');
-    assert.equal(normalizeRole('TENANT_ADMIN'), 'TENANT_ADMIN');
+    assert.equal(normalizeRole('developer'), 'DEVELOPER');
+    assert.equal(normalizeRole('reviewer'), 'REVIEWER');
+    assert.equal(normalizeRole('Tenant Admin'), 'TENANT_ADMIN');
+    assert.equal(normalizeRole('Developer'), 'DEVELOPER');
+    assert.equal(normalizeRole('Reviewer'), 'REVIEWER');
+    assert.equal(normalizeRole('TENANT_ADMIN'), null);
 
     const adminMenus = getVisibleMenuItems('TENANT_ADMIN').map((m) => m.key);
     assert.deepEqual(adminMenus, [

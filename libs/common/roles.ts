@@ -29,6 +29,9 @@ const CLAIM_TO_ROLE: Record<string, Role> = {
   tenant_admin: ROLES.TENANT_ADMIN,
   developer: ROLES.DEVELOPER,
   reviewer: ROLES.REVIEWER,
+  'Tenant Admin': ROLES.TENANT_ADMIN,
+  Developer: ROLES.DEVELOPER,
+  Reviewer: ROLES.REVIEWER,
 };
 
 const ROLE_TO_CLAIM: Record<Role, string> = {

@@ -129,15 +129,17 @@ import {
   COGNITO_CUSTOM_ATTRIBUTES,
 } from '../../libs/common/roles.js';
 ```
-- **Giá trị chính xác của 4 vai trò (`ROLES`):**
-  - `ROLES.TENANT_ADMIN` = **`"Tenant Admin"`**
-  - `ROLES.DEVELOPER` = **`"Developer"`**
-  - `ROLES.REVIEWER` = **`"Reviewer"`**
-  - `ROLES.PLATFORM_ADMIN` = **`"Platform Admin"`**
+- **Quy ước role hiện đang được triển khai:**
+  - Vai trò nội bộ trong API và `Ctx`: `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER`.
+  - Giá trị `ROLES.TENANT_ADMIN`, `ROLES.DEVELOPER`, `ROLES.REVIEWER` tương ứng chính xác là `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER`; không dùng nhãn hiển thị `"Tenant Admin"`/`"Developer"`/`"Reviewer"`.
+- **Giá trị chính xác của 3 vai trò tenant trong `ROLES`:**
+  - `ROLES.TENANT_ADMIN` = **`"TENANT_ADMIN"`**
+  - `ROLES.DEVELOPER` = **`"DEVELOPER"`**
+  - `ROLES.REVIEWER` = **`"REVIEWER"`**
 - **Mã role dùng trong ma trận quyền và frontend:** `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER`.
 - **Tên claim/attribute trên Cognito User / Token:**
   - `custom:tenant_id` (`COGNITO_CUSTOM_ATTRIBUTES.TENANT_ID`) — định dạng `"t_<24_ky_tu_hex>"` (ví dụ: `"t_8f3a1c9e4b2d7a6f5e0c1b2a"`).
-  - `custom:role` (`COGNITO_CUSTOM_ATTRIBUTES.ROLE`) — token claim chứa mã role tương ứng: `Tenant Admin` -> `tenant_admin`, `Developer` -> `developer`, `Reviewer` -> `reviewer`.
+  - `custom:role` (`COGNITO_CUSTOM_ATTRIBUTES.ROLE`) — token claim chứa mã role tương ứng: `TENANT_ADMIN` -> `tenant_admin`, `DEVELOPER` -> `developer`, `REVIEWER` -> `reviewer`.
   - Quản trị viên hệ thống thuộc Cognito Group **`"PlatformAdmins"`** (`PLATFORM_ADMIN_GROUP`) trong claim `cognito:groups` và không có `custom:tenant_id`.
 
 | Vai trò | Role code | Giá trị Cognito claim `custom:role` |
@@ -147,6 +149,14 @@ import {
 | Reviewer | `REVIEWER` | `reviewer` |
 
 **Platform Admin không dùng `custom:role`:** nhận diện duy nhất bằng group Cognito `PlatformAdmins` trong claim `cognito:groups`.
+
+#### Quyết định tương thích Cognito hiện có
+- **Quyết định:** chưa bỏ tương thích claim cũ; trong giai đoạn chuyển đổi, API và Console đều đọc cả hai dạng:
+  - dạng chuẩn mới: `tenant_admin`, `developer`, `reviewer`;
+  - dạng cũ hiện đã xuất hiện trong tài liệu vận hành: `Tenant Admin`, `Developer`, `Reviewer`.
+- Claim viết hoa theo mã nội bộ như `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER` không được chấp nhận làm `custom:role`.
+- **Mọi lần ghi mới** vào Cognito đều dùng duy nhất claim lowercase qua `claimForRole(...)` ở API hoặc ánh xạ tương đương ở Console; không ghi tên hiển thị cũ.
+- Khi thực hiện migrate toàn bộ user Cognito hiện có sang claim lowercase, phải cập nhật và chạy lại test contract rồi mới bỏ các nhánh tương thích tên hiển thị khỏi API và Console.
 
 ### 4.5. Ma trận route/method/quyền từ Bảng 1.2, 2.8 và 2.9
 Các route dưới đây dùng role code ở phần 4.1 (không dùng nhãn hiển thị để authorize). `-` nghĩa là route không tồn tại, không được phép thay thế bằng `DELETE`.

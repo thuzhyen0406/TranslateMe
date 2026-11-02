@@ -26,7 +26,6 @@ import type {
   SignUpFormInput,
   TenantMember,
 } from '../types/auth.js';
-
 /**
  * Cờ bật các công cụ hỗ trợ demo (`VITE_AUTH_MODE === 'mock'`).
  * Khi chuyển sang môi trường kết nối Cognito thật (`VITE_AUTH_MODE=cognito`), toàn bộ thanh chuyển màn hình,
@@ -57,22 +56,21 @@ export const ROLE_DISPLAY_LABEL: Record<ConsoleRole, string> = Object.freeze({
  * Chuẩn hóa chuỗi vai trò từ JWT (`custom:role` hoặc `cognito:groups`) về mã chuẩn `ConsoleRole`.
  * Claim Cognito tenant-role có giá trị lowercase; role lưu trong session là mã nội bộ uppercase.
  */
-export function normalizeRole(raw?: string | null): ConsoleRole {
-  const cleaned = (raw ?? '').trim().toUpperCase().replace(/\s+/g, '_');
-  if (cleaned === 'TENANT_ADMIN') return 'TENANT_ADMIN';
-  if (cleaned === 'DEVELOPER') return 'DEVELOPER';
-  if (cleaned === 'REVIEWER') return 'REVIEWER';
-  return 'TENANT_ADMIN';
+export function normalizeRole(raw?: string | null): ConsoleRole | null {
+  if (raw === 'tenant_admin') return 'TENANT_ADMIN';
+  if (raw === 'developer') return 'DEVELOPER';
+  if (raw === 'reviewer') return 'REVIEWER';
+  if (raw === 'Tenant Admin') return 'TENANT_ADMIN';
+  if (raw === 'Developer') return 'DEVELOPER';
+  if (raw === 'Reviewer') return 'REVIEWER';
+  return null;
 }
 
-const ROLE_CLAIM: Record<Exclude<ConsoleRole, 'PLATFORM_ADMIN'>, string> = {
-  TENANT_ADMIN: 'tenant_admin',
-  DEVELOPER: 'developer',
-  REVIEWER: 'reviewer',
-};
-
 function claimForConsoleRole(role: ConsoleRole): string | undefined {
-  return role === 'PLATFORM_ADMIN' ? undefined : ROLE_CLAIM[role];
+  if (role === 'TENANT_ADMIN') return 'tenant_admin';
+  if (role === 'DEVELOPER') return 'developer';
+  if (role === 'REVIEWER') return 'reviewer';
+  return undefined;
 }
 
 export const CONSOLE_MENU_ITEMS: readonly ConsoleMenuItem[] = Object.freeze([
@@ -583,7 +581,15 @@ export async function refreshTokenForTenantClaims(
 ): Promise<AuthenticatedSession> {
   const claims = decodeJwtClaims(session.idToken);
   const tenantId = claims?.['custom:tenant_id'] || session.tenantId || DEFAULT_DEMO_TENANT_ID;
-  const role = normalizeRole(claims?.['custom:role'] || session.role);
+  const claimRole = normalizeRole(claims?.['custom:role']);
+  const role = claimRole ??
+    (session.role === 'PLATFORM_ADMIN' ? session.role : (
+      session.role === 'TENANT_ADMIN' ||
+      session.role === 'DEVELOPER' ||
+      session.role === 'REVIEWER'
+        ? session.role
+        : 'TENANT_ADMIN'
+    ));
 
   const refreshedJwt = createMockJwt({
     sub: session.sub,

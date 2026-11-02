@@ -191,6 +191,7 @@ describe('PostConfirmation Trigger Handler', () => {
       { Name: COGNITO_CUSTOM_ATTRIBUTES.TENANT_ID, Value: expectedTenantId },
       { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: claimForRole(ROLES.TENANT_ADMIN) },
     ]);
+    assert.equal(claimForRole(ROLES.TENANT_ADMIN), 'tenant_admin');
   });
 
   it('[E.2] nguồn khác (PostConfirmation_ConfirmForgotPassword) -> không ghi DynamoDB, không gọi Cognito', async () => {

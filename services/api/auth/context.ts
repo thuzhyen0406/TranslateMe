@@ -6,18 +6,14 @@ type Claims = Record<string, unknown>;
 
 function memberRole(value: unknown): Role | null {
   if (typeof value !== 'string') return null;
-
-  const normalized = value.trim().toUpperCase().replace(/\s+/g, '_');
-  switch (normalized) {
-    case 'TENANT_ADMIN':
-      return 'TENANT_ADMIN';
-    case 'DEVELOPER':
-      return 'DEVELOPER';
-    case 'REVIEWER':
-      return 'REVIEWER';
-    default:
-      return roleFromClaim(value);
+  if (
+    value === 'TENANT_ADMIN' ||
+    value === 'DEVELOPER' ||
+    value === 'REVIEWER'
+  ) {
+    return value;
   }
+  return null;
 }
 
 export async function contextFromIdTokenClaims(

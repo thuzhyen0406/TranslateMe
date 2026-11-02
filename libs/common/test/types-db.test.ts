@@ -10,7 +10,9 @@ type DynamoRequest = {
   Item?: Record<string, AttributeValue>;
   ConsistentRead?: boolean;
   KeyConditionExpression?: string;
+  UpdateExpression?: string;
   ExpressionAttributeValues?: Record<string, AttributeValue>;
+  ExpressionAttributeNames?: Record<string, string>;
   ConditionExpression?: string;
   TransactItems?: Array<Record<string, unknown>>;
 };
@@ -140,6 +142,28 @@ describe('db.ts', () => {
     assert.equal(requests[0].target.endsWith('.PutItem'), true);
     assert.equal(requests[0].body.Item?.status.S, 'ACTIVE');
     assert.equal(requests[0].body.ConditionExpression, 'attribute_not_exists(PK)');
+  });
+
+  it('updateSiteStatus chỉ đổi trạng thái nếu trạng thái hiện tại khớp', async () => {
+    await dbApi.db.updateSiteStatus(ctx, 'demo', 'PAUSED', 'ACTIVE');
+
+    const request = requests[0];
+    assert.equal(request.target.endsWith('.UpdateItem'), true);
+    assert.deepEqual(request.body.Key, {
+      PK: { S: 'TENANT#tenant-1' },
+      SK: { S: 'HOST#demo' },
+    });
+    assert.equal(request.body.UpdateExpression, 'SET #status = :next, updatedAt = :updatedAt');
+    assert.equal(request.body.ConditionExpression, 'attribute_exists(PK) AND #status = :expected');
+    assert.deepEqual(request.body.ExpressionAttributeNames, { '#status': 'status' });
+    assert.deepEqual({
+      ':expected': request.body.ExpressionAttributeValues?.[':expected'],
+      ':next': request.body.ExpressionAttributeValues?.[':next'],
+    }, {
+      ':expected': { S: 'PAUSED' },
+      ':next': { S: 'ACTIVE' },
+    });
+    assert.equal(typeof request.body.ExpressionAttributeValues?.[':updatedAt']?.S, 'string');
   });
 
   it('query gửi partition key và tùy chọn sort-key prefix', async () => {
