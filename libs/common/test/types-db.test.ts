@@ -14,7 +14,7 @@ type DynamoRequest = {
   ExpressionAttributeValues?: Record<string, AttributeValue>;
   ExpressionAttributeNames?: Record<string, string>;
   ConditionExpression?: string;
-  TransactItems?: Array<Record<string, unknown>>;
+  TransactItems?: Array<{ Update?: DynamoRequest; ConditionCheck?: DynamoRequest }>;
 };
 
 const requests: Array<{ target: string; body: DynamoRequest }> = [];
@@ -148,22 +148,27 @@ describe('db.ts', () => {
     await dbApi.db.updateSiteStatus(ctx, 'demo', 'PAUSED', 'ACTIVE');
 
     const request = requests[0];
-    assert.equal(request.target.endsWith('.UpdateItem'), true);
-    assert.deepEqual(request.body.Key, {
+    assert.equal(request.target.endsWith('.TransactWriteItems'), true);
+    const update = request.body.TransactItems?.[0].Update;
+    assert.deepEqual(update?.Key, {
       PK: { S: 'TENANT#tenant-1' },
       SK: { S: 'HOST#demo' },
     });
-    assert.equal(request.body.UpdateExpression, 'SET #status = :next, updatedAt = :updatedAt');
-    assert.equal(request.body.ConditionExpression, 'attribute_exists(PK) AND #status = :expected');
-    assert.deepEqual(request.body.ExpressionAttributeNames, { '#status': 'status' });
+    assert.equal(update?.UpdateExpression, 'SET #status = :next, updatedAt = :updatedAt');
+    assert.equal(update?.ConditionExpression, 'attribute_exists(PK) AND #status = :expected');
+    assert.deepEqual(update?.ExpressionAttributeNames, { '#status': 'status' });
     assert.deepEqual({
-      ':expected': request.body.ExpressionAttributeValues?.[':expected'],
-      ':next': request.body.ExpressionAttributeValues?.[':next'],
+      ':expected': update?.ExpressionAttributeValues?.[':expected'],
+      ':next': update?.ExpressionAttributeValues?.[':next'],
     }, {
       ':expected': { S: 'PAUSED' },
       ':next': { S: 'ACTIVE' },
     });
-    assert.equal(typeof request.body.ExpressionAttributeValues?.[':updatedAt']?.S, 'string');
+    assert.equal(typeof update?.ExpressionAttributeValues?.[':updatedAt']?.S, 'string');
+    assert.deepEqual(request.body.TransactItems?.[1].ConditionCheck?.Key, {
+      PK: { S: 'TENANT#tenant-1' },
+      SK: { S: 'CONFIG' },
+    });
   });
 
   it('query gửi partition key và tùy chọn sort-key prefix', async () => {

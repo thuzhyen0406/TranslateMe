@@ -242,12 +242,37 @@ export async function verifySite(
     });
   }
 
-  // Cập nhật trạng thái PENDING -> ACTIVE
-  await deps.db.put(ctx, {
-    ...host,
-    status: 'ACTIVE',
-    updatedAt: new Date().toISOString()
-  });
+  try {
+    await deps.db.transact(ctx, [
+      {
+        Put: {
+          TableName: TABLE_NAME,
+          Item: {
+            ...host,
+            status: 'ACTIVE',
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      },
+      {
+        ConditionCheck: {
+          TableName: TABLE_NAME,
+          Key: keys.config(ctx),
+          ConditionExpression: 'attribute_exists(PK) AND #status = :active',
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: { ':active': 'ACTIVE' },
+        },
+      },
+    ]);
+  } catch (error: any) {
+    if (
+      error?.name === 'TransactionCanceledException' &&
+      error.CancellationReasons?.[1]?.Code === 'ConditionalCheckFailed'
+    ) {
+      throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị khóa');
+    }
+    throw error;
+  }
 
   return { status: 'ACTIVE' as const };
 }

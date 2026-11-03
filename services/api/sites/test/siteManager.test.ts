@@ -48,7 +48,21 @@ function createHarness() {
       async transact(_ctx, operations) {
         transactions.push(operations);
         const puts = operations.map((operation) => operation.Put).filter(Boolean);
-        const hasConflict = puts.some((put) => records.has(keyOf(put.Item)));
+        const hasConflict = puts.some((put) =>
+          put.ConditionExpression && records.has(keyOf(put.Item))
+        );
+        const configCheck = operations.find((operation) => operation.ConditionCheck)?.ConditionCheck;
+        const configLocked = configCheck &&
+          records.get(keyOf(configCheck.Key))?.status !== 'ACTIVE';
+        if (configLocked) {
+          throw Object.assign(new Error('Conditional transaction failed'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [
+              { Code: 'Success' },
+              { Code: 'ConditionalCheckFailed' },
+            ],
+          });
+        }
         if (hasConflict) {
           throw Object.assign(new Error('Conditional transaction failed'), {
             name: 'TransactionCanceledException',
@@ -71,6 +85,10 @@ function createHarness() {
         records.set(keyOf(record), { ...item });
       },
       async updateSiteStatus(ctx, slug, expectedStatus, nextStatus) {
+        const config = records.get(`TENANT#${ctx.tenantId}::CONFIG`);
+        if (!config || config.status !== 'ACTIVE') {
+          throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị khóa');
+        }
         const key = `TENANT#${ctx.tenantId}::HOST#${slug}`;
         const record = records.get(key);
         if (!record || record.status !== expectedStatus) {
@@ -211,6 +229,27 @@ describe('siteManager', () => {
     assert.deepEqual(await verifySite(tenantA, created.slug, 'FILE', harness.dependencies), { status: 'ACTIVE' });
     assert.equal(hostFor(harness.records, 'tenant-a', created.slug)?.status, 'ACTIVE');
     assert.deepEqual(harness.requestedUrls, ['https://site.example/translateme-verification.txt']);
+  });
+
+  it('không xác minh website nếu tenant bị khóa trong lúc tải trang', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+    harness.setFetchOutcome(successfulFetch(
+      `<meta name="translateme-site-verification" content="${created.verificationCode}">`,
+    ));
+    harness.dependencies.safeFetch = async () => {
+      const config = harness.records.get('TENANT#tenant-a::CONFIG');
+      if (config) config.status = 'LOCKED';
+      return successfulFetch(
+        `<meta name="translateme-site-verification" content="${created.verificationCode}">`,
+      );
+    };
+
+    await assert.rejects(
+      verifySite(tenantA, created.slug, 'META', harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'TENANT_SUSPENDED',
+    );
+    assert.equal(hostFor(harness.records, 'tenant-a', created.slug)?.status, 'PENDING');
   });
 
   it('trả lỗi VERIFICATION_CODE_MISMATCH cho FILE sai và giữ PENDING', async () => {

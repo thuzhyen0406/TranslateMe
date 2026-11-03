@@ -150,19 +150,40 @@ export const db = {
     assertTenantAccess(ctx, key);
 
     try {
-      await docClient.send(new UpdateCommand({
-        TableName: TABLE_NAME,
-        Key: key,
-        UpdateExpression: 'SET #status = :next, updatedAt = :updatedAt',
-        ConditionExpression: 'attribute_exists(PK) AND #status = :expected',
-        ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: {
-          ':expected': expectedStatus,
-          ':next': nextStatus,
-          ':updatedAt': new Date().toISOString(),
-        },
+      await docClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Update: {
+              TableName: TABLE_NAME,
+              Key: key,
+              UpdateExpression: 'SET #status = :next, updatedAt = :updatedAt',
+              ConditionExpression: 'attribute_exists(PK) AND #status = :expected',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: {
+                ':expected': expectedStatus,
+                ':next': nextStatus,
+                ':updatedAt': new Date().toISOString(),
+              },
+            },
+          },
+          {
+            ConditionCheck: {
+              TableName: TABLE_NAME,
+              Key: keys.config(ctx),
+              ConditionExpression: 'attribute_exists(PK) AND #status = :active',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: { ':active': 'ACTIVE' },
+            },
+          },
+        ],
       }));
     } catch (error: any) {
+      if (error?.name === 'TransactionCanceledException') {
+        const cancellationReasons = Array.isArray(error.CancellationReasons) ? error.CancellationReasons : [];
+        if (cancellationReasons[1]?.Code === 'ConditionalCheckFailed') {
+          throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị khóa');
+        }
+      }
       if (error?.name === 'ConditionalCheckFailedException') {
         throw new AppError('VERSION_CONFLICT', 'Trạng thái website đã thay đổi');
       }
