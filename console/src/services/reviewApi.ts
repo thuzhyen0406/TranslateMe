@@ -1,12 +1,12 @@
 /**
  * Dịch vụ màn Duyệt bản dịch hai cột song ngữ (Q4, Nhiệm vụ 4.10 – TV4).
- * Kết nối với dịch vụ F5 (Task 3.8 – services/api/review/reviewManager.ts) và Bảng 2.9 / Bảng 2.10 của báo cáo.
+ * Kết nối trực tiếp với dịch vụ F5 (Task 3.8 – services/api/review/reviewManager.ts) và Bảng 2.9 / Bảng 2.10 của báo cáo.
  *
  * Hỗ trợ hai chế độ chạy giống màn Website (4.6) và xác thực (2.9):
- *  - createHttpReviewApi: gọi REST API kèm Authorization: Bearer <idToken> (khi VITE_AUTH_MODE=cognito);
+ *  - createHttpReviewApi: gọi REST API F5 (/console/translations, /console/invalidations/...) kèm Authorization: Bearer <idToken> (khi VITE_AUTH_MODE=cognito);
  *  - createMockReviewApi: giả lập đầy đủ trong trình duyệt (khi VITE_AUTH_MODE=mock), hỗ trợ kiểm thử trực quan
  *    cả 3 thao tác duyệt, lỗi PLACEHOLDER_MISMATCH, xung đột 409 VERSION_CONFLICT kèm bản mới nhất,
- *    trạng thái làm mới cache CloudFront (Đang làm mới -> Đã làm mới / Lỗi làm mới + Thử lại) và câu "Không còn sử dụng".
+ *    trạng thái làm mới cache CloudFront (Đang làm mới -> Đã làm mới / Lỗi làm mới một phần / Lỗi làm mới + Thử lại) và câu "Không còn sử dụng".
  */
 import type {
   GlossaryWarningItem,
@@ -181,7 +181,7 @@ export function reviewErrorMessage(err: unknown): string {
 }
 
 // ============================================================================
-// Chuyển đổi JSON (hỗ trợ cả snake_case chuẩn Bảng 2.9 lẫn camelCase của reviewManager)
+// Chuyển đổi JSON (hỗ trợ cả schema F5 ReviewTranslationEntry lẫn snake_case Bảng 2.9)
 // ============================================================================
 
 type Json = Record<string, unknown>;
@@ -190,8 +190,9 @@ const num = (v: unknown, fallback = 0): number => (typeof v === 'number' && Numb
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
 export function reviewItemFromJson(raw: Json): ReviewSentenceItem {
-  const statusRaw = str(raw.status);
+  const statusRaw = str(raw.label ?? raw.status).trim().toUpperCase();
   const status: TranslationStatus = statusRaw === 'HUMAN' ? 'HUMAN' : 'MACHINE';
+  const hasPageMetadata = Array.isArray(raw.pages);
   const pages = strs(raw.pages);
   const warningsRaw = Array.isArray(raw.glossary_warnings ?? raw.glossaryWarnings)
     ? ((raw.glossary_warnings ?? raw.glossaryWarnings) as Json[])
@@ -201,14 +202,16 @@ export function reviewItemFromJson(raw: Json): ReviewSentenceItem {
     expectedTarget: str(w.expected_target ?? w.expectedTarget),
     mode: str(w.mode) === 'KEEP' ? 'KEEP' : 'FIXED',
   }));
-  const srcText = str(raw.src_text ?? raw.srcText);
-  const tgtText = str(raw.tgt_text ?? raw.tgtText);
-  const machineText = str(raw.machine_text ?? raw.machineText) || tgtText;
+  const srcText = str(raw.sourceText ?? raw.source_text ?? raw.src_text ?? raw.srcText ?? raw.src);
+  const tgtText = str(raw.tgt ?? raw.tgt_text ?? raw.tgtText);
+  const machineText = str(raw.machineTgt ?? raw.machine_tgt ?? raw.machine_text ?? raw.machineText) || tgtText;
+  const reviewerIdRaw = raw.updatedBy ?? raw.updated_by ?? raw.reviewer_id ?? raw.reviewerId;
+  const reviewedAtRaw = raw.reviewed_at ?? raw.reviewedAt;
 
   return {
     hash: str(raw.hash),
-    srcLang: str(raw.src_lang ?? raw.srcLang) || 'vi',
-    tgtLang: str(raw.tgt_lang ?? raw.tgtLang) || 'en',
+    srcLang: str(raw.srcLang ?? raw.src_lang) || 'vi',
+    tgtLang: str(raw.tgtLang ?? raw.tgt_lang) || 'en',
     srcText,
     tgtText,
     machineText,
@@ -218,14 +221,11 @@ export function reviewItemFromJson(raw: Json): ReviewSentenceItem {
     version: num(raw.version, 1),
     glossaryVersion: num(raw.glossary_version ?? raw.glossaryVersion, 0),
     updatedAt: str(raw.updated_at ?? raw.updatedAt) || new Date().toISOString(),
-    ...(typeof (raw.reviewer_id ?? raw.reviewerId) === 'string'
-      ? { reviewerId: str(raw.reviewer_id ?? raw.reviewerId) }
-      : {}),
-    ...(typeof (raw.reviewed_at ?? raw.reviewedAt) === 'string'
-      ? { reviewedAt: str(raw.reviewed_at ?? raw.reviewedAt) }
-      : {}),
+    ...(typeof reviewerIdRaw === 'string' && reviewerIdRaw ? { reviewerId: reviewerIdRaw } : {}),
+    ...(typeof reviewedAtRaw === 'string' && reviewedAtRaw ? { reviewedAt: reviewedAtRaw } : {}),
     pages,
-    unused: raw.unused !== undefined ? Boolean(raw.unused) : pages.length === 0,
+    hasPageMetadata,
+    unused: raw.unused !== undefined ? Boolean(raw.unused) : hasPageMetadata && pages.length === 0,
   };
 }
 
@@ -238,22 +238,43 @@ export function invalidationFromJson(raw: Json | undefined): InvalidationOutcome
       invalidationIds: [],
     };
   }
-  const statusRaw = str(raw.status);
-  const status: InvalidationOutcome['status'] =
-    statusRaw === 'SUBMITTED' || statusRaw === 'FAILED' ? statusRaw : 'SKIPPED_NO_PAGES';
-  const mode: InvalidationOutcome['mode'] = str(raw.mode) === 'WILDCARD' ? 'WILDCARD' : 'PATHS';
+  const statusRaw = str(raw.status).trim().toUpperCase();
+  let status: InvalidationOutcome['status'];
+  if (statusRaw === 'SUBMITTED') {
+    status = 'SUBMITTED';
+  } else if (statusRaw === 'PARTIAL') {
+    status = 'PARTIAL';
+  } else if (statusRaw === 'FAILED') {
+    status = 'FAILED';
+  } else {
+    status = 'SKIPPED_NO_PAGES';
+  }
+  const modeRaw = str(raw.mode).trim().toUpperCase();
+  const mode: InvalidationOutcome['mode'] =
+    modeRaw === 'WILDCARD' ? 'WILDCARD' : modeRaw === 'NONE' ? 'NONE' : 'PATHS';
   const paths = strs(raw.paths);
+  const failedPaths = strs(raw.failed_paths ?? raw.failedPaths);
   const invalidationIds = strs(raw.invalidation_ids ?? raw.invalidationIds);
-  const singleId = str(raw.invalidation_id ?? raw.invalidationId) || invalidationIds[0];
+  const singleId = str(raw.invalidation_id ?? raw.invalidationId ?? raw.id) || invalidationIds[0];
 
   return {
     status,
     mode,
     paths,
+    ...(failedPaths.length > 0 ? { failedPaths } : {}),
     ...(singleId ? { invalidationId: singleId } : {}),
     invalidationIds: invalidationIds.length > 0 ? invalidationIds : singleId ? [singleId] : [],
     ...(typeof raw.error === 'string' && raw.error ? { error: raw.error } : {}),
   };
+}
+
+/**
+ * Chuẩn hóa trạng thái tiến độ xóa cache CloudFront không phân biệt hoa thường
+ * (hỗ trợ cả 'COMPLETED' của F5 lẫn 'Completed' của CloudFront SDK).
+ */
+export function normalizeInvalidationPollStatus(rawStatus: unknown): 'InProgress' | 'Completed' {
+  const norm = str(rawStatus).trim().toUpperCase().replace(/[\s_-]+/g, '');
+  return norm === 'COMPLETED' ? 'Completed' : 'InProgress';
 }
 
 // ============================================================================
@@ -261,6 +282,7 @@ export function invalidationFromJson(raw: Json | undefined): InvalidationOutcome
 // ============================================================================
 
 export interface ReviewApi {
+  listSites?(): Promise<ReviewSiteOption[]>;
   listTranslations(filter: ListReviewFilter): Promise<ListReviewResponse>;
   getTranslation(srcLang: string, tgtLang: string, hash: string): Promise<ReviewSentenceItem>;
   acceptTranslation(input: {
@@ -334,9 +356,13 @@ export function createHttpReviewApi(opts: HttpReviewApiOptions): ReviewApi {
         (res.status === 401 ? 'UNAUTHORIZED' : res.status === 409 ? 'VERSION_CONFLICT' : 'INTERNAL_ERROR');
       const missing = strs(details.missing ?? errObj.missing);
       const extra = strs(details.extra ?? errObj.extra);
-      const latestRaw = (details.latest ?? errObj.latest) as Json | undefined;
+      const latestRaw = (details.currentEntry ??
+        details.current_entry ??
+        details.latest ??
+        errObj.currentEntry ??
+        errObj.latest) as Json | undefined;
       const latest = latestRaw && typeof latestRaw === 'object' ? reviewItemFromJson(latestRaw) : undefined;
-      throw new ReviewApiError(str(errObj.message) ? code : code, str(errObj.message), {
+      throw new ReviewApiError(code, str(errObj.message), {
         ...(missing.length > 0 ? { missing } : {}),
         ...(extra.length > 0 ? { extra } : {}),
         ...(latest ? { latest } : {}),
@@ -346,87 +372,147 @@ export function createHttpReviewApi(opts: HttpReviewApiOptions): ReviewApi {
     return data;
   }
 
-  const itemPath = (src: string, tgt: string, hash: string) =>
-    `/console/review/translations/${encodeURIComponent(src)}/${encodeURIComponent(tgt)}/${encodeURIComponent(hash)}`;
-
   return {
-    async listTranslations(filter) {
-      const q = new URLSearchParams();
-      q.set('src', filter.srcLang);
-      q.set('tgt', filter.tgtLang);
-      if (filter.slug) q.set('slug', filter.slug);
-      if (filter.pagePath) q.set('page', filter.pagePath);
-      if (filter.labelFilter === 'MACHINE' || filter.labelFilter === 'HUMAN') {
-        q.set('status', filter.labelFilter);
-      } else if (filter.labelFilter === 'NEEDS_REVIEW') {
-        q.set('needsReview', 'true');
+    async listSites() {
+      try {
+        const data = await request('GET', '/console/websites');
+        const rawSites = Array.isArray(data.items ?? data.websites ?? data.hosts)
+          ? ((data.items ?? data.websites ?? data.hosts) as Json[])
+          : [];
+        return rawSites
+          .map((s): ReviewSiteOption => ({
+            slug: str(s.slug),
+            displayName: str(
+              s.display_name ?? s.displayName ?? s.origin_domain ?? s.originDomain ?? s.slug,
+            ),
+            sourceLang: str(s.source_lang ?? s.sourceLang) || 'vi',
+            targetLangs:
+              strs(s.target_langs ?? s.targetLangs).length > 0
+                ? strs(s.target_langs ?? s.targetLangs)
+                : ['en'],
+            pages: strs(s.pages),
+          }))
+          .filter((s) => Boolean(s.slug));
+      } catch {
+        return [];
       }
-      if (filter.search?.trim()) q.set('search', filter.search.trim());
-      if (filter.cursor) q.set('cursor', filter.cursor);
-      if (filter.limit) q.set('limit', String(filter.limit));
+    },
 
-      const data = await request('GET', `/console/review/translations?${q.toString()}`);
-      const itemsRaw = Array.isArray(data.items) ? (data.items as Json[]) : [];
-      const nextCursor = str(data.next_cursor ?? data.nextCursor) || undefined;
+    async listTranslations(filter) {
+      const tabs: Array<'REVIEW' | 'MACHINE' | 'HUMAN'> =
+        filter.labelFilter === 'NEEDS_REVIEW'
+          ? ['REVIEW']
+          : filter.labelFilter === 'MACHINE'
+            ? ['MACHINE']
+            : filter.labelFilter === 'HUMAN'
+              ? ['HUMAN']
+              : ['REVIEW', 'MACHINE', 'HUMAN'];
+
+      const byHash = new Map<string, ReviewSentenceItem>();
+      let nextCursor: string | undefined;
+
+      for (const tab of tabs) {
+        const q = new URLSearchParams();
+        q.set('src', filter.srcLang);
+        q.set('tgt', filter.tgtLang);
+        q.set('tab', tab);
+        if (filter.search?.trim()) q.set('search', filter.search.trim());
+        if (filter.limit) q.set('limit', String(filter.limit));
+
+        const data = await request('GET', `/console/translations?${q.toString()}`);
+        const itemsRaw = Array.isArray(data.items) ? (data.items as Json[]) : [];
+        for (const raw of itemsRaw) {
+          const mapped = reviewItemFromJson(raw);
+          if (mapped.hash && !byHash.has(mapped.hash)) {
+            byHash.set(mapped.hash, mapped);
+          }
+        }
+        const cur = str(data.next_cursor ?? data.nextCursor);
+        if (cur && tabs.length === 1) nextCursor = cur;
+      }
+
+      let items = [...byHash.values()];
+      if (filter.pagePath) {
+        if (filter.pagePath === '__UNUSED__') {
+          items = items.filter((it) => it.unused);
+        } else {
+          items = items.filter((it) => it.pages.includes(filter.pagePath!));
+        }
+      }
+
       return {
-        items: itemsRaw.map(reviewItemFromJson),
+        items,
         ...(nextCursor ? { nextCursor } : {}),
       };
     },
 
     async getTranslation(srcLang, tgtLang, hash) {
-      const data = await request('GET', itemPath(srcLang, tgtLang, hash));
-      return reviewItemFromJson((data.item ?? data) as Json);
+      const res = await this.listTranslations({ srcLang, tgtLang, labelFilter: 'ALL' });
+      const found = res.items.find((it) => it.hash === hash);
+      if (!found) {
+        throw new ReviewApiError('NOT_FOUND', `Không tìm thấy bản dịch cho mã băm ${hash}`);
+      }
+      return found;
     },
 
     async acceptTranslation({ srcLang, tgtLang, hash, expectedVersion }) {
-      const data = await request('POST', `${itemPath(srcLang, tgtLang, hash)}/accept`, {
+      const data = await request('POST', '/console/translations/accept', {
+        src: srcLang,
+        tgt: tgtLang,
+        hash,
         expectedVersion,
-        expected_version: expectedVersion,
+        invalidateCache: false,
       });
       return {
-        item: reviewItemFromJson(data.item as Json),
+        item: reviewItemFromJson((data.entry ?? data.item ?? data) as Json),
         invalidation: invalidationFromJson(data.invalidation as Json | undefined),
       };
     },
 
     async saveAndPublishTranslation({ srcLang, tgtLang, hash, editedText, expectedVersion }) {
-      const data = await request('PUT', itemPath(srcLang, tgtLang, hash), {
-        editedText,
-        edited_text: editedText,
+      const data = await request('PUT', '/console/translations', {
+        src: srcLang,
+        tgt: tgtLang,
+        hash,
+        newTgt: editedText,
         expectedVersion,
-        expected_version: expectedVersion,
       });
       return {
-        item: reviewItemFromJson(data.item as Json),
+        item: reviewItemFromJson((data.entry ?? data.item ?? data) as Json),
         invalidation: invalidationFromJson(data.invalidation as Json | undefined),
       };
     },
 
     async restoreMachineTranslation({ srcLang, tgtLang, hash, expectedVersion }) {
-      const data = await request('POST', `${itemPath(srcLang, tgtLang, hash)}/restore`, {
+      const data = await request('POST', '/console/translations/restore', {
+        src: srcLang,
+        tgt: tgtLang,
+        hash,
         expectedVersion,
-        expected_version: expectedVersion,
       });
       return {
-        item: reviewItemFromJson(data.item as Json),
+        item: reviewItemFromJson((data.entry ?? data.item ?? data) as Json),
         invalidation: invalidationFromJson(data.invalidation as Json | undefined),
       };
     },
 
     async retryInvalidation({ srcLang, tgtLang, hash }) {
-      const data = await request('POST', `${itemPath(srcLang, tgtLang, hash)}/invalidate`, {});
+      const data = await request('POST', '/console/invalidations/retry', {
+        src: srcLang,
+        tgt: tgtLang,
+        hashes: [hash],
+      });
       return invalidationFromJson((data.invalidation ?? data) as Json);
     },
 
     async checkInvalidationStatus(invalidationId) {
       const data = await request(
         'GET',
-        `/console/review/invalidations/${encodeURIComponent(invalidationId)}`,
+        `/console/invalidations/${encodeURIComponent(invalidationId)}`,
       );
       return {
-        invalidationId: str(data.invalidation_id ?? data.invalidationId) || invalidationId,
-        status: str(data.status) === 'Completed' ? 'Completed' : 'InProgress',
+        invalidationId: str(data.id ?? data.invalidation_id ?? data.invalidationId) || invalidationId,
+        status: normalizeInvalidationPollStatus(data.status),
       };
     },
   };
@@ -475,6 +561,7 @@ const INITIAL_MOCK_ITEMS: readonly ReviewSentenceItem[] = Object.freeze([
     glossaryVersion: 2,
     updatedAt: '2026-10-28T08:15:00.000Z',
     pages: ['/homestay-abc/en/', '/homestay-abc/en/lien-he'],
+    hasPageMetadata: true,
     unused: false,
   },
   {
@@ -493,6 +580,7 @@ const INITIAL_MOCK_ITEMS: readonly ReviewSentenceItem[] = Object.freeze([
     reviewerId: 'minh@homestay-abc.vn',
     reviewedAt: '2026-10-29T10:30:00.000Z',
     pages: ['/homestay-abc/en/', '/homestay-abc/en/phong-nghi', '/homestay-abc/en/bang-gia'],
+    hasPageMetadata: true,
     unused: false,
   },
   {
@@ -517,6 +605,7 @@ const INITIAL_MOCK_ITEMS: readonly ReviewSentenceItem[] = Object.freeze([
     reviewerId: 'lan@homestay-abc.vn',
     reviewedAt: '2026-10-27T14:20:00.000Z',
     pages: ['/homestay-abc/en/', '/homestay-abc/en/phong-nghi'],
+    hasPageMetadata: true,
     unused: false,
   },
   {
@@ -533,6 +622,7 @@ const INITIAL_MOCK_ITEMS: readonly ReviewSentenceItem[] = Object.freeze([
     glossaryVersion: 2,
     updatedAt: '2026-10-28T09:00:00.000Z',
     pages: ['/homestay-abc/en/bang-gia'],
+    hasPageMetadata: true,
     unused: false,
   },
   {
@@ -549,6 +639,7 @@ const INITIAL_MOCK_ITEMS: readonly ReviewSentenceItem[] = Object.freeze([
     glossaryVersion: 2,
     updatedAt: '2026-10-15T12:00:00.000Z',
     pages: [],
+    hasPageMetadata: true,
     unused: true,
   },
   {
@@ -565,6 +656,7 @@ const INITIAL_MOCK_ITEMS: readonly ReviewSentenceItem[] = Object.freeze([
     glossaryVersion: 2,
     updatedAt: '2026-10-28T11:00:00.000Z',
     pages: ['/homestay-abc/ko/', '/homestay-abc/ko/phong-nghi'],
+    hasPageMetadata: true,
     unused: false,
   },
   {
@@ -583,6 +675,7 @@ const INITIAL_MOCK_ITEMS: readonly ReviewSentenceItem[] = Object.freeze([
     reviewerId: 'minh@homestay-abc.vn',
     reviewedAt: '2026-10-29T07:45:00.000Z',
     pages: ['/homestay-abc/ja/'],
+    hasPageMetadata: true,
     unused: false,
   },
 ]);
@@ -625,6 +718,7 @@ export function createMockReviewApi(opts: MockReviewApiOptions = {}): MockReview
       ...item,
       glossaryWarnings: item.glossaryWarnings.map((w) => ({ ...w })),
       pages: [...item.pages],
+      hasPageMetadata: true,
     });
   }
 
@@ -667,6 +761,14 @@ export function createMockReviewApi(opts: MockReviewApiOptions = {}): MockReview
   }
 
   return {
+    async listSites() {
+      return DEMO_REVIEW_SITES.map((s) => ({
+        ...s,
+        targetLangs: [...s.targetLangs],
+        pages: [...s.pages],
+      }));
+    },
+
     async listTranslations(filter) {
       let items = [...store.values()].filter(
         (it) => it.srcLang === filter.srcLang && it.tgtLang === filter.tgtLang,

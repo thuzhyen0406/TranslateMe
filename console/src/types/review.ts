@@ -10,7 +10,7 @@ export type TranslationStatus = 'MACHINE' | 'HUMAN';
 export type ReviewLabelFilter = 'ALL' | 'MACHINE' | 'HUMAN' | 'NEEDS_REVIEW';
 
 /** Trạng thái làm mới bộ nhớ đệm CloudFront sau khi sửa bản dịch (Mục 1.3.4 bước 6) */
-export type CacheRefreshState = 'IDLE' | 'NOT_USED' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED';
+export type CacheRefreshState = 'IDLE' | 'NOT_USED' | 'IN_PROGRESS' | 'COMPLETED' | 'PARTIAL' | 'FAILED';
 
 export interface GlossaryWarningItem {
   sourceTerm: string;
@@ -40,15 +40,18 @@ export interface ReviewSentenceItem {
   reviewedAt?: string;
   /** Danh sách đường dẫn trang chứa câu này (ví dụ ["/homestay-abc/en/", "/homestay-abc/en/phong-nghi"]) */
   pages: string[];
-  /** Câu không còn xuất hiện trên trang nào (pages.length === 0) -> hiển thị "Không còn sử dụng" */
+  /** Cho biết dữ liệu trả về từ API có kèm danh sách trang (pages) hay không */
+  hasPageMetadata?: boolean;
+  /** Câu không còn xuất hiện trên trang nào (pages.length === 0 khi hasPageMetadata = true) -> hiển thị "Không còn sử dụng" */
   unused: boolean;
 }
 
 export interface InvalidationOutcome {
-  /** SUBMITTED | SKIPPED_NO_PAGES | FAILED */
-  status: 'SUBMITTED' | 'SKIPPED_NO_PAGES' | 'FAILED';
-  mode: 'PATHS' | 'WILDCARD';
+  /** SUBMITTED | PARTIAL | SKIPPED_NO_PAGES | FAILED */
+  status: 'SUBMITTED' | 'PARTIAL' | 'SKIPPED_NO_PAGES' | 'FAILED';
+  mode: 'NONE' | 'PATHS' | 'WILDCARD';
   paths: string[];
+  failedPaths?: string[];
   invalidationId?: string;
   invalidationIds: string[];
   error?: string;

@@ -6,6 +6,7 @@ import {
   createMockReviewApi,
   extractPlaceholderTokens,
   invalidationFromJson,
+  normalizeInvalidationPollStatus,
   reviewErrorMessage,
   reviewItemFromJson,
   validatePlaceholders,
@@ -58,7 +59,8 @@ describe('Q4 – kiểm tra ký hiệu định dạng {n} và thông báo lỗi 
     );
   });
 
-  it('reviewItemFromJson và invalidationFromJson hỗ trợ cả snake_case (Bảng 2.9) và camelCase (reviewManager)', () => {
+  it('reviewItemFromJson và invalidationFromJson hỗ trợ cả schema F5 (sourceText, tgt, machineTgt, label, PARTIAL) và snake_case (Bảng 2.9)', () => {
+    // 1. Schema snake_case có pages: []
     const item = reviewItemFromJson({
       hash: 'h123',
       src_lang: 'vi',
@@ -82,9 +84,34 @@ describe('Q4 – kiểm tra ký hiệu định dạng {n} và thông báo lỗi 
     assert.equal(item.machineText, 'Hi {1}you{/1}.');
     assert.equal(item.status, 'HUMAN');
     assert.equal(item.needsReview, true);
+    assert.equal(item.hasPageMetadata, true);
     assert.equal(item.unused, true, 'pages rỗng phải đánh dấu unused = true (Không còn sử dụng)');
     assert.equal(item.glossaryWarnings[0].sourceTerm, 'Homestay ABC');
 
+    // 2. Schema ReviewTranslationEntry trả trực tiếp từ F5 (reviewManager.ts)
+    const f5Entry = reviewItemFromJson({
+      hash: 'h_f5',
+      srcLang: 'vi',
+      tgtLang: 'en',
+      sourceText: 'Đặt {1}phòng ngay{/1}.',
+      tgt: 'Book {1}room now{/1}.',
+      machineTgt: 'Order {1}room now{/1}.',
+      label: 'HUMAN',
+      needsReview: false,
+      glossaryVersion: 3,
+      version: 2,
+      updatedAt: '2026-11-03T10:00:00.000Z',
+      updatedBy: 'sub-reviewer-01',
+    });
+    assert.equal(f5Entry.srcText, 'Đặt {1}phòng ngay{/1}.');
+    assert.equal(f5Entry.tgtText, 'Book {1}room now{/1}.');
+    assert.equal(f5Entry.machineText, 'Order {1}room now{/1}.');
+    assert.equal(f5Entry.status, 'HUMAN');
+    assert.equal(f5Entry.reviewerId, 'sub-reviewer-01');
+    assert.equal(f5Entry.hasPageMetadata, false);
+    assert.equal(f5Entry.unused, false, 'Khi F5 chưa trả pages thì không đánh dấu nhầm unused');
+
+    // 3. Invalidation SUBMITTED & PARTIAL & NOTHING_TO_DO
     const inv = invalidationFromJson({
       status: 'SUBMITTED',
       mode: 'PATHS',
@@ -94,21 +121,47 @@ describe('Q4 – kiểm tra ký hiệu định dạng {n} và thông báo lỗi 
     assert.equal(inv.status, 'SUBMITTED');
     assert.equal(inv.invalidationId, 'I-999');
     assert.deepEqual(inv.paths, ['/homestay-abc/en/']);
+
+    const partialInv = invalidationFromJson({
+      status: 'PARTIAL',
+      mode: 'PATHS',
+      paths: ['/homestay-abc/en/', '/homestay-abc/en/bang-gia'],
+      invalidationIds: ['I-PART-1'],
+      failedPaths: ['/homestay-abc/en/bang-gia'],
+      error: 'Throttling on batch 2',
+    });
+    assert.equal(partialInv.status, 'PARTIAL');
+    assert.deepEqual(partialInv.failedPaths, ['/homestay-abc/en/bang-gia']);
+    assert.equal(partialInv.invalidationId, 'I-PART-1');
+
+    const nothingInv = invalidationFromJson({
+      status: 'NOTHING_TO_DO',
+      mode: 'NONE',
+      paths: [],
+      invalidationIds: [],
+    });
+    assert.equal(nothingInv.status, 'SKIPPED_NO_PAGES');
+
+    // 4. Chuẩn hóa trạng thái polling COMPLETED / Completed / IN_PROGRESS
+    assert.equal(normalizeInvalidationPollStatus('COMPLETED'), 'Completed');
+    assert.equal(normalizeInvalidationPollStatus('Completed'), 'Completed');
+    assert.equal(normalizeInvalidationPollStatus('IN_PROGRESS'), 'InProgress');
+    assert.equal(normalizeInvalidationPollStatus('InProgress'), 'InProgress');
   });
 });
 
-describe('createHttpReviewApi – kết nối với dịch vụ F5 (Task 3.8)', () => {
-  it('gửi đúng JWT Bearer token, tham số lọc và xử lý lỗi 400 PLACEHOLDER_MISMATCH & 409 VERSION_CONFLICT kèm latest', async () => {
-    const calls: Array<{ url: string; method: string; auth: string | null; body?: unknown }> = [];
+describe('createHttpReviewApi – kết nối trực tiếp với route và schema của F5 (Task 3.8)', () => {
+  it('gọi đúng /console/translations, /accept, /restore, /console/invalidations/... với schema newTgt, entry và xử lý 400/409', async () => {
+    const calls: Array<{ url: string; method: string; auth: string | null; body?: Record<string, unknown> }> = [];
 
     const fakeFetch: typeof fetch = async (input, init) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
       const headers = new Headers(init?.headers);
-      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
       calls.push({ url, method, auth: headers.get('authorization'), body });
 
-      if (url.includes('/console/review/translations?') && method === 'GET') {
+      if (url.includes('/console/translations?') && method === 'GET') {
         return new Response(
           JSON.stringify({
             items: [
@@ -116,14 +169,14 @@ describe('createHttpReviewApi – kết nối với dịch vụ F5 (Task 3.8)', 
                 hash: 'hash_1',
                 srcLang: 'vi',
                 tgtLang: 'en',
-                srcText: 'Câu {1}một{/1}.',
-                tgtText: 'Sentence {1}one{/1}.',
-                machineText: 'Sentence {1}one{/1}.',
-                status: 'MACHINE',
-                needsReview: false,
-                glossaryWarnings: [],
+                sourceText: 'Câu {1}một{/1}.',
+                tgt: 'Sentence {1}one{/1}.',
+                machineTgt: 'Sentence {1}one{/1}.',
+                label: 'MACHINE',
+                needsReview: true,
+                glossaryVersion: 2,
                 version: 1,
-                pages: ['/homestay-abc/en/'],
+                updatedAt: '2026-11-03T10:00:00.000Z',
               },
             ],
           }),
@@ -131,45 +184,151 @@ describe('createHttpReviewApi – kết nối với dịch vụ F5 (Task 3.8)', 
         );
       }
 
-      if (url.endsWith('/hash_conflict') && method === 'PUT') {
+      if (url.endsWith('/console/translations/accept') && method === 'POST') {
         return new Response(
           JSON.stringify({
-            error: {
-              code: 'VERSION_CONFLICT',
-              message: 'Phiên bản không khớp',
-              details: {
-                latest: {
-                  hash: 'hash_conflict',
-                  srcLang: 'vi',
-                  tgtLang: 'en',
-                  srcText: 'Câu {1}một{/1}.',
-                  tgtText: 'Bản mới nhất ở v2.',
-                  machineText: 'Sentence {1}one{/1}.',
-                  status: 'HUMAN',
-                  version: 2,
-                  reviewerId: 'lan@homestay-abc.vn',
-                  pages: ['/homestay-abc/en/'],
-                },
-              },
+            entry: {
+              hash: body?.hash,
+              srcLang: body?.src,
+              tgtLang: body?.tgt,
+              sourceText: 'Câu {1}một{/1}.',
+              tgt: 'Sentence {1}one{/1}.',
+              machineTgt: 'Sentence {1}one{/1}.',
+              label: 'HUMAN',
+              needsReview: false,
+              glossaryVersion: 2,
+              version: 2,
+              updatedAt: '2026-11-03T10:05:00.000Z',
+              updatedBy: 'sub-reviewer',
             },
           }),
-          { status: 409 },
+          { status: 200 },
         );
       }
 
-      if (url.endsWith('/hash_bad_ph') && method === 'PUT') {
+      if (url.endsWith('/console/translations') && method === 'PUT') {
+        if (body?.hash === 'hash_conflict') {
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: 'VERSION_CONFLICT',
+                message: 'Phiên bản không khớp',
+                details: {
+                  currentVersion: 2,
+                  currentEntry: {
+                    hash: 'hash_conflict',
+                    srcLang: 'vi',
+                    tgtLang: 'en',
+                    sourceText: 'Câu {1}một{/1}.',
+                    tgt: 'Bản mới nhất ở v2 từ F5.',
+                    machineTgt: 'Sentence {1}one{/1}.',
+                    label: 'HUMAN',
+                    needsReview: false,
+                    glossaryVersion: 2,
+                    version: 2,
+                    updatedAt: '2026-11-03T10:06:00.000Z',
+                    updatedBy: 'lan@homestay-abc.vn',
+                  },
+                },
+              },
+            }),
+            { status: 409 },
+          );
+        }
+
+        if (body?.hash === 'hash_bad_ph') {
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: 'PLACEHOLDER_MISMATCH',
+                message: 'Lệch ký hiệu',
+                details: {
+                  missing: ['{/1}'],
+                  extra: ['{2}'],
+                },
+              },
+            }),
+            { status: 400 },
+          );
+        }
+
         return new Response(
           JSON.stringify({
-            error: {
-              code: 'PLACEHOLDER_MISMATCH',
-              message: 'Lệch ký hiệu',
-              details: {
-                missing: ['{/1}'],
-                extra: ['{2}'],
-              },
+            entry: {
+              hash: body?.hash,
+              srcLang: body?.src,
+              tgtLang: body?.tgt,
+              sourceText: 'Câu {1}một{/1}.',
+              tgt: body?.newTgt,
+              machineTgt: 'Sentence {1}one{/1}.',
+              label: 'HUMAN',
+              needsReview: false,
+              glossaryVersion: 2,
+              version: 3,
+              updatedAt: '2026-11-03T10:10:00.000Z',
+              updatedBy: 'sub-reviewer',
+            },
+            invalidation: {
+              status: 'PARTIAL',
+              mode: 'PATHS',
+              paths: ['/homestay-abc/en/', '/homestay-abc/en/phong-nghi'],
+              invalidationIds: ['I-CF-200'],
+              failedPaths: ['/homestay-abc/en/phong-nghi'],
+              error: 'Batch 2 failed',
             },
           }),
-          { status: 400 },
+          { status: 200 },
+        );
+      }
+
+      if (url.endsWith('/console/translations/restore') && method === 'POST') {
+        return new Response(
+          JSON.stringify({
+            entry: {
+              hash: body?.hash,
+              srcLang: body?.src,
+              tgtLang: body?.tgt,
+              sourceText: 'Câu {1}một{/1}.',
+              tgt: 'Sentence {1}one{/1}.',
+              machineTgt: 'Sentence {1}one{/1}.',
+              label: 'MACHINE',
+              needsReview: false,
+              glossaryVersion: 2,
+              version: 4,
+              updatedAt: '2026-11-03T10:12:00.000Z',
+            },
+            invalidation: {
+              status: 'SUBMITTED',
+              mode: 'PATHS',
+              paths: ['/homestay-abc/en/'],
+              invalidationIds: ['I-CF-201'],
+              failedPaths: [],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (url.endsWith('/console/invalidations/retry') && method === 'POST') {
+        return new Response(
+          JSON.stringify({
+            status: 'SUBMITTED',
+            mode: 'PATHS',
+            paths: ['/homestay-abc/en/'],
+            invalidationIds: ['I-CF-202'],
+            failedPaths: [],
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (url.endsWith('/console/invalidations/I-CF-201') && method === 'GET') {
+        return new Response(
+          JSON.stringify({
+            id: 'I-CF-201',
+            status: 'COMPLETED',
+          }),
+          { status: 200 },
         );
       }
 
@@ -182,17 +341,65 @@ describe('createHttpReviewApi – kết nối với dịch vụ F5 (Task 3.8)', 
       fetchFn: fakeFetch,
     });
 
+    // 1. GET /console/translations?src=vi&tgt=en&tab=REVIEW
     const list = await api.listTranslations({
-      slug: 'homestay-abc',
       srcLang: 'vi',
       tgtLang: 'en',
       labelFilter: 'NEEDS_REVIEW',
     });
     assert.equal(list.items.length, 1);
+    assert.equal(list.items[0].srcText, 'Câu {1}một{/1}.');
+    assert.equal(list.items[0].tgtText, 'Sentence {1}one{/1}.');
+    assert.equal(list.items[0].status, 'MACHINE');
     assert.equal(calls[0].auth, 'Bearer jwt-token-reviewer');
-    assert.ok(calls[0].url.includes('needsReview=true'));
+    assert.ok(calls[0].url.includes('/console/translations?src=vi&tgt=en&tab=REVIEW'));
 
-    // Kiểm tra nhận lỗi 409 VERSION_CONFLICT kèm bản latest
+    // 2. POST /console/translations/accept
+    const accepted = await api.acceptTranslation({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      hash: 'hash_1',
+      expectedVersion: 1,
+    });
+    assert.equal(accepted.item.status, 'HUMAN');
+    assert.equal(accepted.item.version, 2);
+
+    // 3. PUT /console/translations (gửi newTgt và nhận entry + invalidation PARTIAL)
+    const saved = await api.saveAndPublishTranslation({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      hash: 'hash_1',
+      editedText: 'Edited {1}one{/1}.',
+      expectedVersion: 2,
+    });
+    assert.equal(saved.item.tgtText, 'Edited {1}one{/1}.');
+    assert.equal(saved.item.version, 3);
+    assert.equal(saved.invalidation.status, 'PARTIAL');
+    assert.deepEqual(saved.invalidation.failedPaths, ['/homestay-abc/en/phong-nghi']);
+
+    // 4. POST /console/translations/restore + GET /console/invalidations/{id} trả COMPLETED
+    const restored = await api.restoreMachineTranslation({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      hash: 'hash_1',
+      expectedVersion: 3,
+    });
+    assert.equal(restored.item.status, 'MACHINE');
+    assert.equal(restored.item.version, 4);
+    const poll = await api.checkInvalidationStatus('I-CF-201');
+    assert.equal(poll.invalidationId, 'I-CF-201');
+    assert.equal(poll.status, 'Completed');
+
+    // 5. POST /console/invalidations/retry
+    const retried = await api.retryInvalidation({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      hash: 'hash_1',
+    });
+    assert.equal(retried.status, 'SUBMITTED');
+    assert.equal(retried.invalidationId, 'I-CF-202');
+
+    // 6. Kiểm tra nhận lỗi 409 VERSION_CONFLICT kèm currentEntry từ F5
     await assert.rejects(
       () =>
         api.saveAndPublishTranslation({
@@ -206,10 +413,10 @@ describe('createHttpReviewApi – kết nối với dịch vụ F5 (Task 3.8)', 
         err instanceof ReviewApiError &&
         err.code === 'VERSION_CONFLICT' &&
         err.latest?.version === 2 &&
-        err.latest?.tgtText === 'Bản mới nhất ở v2.',
+        err.latest?.tgtText === 'Bản mới nhất ở v2 từ F5.',
     );
 
-    // Kiểm tra nhận lỗi 400 PLACEHOLDER_MISMATCH kèm missing và extra
+    // 7. Kiểm tra nhận lỗi 400 PLACEHOLDER_MISMATCH kèm missing và extra
     await assert.rejects(
       () =>
         api.saveAndPublishTranslation({

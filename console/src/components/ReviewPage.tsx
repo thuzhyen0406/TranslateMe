@@ -11,6 +11,7 @@ import {
   validatePlaceholders,
   type MockReviewApi,
   type ReviewApi,
+  type ReviewSiteOption,
 } from '../services/reviewApi.js';
 import type { AuthenticatedSession } from '../types/auth.js';
 import type {
@@ -22,12 +23,23 @@ import type {
 
 interface ReviewPageProps {
   session: AuthenticatedSession;
+  api?: ReviewApi;
+  isDemoMode?: boolean;
 }
+
+const DEFAULT_TARGET_LANGS = ['en', 'ko', 'ja', 'zh', 'fr'] as const;
 
 const sharedMockApi = createMockReviewApi({ reviewerEmail: 'minh@homestay-abc.vn' });
 
-function reviewApiFor(session: AuthenticatedSession): { api: ReviewApi; mock?: MockReviewApi } {
-  if (IS_DEMO_AUTH_MODE) {
+function reviewApiFor(
+  session: AuthenticatedSession,
+  demoMode: boolean,
+  injectedApi?: ReviewApi,
+): { api: ReviewApi; mock?: MockReviewApi } {
+  if (injectedApi) {
+    return { api: injectedApi };
+  }
+  if (demoMode) {
     return { api: sharedMockApi, mock: sharedMockApi };
   }
   const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
@@ -66,17 +78,79 @@ interface ItemCacheRefreshStatus {
   outcome?: InvalidationOutcome;
 }
 
-export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
-  const { api, mock } = useMemo(() => reviewApiFor(session), [session]);
+export const ReviewPage: React.FC<ReviewPageProps> = ({
+  session,
+  api: injectedApi,
+  isDemoMode,
+}) => {
+  const demoMode = isDemoMode ?? IS_DEMO_AUTH_MODE;
+  const { api, mock } = useMemo(
+    () => reviewApiFor(session, demoMode, injectedApi),
+    [session, demoMode, injectedApi],
+  );
   const canEdit = session.role === 'TENANT_ADMIN' || session.role === 'REVIEWER';
 
-  const [selectedSiteSlug, setSelectedSiteSlug] = useState<string>(DEMO_REVIEW_SITES[0].slug);
-  const currentSite = useMemo(
-    () => DEMO_REVIEW_SITES.find((s) => s.slug === selectedSiteSlug) ?? DEMO_REVIEW_SITES[0],
-    [selectedSiteSlug],
+  const [sites, setSites] = useState<ReviewSiteOption[]>(() =>
+    demoMode ? [...DEMO_REVIEW_SITES] : [],
+  );
+  const [selectedSiteSlug, setSelectedSiteSlug] = useState<string>(() =>
+    demoMode ? DEMO_REVIEW_SITES[0].slug : '',
   );
 
-  const [targetLang, setTargetLang] = useState<string>(currentSite.targetLangs[0] ?? 'en');
+  useEffect(() => {
+    if (demoMode) {
+      setSites([...DEMO_REVIEW_SITES]);
+      setSelectedSiteSlug((prev) => prev || DEMO_REVIEW_SITES[0].slug);
+      return;
+    }
+    let cancelled = false;
+    if (api.listSites) {
+      void api
+        .listSites()
+        .then((loaded) => {
+          if (cancelled) return;
+          setSites(loaded);
+          if (loaded.length > 0) {
+            setSelectedSiteSlug((prev) =>
+              prev && loaded.some((s) => s.slug === prev) ? prev : loaded[0].slug,
+            );
+          } else {
+            setSelectedSiteSlug('');
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setSites([]);
+            setSelectedSiteSlug('');
+          }
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [api, demoMode]);
+
+  const currentSite = useMemo<ReviewSiteOption | null>(
+    () => sites.find((s) => s.slug === selectedSiteSlug) ?? sites[0] ?? null,
+    [sites, selectedSiteSlug],
+  );
+
+  const sourceLang = currentSite?.sourceLang ?? 'vi';
+  const targetLangOptions = useMemo<readonly string[]>(
+    () =>
+      currentSite && currentSite.targetLangs.length > 0
+        ? currentSite.targetLangs
+        : DEFAULT_TARGET_LANGS,
+    [currentSite],
+  );
+
+  const [targetLang, setTargetLang] = useState<string>(() => targetLangOptions[0] ?? 'en');
+  useEffect(() => {
+    if (!targetLangOptions.includes(targetLang)) {
+      setTargetLang(targetLangOptions[0] ?? 'en');
+    }
+  }, [targetLangOptions, targetLang]);
+
   const [pageFilter, setPageFilter] = useState<string>('');
   const [labelFilter, setLabelFilter] = useState<ReviewLabelFilter>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -95,17 +169,36 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
     () => mock?.getSimulateCdnFailure() ?? false,
   );
 
+  const hasAnyPageMetadata = useMemo(
+    () =>
+      demoMode ||
+      Boolean(currentSite && currentSite.pages.length > 0) ||
+      items.some((it) => it.hasPageMetadata === true),
+    [demoMode, currentSite, items],
+  );
+
   const availablePages = useMemo(() => {
-    const prefix = `/${currentSite.slug}/${targetLang}/`;
-    return currentSite.pages.filter((p) => p.startsWith(prefix));
-  }, [currentSite, targetLang]);
+    const pageSet = new Set<string>();
+    if (currentSite && currentSite.pages.length > 0) {
+      const prefix = `/${currentSite.slug}/${targetLang}/`;
+      for (const p of currentSite.pages) {
+        if (p.startsWith(prefix)) pageSet.add(p);
+      }
+    }
+    for (const it of items) {
+      for (const p of it.pages) {
+        pageSet.add(p);
+      }
+    }
+    return [...pageSet];
+  }, [currentSite, targetLang, items]);
 
   const loadItems = useCallback(async () => {
     setLoading(true);
     try {
       const res = await api.listTranslations({
-        slug: currentSite.slug,
-        srcLang: currentSite.sourceLang,
+        slug: currentSite?.slug || undefined,
+        srcLang: sourceLang,
         tgtLang: targetLang,
         pagePath: pageFilter || undefined,
         labelFilter,
@@ -132,7 +225,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
     } finally {
       setLoading(false);
     }
-  }, [api, currentSite.slug, currentSite.sourceLang, targetLang, pageFilter, labelFilter, searchQuery]);
+  }, [api, currentSite?.slug, sourceLang, targetLang, pageFilter, labelFilter, searchQuery]);
 
   useEffect(() => {
     void loadItems();
@@ -173,6 +266,13 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
         }));
         return;
       }
+      if (invalidation.status === 'PARTIAL') {
+        setCacheStatusByHash((prev) => ({
+          ...prev,
+          [hash]: { state: 'PARTIAL', outcome: invalidation },
+        }));
+        return;
+      }
 
       setCacheStatusByHash((prev) => ({
         ...prev,
@@ -201,9 +301,20 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
     [api],
   );
 
-  const updateItemInState = (updated: ReviewSentenceItem) => {
-    setItems((prev) => prev.map((it) => (it.hash === updated.hash ? updated : it)));
-    setDraftText(updated.tgtText);
+  const updateItemInState = (updated: ReviewSentenceItem, invalidation?: InvalidationOutcome) => {
+    const enriched: ReviewSentenceItem = invalidation
+      ? {
+          ...updated,
+          pages: invalidation.paths.length > 0 ? invalidation.paths : updated.pages,
+          hasPageMetadata: true,
+          unused:
+            invalidation.status === 'SKIPPED_NO_PAGES' &&
+            invalidation.paths.length === 0 &&
+            updated.pages.length === 0,
+        }
+      : updated;
+    setItems((prev) => prev.map((it) => (it.hash === enriched.hash ? enriched : it)));
+    setDraftText(enriched.tgtText);
     setConflictLatest(null);
   };
 
@@ -244,13 +355,17 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
         editedText: draftText,
         expectedVersion: overrideVersion ?? selectedItem.version,
       });
-      updateItemInState(res.item);
+      updateItemInState(res.item, res.invalidation);
       applyInvalidationResult(res.item.hash, res.invalidation);
       if (res.invalidation.status === 'FAILED') {
         setSuccessMessage(
           `Bản dịch đã được lưu thành "Đã duyệt" (v${res.item.version}), nhưng làm mới bộ nhớ đệm gặp lỗi. Bạn có thể bấm "Thử lại".`,
         );
-      } else if (res.item.pages.length === 0) {
+      } else if (res.invalidation.status === 'PARTIAL') {
+        setSuccessMessage(
+          `Bản dịch đã được lưu thành "Đã duyệt" (v${res.item.version}), nhưng làm mới bộ nhớ đệm chỉ thành công một phần (${res.invalidation.failedPaths?.length ?? 0} đường dẫn lỗi). Bạn có thể bấm "Thử lại".`,
+        );
+      } else if (res.invalidation.status === 'SKIPPED_NO_PAGES') {
         setSuccessMessage(
           `Đã lưu bản dịch (v${res.item.version}). Câu này hiện không còn sử dụng trên trang nào nên không cần xóa cache.`,
         );
@@ -281,7 +396,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
         hash: selectedItem.hash,
         expectedVersion: selectedItem.version,
       });
-      updateItemInState(res.item);
+      updateItemInState(res.item, res.invalidation);
       applyInvalidationResult(res.item.hash, res.invalidation);
       setSuccessMessage(`Đã khôi phục về bản máy dịch gốc (v${res.item.version}).`);
     } catch (err) {
@@ -306,6 +421,11 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
       applyInvalidationResult(item.hash, outcome);
       if (outcome.status === 'SUBMITTED') {
         setSuccessMessage(`Đã gửi lại yêu cầu làm mới bộ nhớ đệm cho ${outcome.paths.length} trang.`);
+      } else if (outcome.status === 'PARTIAL') {
+        setErrorMessage(
+          `Làm mới bộ nhớ đệm chỉ thành công một phần (${outcome.failedPaths?.length ?? 0} đường dẫn lỗi): ` +
+            (outcome.error ?? 'Lỗi CloudFront'),
+        );
       } else if (outcome.status === 'FAILED') {
         setErrorMessage('Làm mới bộ nhớ đệm vẫn thất bại: ' + (outcome.error ?? 'Lỗi CloudFront'));
       }
@@ -321,14 +441,18 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
   };
 
   const renderCacheBadge = (item: ReviewSentenceItem) => {
-    if (item.pages.length === 0 || item.unused) {
+    const st = cacheStatusByHash[item.hash];
+    const knownUnused =
+      st?.state === 'NOT_USED' ||
+      (item.hasPageMetadata !== false && (item.pages.length === 0 || item.unused));
+
+    if (knownUnused) {
       return (
         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 border border-gray-200">
           Không còn sử dụng
         </span>
       );
     }
-    const st = cacheStatusByHash[item.hash];
     if (!st || st.state === 'IDLE') return null;
 
     if (st.state === 'IN_PROGRESS') {
@@ -343,6 +467,24 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
       return (
         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
           Đã làm mới ({st.outcome?.paths.length ?? item.pages.length} trang)
+        </span>
+      );
+    }
+    if (st.state === 'PARTIAL') {
+      const failCount = st.outcome?.failedPaths?.length ?? 0;
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-800 border border-amber-300">
+          Lỗi làm mới một phần{failCount > 0 ? ` (${failCount} đường dẫn)` : ''}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              void handleRetryInvalidation(item);
+            }}
+            className="underline font-semibold hover:text-amber-950"
+          >
+            Thử lại
+          </button>
         </span>
       );
     }
@@ -393,20 +535,30 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           <div>
             <label className="block text-xs font-medium text-gray-700 mb-1">Website</label>
-            <select
-              value={selectedSiteSlug}
-              onChange={(e) => {
-                setSelectedSiteSlug(e.target.value);
-                setPageFilter('');
-              }}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-            >
-              {DEMO_REVIEW_SITES.map((s) => (
-                <option key={s.slug} value={s.slug}>
-                  {s.displayName} ({s.slug})
-                </option>
-              ))}
-            </select>
+            {sites.length > 0 ? (
+              <select
+                value={currentSite?.slug ?? ''}
+                onChange={(e) => {
+                  setSelectedSiteSlug(e.target.value);
+                  setPageFilter('');
+                }}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+              >
+                {sites.map((s) => (
+                  <option key={s.slug} value={s.slug}>
+                    {s.displayName} ({s.slug})
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <select
+                value=""
+                disabled
+                className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600"
+              >
+                <option value="">Bộ nhớ dịch dùng chung của tổ chức (TM)</option>
+              </select>
+            )}
           </div>
 
           <div>
@@ -419,9 +571,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
               }}
               className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
             >
-              {currentSite.targetLangs.map((lang) => (
+              {targetLangOptions.map((lang) => (
                 <option key={lang} value={lang}>
-                  {LANGUAGE_LABELS[currentSite.sourceLang] ?? currentSite.sourceLang} →{' '}
+                  {LANGUAGE_LABELS[sourceLang] ?? sourceLang} →{' '}
                   {LANGUAGE_LABELS[lang] ?? lang}
                 </option>
               ))}
@@ -430,19 +582,29 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
 
           <div>
             <label className="block text-xs font-medium text-gray-700 mb-1">Lọc theo trang</label>
-            <select
-              value={pageFilter}
-              onChange={(e) => setPageFilter(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
-            >
-              <option value="">Tất cả các trang</option>
-              {availablePages.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-              <option value="__UNUSED__">Không còn sử dụng (0 trang)</option>
-            </select>
+            {hasAnyPageMetadata ? (
+              <select
+                value={pageFilter}
+                onChange={(e) => setPageFilter(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+              >
+                <option value="">Tất cả các trang</option>
+                {availablePages.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+                <option value="__UNUSED__">Không còn sử dụng (0 trang)</option>
+              </select>
+            ) : (
+              <select
+                value=""
+                disabled
+                className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600"
+              >
+                <option value="">Tra cứu trang (SEG) khi lưu & xuất bản</option>
+              </select>
+            )}
           </div>
 
           <div>
@@ -473,7 +635,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
         </div>
 
         {/* Công cụ mô phỏng tình huống lỗi dành cho chế độ Demo */}
-        {IS_DEMO_AUTH_MODE && mock && selectedItem && (
+        {demoMode && mock && selectedItem && (
           <div className="pt-2 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-600">
             <span className="font-medium text-gray-700">
               Công cụ kiểm thử nhanh (chế độ demo):
@@ -517,7 +679,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
         {/* Bảng hai cột song ngữ (7/12 cột) */}
         <div className="lg:col-span-7 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
           <div className="grid grid-cols-2 bg-gray-50 border-b border-gray-200 px-4 py-3 text-xs font-semibold text-gray-700 uppercase tracking-wider">
-            <div>Bản gốc ({LANGUAGE_LABELS[currentSite.sourceLang] ?? currentSite.sourceLang})</div>
+            <div>Bản gốc ({LANGUAGE_LABELS[sourceLang] ?? sourceLang})</div>
             <div>Bản dịch ({LANGUAGE_LABELS[targetLang] ?? targetLang})</div>
           </div>
 
@@ -545,11 +707,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
                         <HighlightedMarkersText text={item.srcText} />
                       </p>
                       <div className="flex flex-wrap items-center gap-1.5">
-                        {item.pages.length === 0 ? (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
-                            Không còn sử dụng
-                          </span>
-                        ) : (
+                        {item.pages.length > 0 ? (
                           item.pages.map((p) => (
                             <span
                               key={p}
@@ -558,6 +716,14 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
                               {p}
                             </span>
                           ))
+                        ) : item.hasPageMetadata === false ? (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600">
+                            TM ({item.srcLang} → {item.tgtLang})
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
+                            Không còn sử dụng
+                          </span>
                         )}
                       </div>
                     </div>
@@ -715,13 +881,10 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
               {/* Các trang chứa câu này (Mục 1.3.4 bước 3) */}
               <div className="space-y-1">
                 <label className="block text-xs font-semibold text-gray-700">
-                  Xuất hiện trên các trang ({selectedItem.pages.length})
+                  Xuất hiện trên các trang
+                  {selectedItem.hasPageMetadata !== false ? ` (${selectedItem.pages.length})` : ''}
                 </label>
-                {selectedItem.pages.length === 0 ? (
-                  <div className="p-2.5 rounded-lg bg-gray-50 border border-gray-200 text-xs text-gray-600">
-                    <strong>Không còn sử dụng:</strong> Câu này không còn xuất hiện trên trang nào của website gốc (đã xóa hoặc thay đổi nội dung).
-                  </div>
-                ) : (
+                {selectedItem.pages.length > 0 ? (
                   <div className="flex flex-wrap gap-1.5 p-2.5 rounded-lg bg-gray-50 border border-gray-200">
                     {selectedItem.pages.map((p) => (
                       <span
@@ -731,6 +894,14 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({ session }) => {
                         {p}
                       </span>
                     ))}
+                  </div>
+                ) : selectedItem.hasPageMetadata === false ? (
+                  <div className="p-2.5 rounded-lg bg-gray-50 border border-gray-200 text-xs text-gray-600">
+                    Dịch vụ F5 tra cứu danh sách trang (bảng SEG) khi lưu và xuất bản hoặc khôi phục để xóa cache chọn lọc trên CloudFront.
+                  </div>
+                ) : (
+                  <div className="p-2.5 rounded-lg bg-gray-50 border border-gray-200 text-xs text-gray-600">
+                    <strong>Không còn sử dụng:</strong> Câu này không còn xuất hiện trên trang nào của website gốc (đã xóa hoặc thay đổi nội dung).
                   </div>
                 )}
               </div>
