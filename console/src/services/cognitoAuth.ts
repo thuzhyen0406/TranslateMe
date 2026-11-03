@@ -588,7 +588,7 @@ export async function refreshTokenForTenantClaims(
       session.role === 'DEVELOPER' ||
       session.role === 'REVIEWER'
         ? session.role
-        : 'TENANT_ADMIN'
+        : 'REVIEWER'
     ));
 
   const refreshedJwt = createMockJwt({

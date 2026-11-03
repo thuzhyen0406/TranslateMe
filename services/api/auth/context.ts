@@ -5,15 +5,7 @@ import { roleFromClaim } from '../../../libs/common/roles.js';
 type Claims = Record<string, unknown>;
 
 function memberRole(value: unknown): Role | null {
-  if (typeof value !== 'string') return null;
-  if (
-    value === 'TENANT_ADMIN' ||
-    value === 'DEVELOPER' ||
-    value === 'REVIEWER'
-  ) {
-    return value;
-  }
-  return null;
+  return roleFromClaim(value);
 }
 
 export async function contextFromIdTokenClaims(

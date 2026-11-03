@@ -67,9 +67,7 @@ function createHarness() {
         const key = `TENANT#${ctx.tenantId}::HOST#${slug}`;
         const record = records.get(key);
         if (!record || record.status !== expectedStatus) {
-          throw Object.assign(new Error('The conditional request failed'), {
-            name: 'ConditionalCheckFailedException',
-          });
+          throw new AppError('VERSION_CONFLICT', 'Trạng thái website đã thay đổi');
         }
         record.status = nextStatus;
         record.updatedAt = new Date().toISOString();
@@ -303,6 +301,15 @@ describe('siteManager', () => {
       (error: unknown) => error instanceof AppError && error.code === 'VERSION_CONFLICT',
     );
     assert.deepEqual(harness.invalidations, []);
+  });
+
+  it('trả về NOT_FOUND khi website không tồn tại', async () => {
+    const harness = createHarness();
+
+    await assert.rejects(
+      pauseSite(tenantA, 'missing-site', harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
+    );
   });
 
   it('cho phép thử lại invalidation sau khi trạng thái đã đổi', async () => {

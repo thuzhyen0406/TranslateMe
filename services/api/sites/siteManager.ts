@@ -82,10 +82,18 @@ async function updateSiteStatus(
 ): Promise<void> {
   try {
     await deps.db.updateSiteStatus(ctx, slug, expectedStatus, nextStatus);
-  } catch (error: any) {
-    if (error?.name === 'ConditionalCheckFailedException') {
+  } catch (error: unknown) {
+    const isVersionConflict = error instanceof AppError && error.code === 'VERSION_CONFLICT';
+    const isConditionalCheckFailed =
+      typeof error === 'object' &&
+      error !== null &&
+      'name' in error &&
+      error.name === 'ConditionalCheckFailedException';
+
+    if (isVersionConflict || isConditionalCheckFailed) {
       // Cho phép lặp lại thao tác nếu trạng thái đã đổi nhưng lần xóa cache trước thất bại.
       const current = await deps.db.get(ctx, keys.host(ctx, slug));
+      if (!current) throw new AppError('NOT_FOUND', 'Không tìm thấy website');
       if (current?.status === nextStatus) return;
       throw new AppError('VERSION_CONFLICT', 'Trạng thái website đã thay đổi');
     }
