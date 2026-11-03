@@ -80,6 +80,10 @@ export interface DocxSpanSpec {
   rPrXml: string;
   /** Chuỗi thuộc tính của <w:hyperlink ...> nếu span nằm trong liên kết */
   hyperlinkAttrs?: string;
+  /** Chuỗi XML mở đặt ngay trước span (ví dụ <w:bookmarkStart .../> bao quanh cụm từ trong câu) */
+  beforeXml?: string;
+  /** Chuỗi XML đóng đặt ngay sau span (ví dụ <w:bookmarkEnd .../> bao quanh cụm từ trong câu) */
+  afterXml?: string;
 }
 
 export interface DocxParagraphSegmentSentence {
@@ -98,7 +102,16 @@ export interface DocxParagraphSegmentGap {
   spans: Record<string, DocxSpanSpec>;
 }
 
-export type DocxParagraphSegment = DocxParagraphSegmentSentence | DocxParagraphSegmentGap;
+export interface DocxParagraphSegmentPreserved {
+  kind: 'preserved';
+  /** Phần tử XML phi văn bản (w:drawing, w:pict, m:oMath, w:bookmarkStart/End, w:footnoteReference...) giữ đúng vị trí trong đoạn */
+  xml: string;
+}
+
+export type DocxParagraphSegment =
+  | DocxParagraphSegmentSentence
+  | DocxParagraphSegmentGap
+  | DocxParagraphSegmentPreserved;
 
 export interface DocxParagraphSlot {
   /** Vị trí bắt đầu và kết thúc của phần ruột bên trong <w:p ...>...</w:p> trong word/document.xml */
@@ -106,12 +119,12 @@ export interface DocxParagraphSlot {
   innerEnd: number;
   /** Chuỗi XML của <w:pPr>...</w:pPr> (nếu có) được giữ nguyên ở đầu đoạn */
   pPrXml: string;
-  /** Các phần tử phi văn bản cần giữ nguyên trong đoạn (w:bookmarkStart, w:drawing, m:oMath...) */
-  preservedBeforeXml: string;
-  preservedAfterXml: string;
+  /** Các trường tương thích ngược (nếu skeleton cũ có lưu preservedBeforeXml / preservedAfterXml) */
+  preservedBeforeXml?: string;
+  preservedAfterXml?: string;
   /** Định dạng nền của đoạn (của span có nhiều ký tự nhất) */
   baseRPrXml: string;
-  /** Danh sách câu và khoảng trắng xen giữa trong đoạn */
+  /** Danh sách theo đúng thứ tự xuất hiện gồm câu dịch, khoảng trắng (gap) và phần tử giữ nguyên (preserved) */
   segments: DocxParagraphSegment[];
 }
 
@@ -796,6 +809,9 @@ function normalizeRPrXml(rawRPrXml: string): string {
 }
 
 function sameSpanSpec(a: DocxSpanSpec, b: DocxSpanSpec): boolean {
+  if (a.beforeXml || a.afterXml || b.beforeXml || b.afterXml) {
+    return false;
+  }
   return a.rPrXml === b.rPrXml && (a.hyperlinkAttrs ?? '') === (b.hyperlinkAttrs ?? '');
 }
 
@@ -803,6 +819,12 @@ interface ExtractedRunSpan {
   text: string;
   spec: DocxSpanSpec;
 }
+
+type RawParagraphItem =
+  | { kind: 'span'; text: string; spec: DocxSpanSpec }
+  | { kind: 'bookmarkStart'; id: string; xml: string }
+  | { kind: 'bookmarkEnd'; id: string; xml: string }
+  | { kind: 'preserved'; xml: string };
 
 interface WarningCollector {
   unsupportedElements: Map<string, number>;
@@ -854,67 +876,168 @@ function isTocSdt(sdtNode: XmlElementNode, xml: string): boolean {
   return /w:docPartGallery\s+w:val=["']Table of Contents["']/i.test(raw) || /TOC\s+\\o/i.test(raw);
 }
 
+function wrapInHyperlinkIfNeeded(fragmentXml: string, hyperlinkAttrs: string | undefined): string {
+  if (hyperlinkAttrs === undefined) return fragmentXml;
+  const attrs = hyperlinkAttrs ? ` ${hyperlinkAttrs}` : '';
+  return `<w:hyperlink${attrs}>${fragmentXml}</w:hyperlink>`;
+}
+
+function extractAttrValue(attrs: string, attrName: string): string | null {
+  const escaped = attrName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = new RegExp(`(?:^|\\s)${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(attrs);
+  if (!m) return null;
+  return m[1] ?? m[2] ?? '';
+}
+
 /**
- * Đọc văn bản từ một <w:r>:
+ * Đọc các thành phần con của một <w:r> theo đúng thứ tự xuất hiện:
  *  - <w:t> -> văn bản
  *  - <w:tab/> -> '\t'
  *  - <w:br/> (không phải page/column break) hoặc <w:cr/> -> '\n'
+ *  - Các phần tử giữ nguyên (w:drawing, w:pict, ngắt trang/cột, w:footnoteReference...) được tách thành
+ *    mục 'preserved' ngay tại vị trí xuất hiện để không làm xô lệch cấu trúc trong run.
  */
-function extractRunContent(
+function extractRunItems(
   rNode: XmlElementNode,
   xml: string,
   hyperlinkAttrs: string | undefined,
   collector: WarningCollector,
-): {
-  rPrXml: string;
-  text: string;
-  preservedRunXml: string[];
-} {
+): RawParagraphItem[] {
   let rPrXml = '';
-  let text = '';
-  const preservedRunXml: string[] = [];
+  for (const child of rNode.children) {
+    if (child.kind === 'element' && child.name === 'w:rPr') {
+      rPrXml = normalizeRPrXml(xml.slice(child.start, child.end));
+    }
+  }
+
+  const items: RawParagraphItem[] = [];
+  let textBuf = '';
+
+  const flushText = (): void => {
+    if (!textBuf) return;
+    items.push({
+      kind: 'span',
+      text: textBuf,
+      spec: { rPrXml, ...(hyperlinkAttrs !== undefined ? { hyperlinkAttrs } : {}) },
+    });
+    textBuf = '';
+  };
+
+  const pushPreservedRunChild = (childXml: string): void => {
+    flushText();
+    const runXml = `<w:r>${rPrXml}${childXml}</w:r>`;
+    items.push({
+      kind: 'preserved',
+      xml: wrapInHyperlinkIfNeeded(runXml, hyperlinkAttrs),
+    });
+  };
 
   for (const child of rNode.children) {
     if (child.kind !== 'element') continue;
     if (child.name === 'w:rPr') {
-      rPrXml = normalizeRPrXml(xml.slice(child.start, child.end));
       continue;
     }
     if (child.name === 'w:t') {
       for (const tChild of child.children) {
-        if (tChild.kind === 'text') text += tChild.value;
+        if (tChild.kind === 'text') textBuf += tChild.value;
       }
       continue;
     }
     if (child.name === 'w:tab') {
-      text += '\t';
+      textBuf += '\t';
       continue;
     }
     if (child.name === 'w:br' || child.name === 'w:cr') {
       const isPageOrCol = /w:type\s*=\s*["'](?:page|column)["']/i.test(child.attrs);
       if (isPageOrCol) {
-        preservedRunXml.push(`<w:r>${rPrXml}${xml.slice(child.start, child.end)}</w:r>`);
+        pushPreservedRunChild(xml.slice(child.start, child.end));
       } else {
-        text += '\n';
+        textBuf += '\n';
       }
       continue;
     }
     if (child.name === 'w:noBreakHyphen') {
-      text += '\u2011';
+      textBuf += '\u2011';
       continue;
     }
     if (UNSUPPORTED_INLINE_TAGS.has(child.name) || child.name === 'w:fldChar' || child.name === 'w:instrText') {
       scanUnsupportedDescendants(child, collector);
-      preservedRunXml.push(`<w:r>${rPrXml}${xml.slice(child.start, child.end)}</w:r>`);
+      pushPreservedRunChild(xml.slice(child.start, child.end));
       continue;
     }
     if (child.name === 'w:footnoteReference' || child.name === 'w:endnoteReference' || child.name === 'w:commentReference') {
-      preservedRunXml.push(`<w:r>${rPrXml}${xml.slice(child.start, child.end)}</w:r>`);
+      pushPreservedRunChild(xml.slice(child.start, child.end));
     }
   }
 
-  void hyperlinkAttrs;
-  return { rPrXml, text, preservedRunXml };
+  flushText();
+  return items;
+}
+
+/**
+ * Ghép các cặp <w:bookmarkStart w:id="X"/> ... <w:bookmarkEnd w:id="X"/> bao quanh một cụm văn bản nội tuyến
+ * bên trong câu vào `DocxSpanSpec` (`beforeXml` / `afterXml`) để câu không bị cắt vụn mà bookmark vẫn bám đúng cụm từ.
+ * Các bookmark điểm (rỗng), bookmark bao trọn đoạn hoặc nằm xen giữa các phần tử khác được giữ nguyên thành slot 'preserved'
+ * tại đúng vị trí xuất hiện.
+ */
+function resolveParagraphBookmarks(rawItems: readonly RawParagraphItem[]): Array<
+  | { kind: 'span'; text: string; spec: DocxSpanSpec }
+  | { kind: 'preserved'; xml: string }
+> {
+  const items = rawItems.map((it) => (it.kind === 'span' ? { ...it, spec: { ...it.spec } } : { ...it }));
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < items.length - 2; i++) {
+      const startItem = items[i];
+      const midItem = items[i + 1];
+      const endItem = items[i + 2];
+      if (
+        startItem.kind === 'bookmarkStart' &&
+        midItem.kind === 'span' &&
+        endItem.kind === 'bookmarkEnd' &&
+        startItem.id !== '' &&
+        startItem.id === endItem.id
+      ) {
+        const hasAdjacentSpanBefore = i > 0 && items[i - 1].kind === 'span';
+        const hasAdjacentSpanAfter = i + 3 < items.length && items[i + 3].kind === 'span';
+        const sentencePartsInMid = segmentBlock(escapeMarkerText(midItem.text)).filter((p) => p.kind === 'sentence');
+
+        if ((hasAdjacentSpanBefore || hasAdjacentSpanAfter) && sentencePartsInMid.length <= 1) {
+          midItem.spec = {
+            ...midItem.spec,
+            beforeXml: (midItem.spec.beforeXml ?? '') + startItem.xml,
+            afterXml: endItem.xml + (midItem.spec.afterXml ?? ''),
+          };
+          items.splice(i + 2, 1);
+          items.splice(i, 1);
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+
+  const resolved: Array<{ kind: 'span'; text: string; spec: DocxSpanSpec } | { kind: 'preserved'; xml: string }> = [];
+  for (const it of items) {
+    if (it.kind === 'span') {
+      const prev = resolved[resolved.length - 1];
+      if (prev && prev.kind === 'span' && sameSpanSpec(prev.spec, it.spec)) {
+        prev.text += it.text;
+      } else {
+        resolved.push({ kind: 'span', text: it.text, spec: { ...it.spec } });
+      }
+    } else {
+      const prev = resolved[resolved.length - 1];
+      if (prev && prev.kind === 'preserved') {
+        prev.xml += it.xml;
+      } else {
+        resolved.push({ kind: 'preserved', xml: it.xml });
+      }
+    }
+  }
+  return resolved;
 }
 
 function extractParagraphSlot(
@@ -924,24 +1047,21 @@ function extractParagraphSlot(
   collector: WarningCollector,
 ): DocxParagraphSlot | null {
   let pPrXml = '';
-  const preservedBefore: string[] = [];
-  const preservedAfter: string[] = [];
-  const rawSpans: ExtractedRunSpan[] = [];
+  const rawItems: RawParagraphItem[] = [];
   let hadDeletedContent = false;
 
-  const pushSpan = (text: string, spec: DocxSpanSpec): void => {
-    if (!text) return;
-    const prev = rawSpans[rawSpans.length - 1];
-    if (prev && sameSpanSpec(prev.spec, spec)) {
-      prev.text += text;
-    } else {
-      rawSpans.push({ text, spec: { ...spec } });
+  const pushRawItem = (item: RawParagraphItem): void => {
+    if (item.kind === 'span') {
+      if (!item.text) return;
+      const prev = rawItems[rawItems.length - 1];
+      if (prev && prev.kind === 'span' && sameSpanSpec(prev.spec, item.spec)) {
+        prev.text += item.text;
+      } else {
+        rawItems.push({ kind: 'span', text: item.text, spec: { ...item.spec } });
+      }
+      return;
     }
-  };
-
-  const pushPreserved = (fragmentXml: string): void => {
-    if (rawSpans.length === 0) preservedBefore.push(fragmentXml);
-    else preservedAfter.push(fragmentXml);
+    rawItems.push(item);
   };
 
   const walkParagraphChildren = (children: readonly XmlNode[], hyperlinkAttrs?: string): void => {
@@ -953,13 +1073,11 @@ function extractParagraphSlot(
         continue;
       }
       if (child.name === 'w:proofErr') {
-        // Bỏ qua đánh dấu lỗi chính tả của ngôn ngữ gốc
         continue;
       }
       if (child.name === 'w:r') {
-        const { rPrXml, text, preservedRunXml } = extractRunContent(child, xml, hyperlinkAttrs, collector);
-        for (const pres of preservedRunXml) pushPreserved(pres);
-        pushSpan(text, { rPrXml, ...(hyperlinkAttrs !== undefined ? { hyperlinkAttrs } : {}) });
+        const runItems = extractRunItems(child, xml, hyperlinkAttrs, collector);
+        for (const it of runItems) pushRawItem(it);
         continue;
       }
       if (child.name === 'w:hyperlink') {
@@ -979,36 +1097,55 @@ function extractParagraphSlot(
       }
       if (UNSUPPORTED_INLINE_TAGS.has(child.name)) {
         scanUnsupportedDescendants(child, collector);
-        pushPreserved(xml.slice(child.start, child.end));
+        pushRawItem({
+          kind: 'preserved',
+          xml: wrapInHyperlinkIfNeeded(xml.slice(child.start, child.end), hyperlinkAttrs),
+        });
         continue;
       }
-      // Các phần tử đánh dấu vị trí như w:bookmarkStart, w:bookmarkEnd...
-      pushPreserved(xml.slice(child.start, child.end));
+      if (child.name === 'w:bookmarkStart' && hyperlinkAttrs === undefined) {
+        const id = extractAttrValue(child.attrs, 'w:id') ?? '';
+        pushRawItem({ kind: 'bookmarkStart', id, xml: xml.slice(child.start, child.end) });
+        continue;
+      }
+      if (child.name === 'w:bookmarkEnd' && hyperlinkAttrs === undefined) {
+        const id = extractAttrValue(child.attrs, 'w:id') ?? '';
+        pushRawItem({ kind: 'bookmarkEnd', id, xml: xml.slice(child.start, child.end) });
+        continue;
+      }
+      pushRawItem({
+        kind: 'preserved',
+        xml: wrapInHyperlinkIfNeeded(xml.slice(child.start, child.end), hyperlinkAttrs),
+      });
     }
   };
 
   walkParagraphChildren(pNode.children);
 
-  if (rawSpans.length === 0) {
+  const orderedItems = resolveParagraphBookmarks(rawItems);
+  const allSpans = orderedItems.filter((it): it is { kind: 'span'; text: string; spec: DocxSpanSpec } => it.kind === 'span');
+
+  if (allSpans.length === 0) {
     if (!hadDeletedContent) return null;
+    const segments: DocxParagraphSegment[] = orderedItems.map((it) => ({
+      kind: 'preserved',
+      xml: (it as { kind: 'preserved'; xml: string }).xml,
+    }));
     return {
       innerStart: pNode.innerStart,
       innerEnd: pNode.innerEnd,
       pPrXml,
-      preservedBeforeXml: preservedBefore.join(''),
-      preservedAfterXml: preservedAfter.join(''),
       baseRPrXml: '',
-      segments: [],
+      segments,
     };
   }
 
   // Mục 2.6.6: "Định dạng nền của đoạn là định dạng của span có nhiều ký tự nhất."
-  // Chọn trong các span không phải liên kết (vì liên kết luôn cần bọc {k}...{/k} để giữ đích)
   let baseRPrXml = '';
   let maxSpanChars = -1;
   const charTotalsByRPr = new Map<string, number>();
-  for (const sp of rawSpans) {
-    if (sp.spec.hyperlinkAttrs !== undefined) continue;
+  for (const sp of allSpans) {
+    if (sp.spec.hyperlinkAttrs !== undefined || sp.spec.beforeXml || sp.spec.afterXml) continue;
     const len = Array.from(sp.text).length;
     const total = (charTotalsByRPr.get(sp.spec.rPrXml) ?? 0) + len;
     charTotalsByRPr.set(sp.spec.rPrXml, total);
@@ -1017,7 +1154,6 @@ function extractParagraphSlot(
       baseRPrXml = sp.spec.rPrXml;
     }
   }
-  // Nếu có nhiều span rời nhau cùng một rPrXml có tổng số ký tự lớn hơn, ưu tiên định dạng có nhiều ký tự nhất trong đoạn
   let bestTotal = -1;
   for (const [rPr, total] of charTotalsByRPr) {
     if (total > bestTotal) {
@@ -1026,57 +1162,76 @@ function extractParagraphSlot(
     }
   }
 
-  // Tạo chuỗi marker cấp đoạn
-  const paraSpans: Record<string, DocxSpanSpec> = {};
-  let nextMarkerId = 1;
-  let paraMarkerText = '';
-
-  for (const sp of rawSpans) {
-    const escaped = escapeMarkerText(sp.text);
-    const isBase = sp.spec.hyperlinkAttrs === undefined && sp.spec.rPrXml === baseRPrXml;
-    if (isBase) {
-      paraMarkerText += escaped;
-    } else {
-      const id = String(nextMarkerId++);
-      paraSpans[id] = sp.spec;
-      paraMarkerText += `{${id}}${escaped}{/${id}}`;
-    }
-  }
-
-  const segParts = segmentBlock(paraMarkerText);
+  // Lưu theo thứ tự các câu, gap và slot 'preserved' trong đoạn
   const segments: DocxParagraphSegment[] = [];
   let hasTranslatableSentence = false;
+  let currentSpanGroup: ExtractedRunSpan[] = [];
 
-  for (const part of segParts) {
-    if (part.kind === 'sentence' && isTranslatable(part.text)) {
-      hasTranslatableSentence = true;
-      const renumbered = renumberMarkers(part.text);
-      const sentenceSpans: Record<string, DocxSpanSpec> = {};
-      for (const [newId, oldId] of Object.entries(renumbered.idMap)) {
-        if (paraSpans[oldId]) {
-          sentenceSpans[newId] = paraSpans[oldId];
+  const flushSpanGroup = (): void => {
+    if (currentSpanGroup.length === 0) return;
+    const paraSpans: Record<string, DocxSpanSpec> = {};
+    let nextMarkerId = 1;
+    let groupMarkerText = '';
+
+    for (const sp of currentSpanGroup) {
+      const escaped = escapeMarkerText(sp.text);
+      const isBase =
+        sp.spec.hyperlinkAttrs === undefined &&
+        !sp.spec.beforeXml &&
+        !sp.spec.afterXml &&
+        sp.spec.rPrXml === baseRPrXml;
+      if (isBase) {
+        groupMarkerText += escaped;
+      } else {
+        const id = String(nextMarkerId++);
+        paraSpans[id] = sp.spec;
+        groupMarkerText += `{${id}}${escaped}{/${id}}`;
+      }
+    }
+
+    const segParts = segmentBlock(groupMarkerText);
+    for (const part of segParts) {
+      if (part.kind === 'sentence' && isTranslatable(part.text)) {
+        hasTranslatableSentence = true;
+        const renumbered = renumberMarkers(part.text);
+        const sentenceSpans: Record<string, DocxSpanSpec> = {};
+        for (const [newId, oldId] of Object.entries(renumbered.idMap)) {
+          if (paraSpans[oldId]) {
+            sentenceSpans[newId] = paraSpans[oldId];
+          }
         }
+        const sentenceId = blocks.length;
+        blocks.push({ id: sentenceId, text: renumbered.text });
+        segments.push({
+          kind: 'sentence',
+          sentenceId,
+          sourceMarkerText: renumbered.text,
+          spans: sentenceSpans,
+        });
+      } else {
+        const gapSpans: Record<string, DocxSpanSpec> = {};
+        for (const id of validateMarkers(part.text).ids) {
+          if (paraSpans[id]) gapSpans[id] = paraSpans[id];
+        }
+        segments.push({
+          kind: 'gap',
+          markerText: part.text,
+          spans: gapSpans,
+        });
       }
-      const sentenceId = blocks.length;
-      blocks.push({ id: sentenceId, text: renumbered.text });
-      segments.push({
-        kind: 'sentence',
-        sentenceId,
-        sourceMarkerText: renumbered.text,
-        spans: sentenceSpans,
-      });
+    }
+    currentSpanGroup = [];
+  };
+
+  for (const item of orderedItems) {
+    if (item.kind === 'span') {
+      currentSpanGroup.push({ text: item.text, spec: item.spec });
     } else {
-      const gapSpans: Record<string, DocxSpanSpec> = {};
-      for (const id of validateMarkers(part.text).ids) {
-        if (paraSpans[id]) gapSpans[id] = paraSpans[id];
-      }
-      segments.push({
-        kind: 'gap',
-        markerText: part.text,
-        spans: gapSpans,
-      });
+      flushSpanGroup();
+      segments.push({ kind: 'preserved', xml: item.xml });
     }
   }
+  flushSpanGroup();
 
   if (!hasTranslatableSentence && !hadDeletedContent) {
     return null;
@@ -1086,8 +1241,6 @@ function extractParagraphSlot(
     innerStart: pNode.innerStart,
     innerEnd: pNode.innerEnd,
     pPrXml,
-    preservedBeforeXml: preservedBefore.join(''),
-    preservedAfterXml: preservedAfter.join(''),
     baseRPrXml,
     segments,
   };
@@ -1220,6 +1373,7 @@ function markerTextToSpans(
   const tokens = tokenizeMarkers(markerText);
   const activeStack: DocxSpanSpec[] = [];
   const out: ExtractedRunSpan[] = [];
+  let pendingBeforeXml = '';
 
   const currentSpec = (): DocxSpanSpec => {
     if (activeStack.length === 0) return { rPrXml: baseRPrXml };
@@ -1242,11 +1396,26 @@ function markerTextToSpans(
 
   for (const tok of tokens) {
     if (tok.type === 'open') {
-      activeStack.push(spans[tok.id] ?? { rPrXml: baseRPrXml });
+      const opened = spans[tok.id] ?? { rPrXml: baseRPrXml };
+      activeStack.push(opened);
+      if (opened.beforeXml) {
+        pendingBeforeXml += opened.beforeXml;
+      }
     } else if (tok.type === 'close') {
-      activeStack.pop();
+      const closed = activeStack.pop();
+      if (closed?.afterXml && out.length > 0) {
+        const last = out[out.length - 1];
+        last.spec = {
+          ...last.spec,
+          afterXml: (last.spec.afterXml ?? '') + closed.afterXml,
+        };
+      }
     } else if (tok.type === 'text' && tok.value) {
-      const spec = currentSpec();
+      const spec: DocxSpanSpec = {
+        ...currentSpec(),
+        ...(pendingBeforeXml ? { beforeXml: pendingBeforeXml } : {}),
+      };
+      pendingBeforeXml = '';
       const prev = out[out.length - 1];
       if (prev && sameSpanSpec(prev.spec, spec)) {
         prev.text += tok.value;
@@ -1264,20 +1433,42 @@ function rebuildParagraphInnerXml(
   targetLang: string | undefined,
   stats: RebuildStats,
 ): string {
-  const mergedSpans: ExtractedRunSpan[] = [];
+  const pendingSpans: ExtractedRunSpan[] = [];
+  let outXml = `${slot.pPrXml}${slot.preservedBeforeXml ?? ''}`;
+
   const appendSpans = (items: readonly ExtractedRunSpan[]): void => {
     for (const item of items) {
       if (!item.text) continue;
-      const prev = mergedSpans[mergedSpans.length - 1];
+      const prev = pendingSpans[pendingSpans.length - 1];
       if (prev && sameSpanSpec(prev.spec, item.spec)) {
         prev.text += item.text;
       } else {
-        mergedSpans.push({ text: item.text, spec: { ...item.spec } });
+        pendingSpans.push({ text: item.text, spec: { ...item.spec } });
       }
     }
   };
 
+  const flushPendingSpans = (): void => {
+    for (const sp of pendingSpans) {
+      const rPr = applyEastAsianFont(sp.spec.rPrXml, targetLang);
+      const childrenXml = buildRunChildrenXml(sp.text);
+      const runXml = `<w:r>${rPr}${childrenXml}</w:r>`;
+      const wrappedRun =
+        sp.spec.hyperlinkAttrs !== undefined
+          ? `<w:hyperlink${sp.spec.hyperlinkAttrs ? ` ${sp.spec.hyperlinkAttrs}` : ''}>${runXml}</w:hyperlink>`
+          : runXml;
+      outXml += `${sp.spec.beforeXml ?? ''}${wrappedRun}${sp.spec.afterXml ?? ''}`;
+    }
+    pendingSpans.length = 0;
+  };
+
   for (const seg of slot.segments) {
+    if (seg.kind === 'preserved') {
+      flushPendingSpans();
+      outXml += seg.xml;
+      continue;
+    }
+
     if (seg.kind === 'gap') {
       appendSpans(markerTextToSpans(seg.markerText, seg.spans, slot.baseRPrXml));
       continue;
@@ -1296,26 +1487,31 @@ function rebuildParagraphInnerXml(
     const cmp = compareMarkers(seg.sourceMarkerText, tr);
     if (!cmp.restorable) {
       stats.tagFallback++;
-      appendSpans([{ text: stripMarkers(tr), spec: { rPrXml: slot.baseRPrXml } }]);
+      // Bảo toàn các bookmark nội tuyến (beforeXml / afterXml) nếu có trong seg.spans khi fallback
+      let fallbackBefore = '';
+      let fallbackAfter = '';
+      for (const spSpec of Object.values(seg.spans)) {
+        if (spSpec.beforeXml) fallbackBefore += spSpec.beforeXml;
+        if (spSpec.afterXml) fallbackAfter += spSpec.afterXml;
+      }
+      appendSpans([
+        {
+          text: stripMarkers(tr),
+          spec: {
+            rPrXml: slot.baseRPrXml,
+            ...(fallbackBefore ? { beforeXml: fallbackBefore } : {}),
+            ...(fallbackAfter ? { afterXml: fallbackAfter } : {}),
+          },
+        },
+      ]);
     } else {
       appendSpans(markerTextToSpans(tr, seg.spans, slot.baseRPrXml));
     }
   }
 
-  let runsXml = '';
-  for (const sp of mergedSpans) {
-    const rPr = applyEastAsianFont(sp.spec.rPrXml, targetLang);
-    const childrenXml = buildRunChildrenXml(sp.text);
-    const runXml = `<w:r>${rPr}${childrenXml}</w:r>`;
-    if (sp.spec.hyperlinkAttrs !== undefined) {
-      const attrs = sp.spec.hyperlinkAttrs ? ` ${sp.spec.hyperlinkAttrs}` : '';
-      runsXml += `<w:hyperlink${attrs}>${runXml}</w:hyperlink>`;
-    } else {
-      runsXml += runXml;
-    }
-  }
-
-  return `${slot.pPrXml}${slot.preservedBeforeXml}${runsXml}${slot.preservedAfterXml}`;
+  flushPendingSpans();
+  outXml += slot.preservedAfterXml ?? '';
+  return outXml;
 }
 
 // ============================================================================

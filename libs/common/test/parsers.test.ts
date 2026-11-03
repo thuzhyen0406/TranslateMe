@@ -352,6 +352,58 @@ describe('DOCX (4.9) – phân tích đoạn văn, bảng lồng nhau, gộp run
       (e: unknown) => e instanceof CorruptFile && e.reason === 'REBUILD_VERIFICATION_FAILED',
     );
   });
+
+  it('giữ nguyên đúng vị trí của hình ảnh (w:drawing), bookmark giữa câu và phần tử được giữ nguyên khi rebuild', () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+      <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:body>
+          <w:p>
+            <w:r><w:t xml:space="preserve">Đoạn chữ trước hình. </w:t></w:r>
+            <w:r><w:drawing><w:inline id="img-mid"/></w:drawing></w:r>
+            <w:r><w:t xml:space="preserve"> Đoạn chữ sau hình.</w:t></w:r>
+          </w:p>
+          <w:p>
+            <w:r><w:t xml:space="preserve">Xem </w:t></w:r>
+            <w:bookmarkStart w:id="10" w:name="bm_gia"/>
+            <w:r><w:t>bảng giá</w:t></w:r>
+            <w:bookmarkEnd w:id="10"/>
+            <w:r><w:t xml:space="preserve"> chi tiết tại lễ tân.</w:t></w:r>
+          </w:p>
+        </w:body>
+      </w:document>`;
+
+    const doc = parse('DOCX', createDocxPackage({ 'word/document.xml': xml }));
+    assert.deepEqual(doc.blocks.map((b) => b.text), [
+      'Đoạn chữ trước hình.',
+      'Đoạn chữ sau hình.',
+      'Xem {1}bảng giá{/1} chi tiết tại lễ tân.',
+    ]);
+
+    const rebuiltBytes = rebuild(
+      doc.skeleton,
+      [
+        'Text before image.',
+        'Text after image.',
+        'At the reception, see the detailed {1}price list{/1}.',
+      ],
+      { targetLang: 'en' },
+    );
+    const rebuiltXml = (parse('DOCX', rebuiltBytes).skeleton as DocxSkeleton).documentXml;
+
+    // 1. Hình ảnh (w:drawing) phải nằm đúng ở giữa "Text before image." và "Text after image." (không bị đẩy xuống cuối đoạn)
+    const beforeIdx = rebuiltXml.indexOf('Text before image.');
+    const drawingIdx = rebuiltXml.indexOf('<w:drawing><w:inline id="img-mid"/></w:drawing>');
+    const afterIdx = rebuiltXml.indexOf('Text after image.');
+    assert.ok(beforeIdx >= 0 && drawingIdx > beforeIdx && afterIdx > drawingIdx, 'w:drawing phải nằm giữa hai phần văn bản');
+
+    // 2. Bookmark phải bao quanh đúng cụm từ "price list" ở vị trí mới trong câu dịch
+    assert.ok(
+      rebuiltXml.includes(
+        '<w:bookmarkStart w:id="10" w:name="bm_gia"/><w:r><w:t xml:space="preserve">price list</w:t></w:r><w:bookmarkEnd w:id="10"/>',
+      ),
+      'bookmarkStart/bookmarkEnd phải bám sát vùng văn bản mà nó đánh dấu',
+    );
+  });
 });
 
 describe('DOCX (4.9) – cảnh báo thành phần ngoài phạm vi theo Bảng 2.17', () => {
