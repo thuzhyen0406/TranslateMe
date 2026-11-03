@@ -4,13 +4,15 @@ import { AppError, type Ctx } from '../../../../libs/common/types.js';
 import type { SafeFetchOutcome } from '../../../../libs/common/safeFetch.js';
 import {
   createSite,
+  pauseSite,
+  resumeSite,
   verifySite,
   type CreateSiteInput,
   type SiteManagerDependencies,
 } from '../siteManager.js';
 
-const tenantA: Ctx = { tenantId: 'tenant-a', via: 'JWT', requestId: 'test-a' };
-const tenantB: Ctx = { tenantId: 'tenant-b', via: 'JWT', requestId: 'test-b' };
+const tenantA: Ctx = { tenantId: 'tenant-a', via: 'JWT', requestId: 'test-a', role: 'TENANT_ADMIN' };
+const tenantB: Ctx = { tenantId: 'tenant-b', via: 'JWT', requestId: 'test-b', role: 'TENANT_ADMIN' };
 
 const siteInput: CreateSiteInput = {
   homeUrl: 'https://site.example/',
@@ -34,18 +36,41 @@ function createHarness() {
   const records = new Map<string, Record<string, any>>();
   const transactions: any[][] = [];
   const requestedUrls: string[] = [];
+  const invalidations: Array<{ slugs: readonly string[] }> = [];
   let fetchOutcome: SafeFetchOutcome = successfulFetch('');
   const keyOf = (item: { PK: string; SK: string }) => `${item.PK}::${item.SK}`;
+  records.set('TENANT#tenant-a::CONFIG', { PK: 'TENANT#tenant-a', SK: 'CONFIG', status: 'ACTIVE' });
+  records.set('TENANT#tenant-b::CONFIG', { PK: 'TENANT#tenant-b', SK: 'CONFIG', status: 'ACTIVE' });
 
   const dependencies: SiteManagerDependencies = {
+    async assertTenantWritable() {},
     db: {
       async transact(_ctx, operations) {
         transactions.push(operations);
         const puts = operations.map((operation) => operation.Put).filter(Boolean);
-        const hasConflict = puts.some((put) => records.has(keyOf(put.Item)));
+        const hasConflict = puts.some((put) =>
+          put.ConditionExpression && records.has(keyOf(put.Item))
+        );
+        const configCheck = operations.find((operation) => operation.ConditionCheck)?.ConditionCheck;
+        const configLocked = configCheck &&
+          records.get(keyOf(configCheck.Key))?.status !== 'ACTIVE';
+        if (configLocked) {
+          throw Object.assign(new Error('Conditional transaction failed'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [
+              { Code: 'Success' },
+              { Code: 'ConditionalCheckFailed' },
+            ],
+          });
+        }
         if (hasConflict) {
           throw Object.assign(new Error('Conditional transaction failed'), {
             name: 'TransactionCanceledException',
+            CancellationReasons: [
+              { Code: 'ConditionalCheckFailed' },
+              { Code: 'None' },
+              { Code: 'None' },
+            ],
           });
         }
 
@@ -59,8 +84,25 @@ function createHarness() {
         const record = item as { PK: string; SK: string };
         records.set(keyOf(record), { ...item });
       },
+      async updateSiteStatus(ctx, slug, expectedStatus, nextStatus) {
+        const config = records.get(`TENANT#${ctx.tenantId}::CONFIG`);
+        if (!config || config.status !== 'ACTIVE') {
+          throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị khóa');
+        }
+        const key = `TENANT#${ctx.tenantId}::HOST#${slug}`;
+        const record = records.get(key);
+        if (!record || record.status !== expectedStatus) {
+          throw new AppError('VERSION_CONFLICT', 'Trạng thái website đã thay đổi');
+        }
+        record.status = nextStatus;
+        record.updatedAt = new Date().toISOString();
+      },
     },
     resolver: async () => [{ address: '93.184.216.34', family: 4 }],
+    invalidateSites: async (_ctx, options) => {
+      invalidations.push(options);
+      return { paths: [`/${options.slugs[0]}/*`], mode: 'WILDCARD' };
+    },
     safeFetch: async (url) => {
       requestedUrls.push(url);
       return fetchOutcome;
@@ -72,6 +114,7 @@ function createHarness() {
     records,
     transactions,
     requestedUrls,
+    invalidations,
     setFetchOutcome(outcome: SafeFetchOutcome) {
       fetchOutcome = outcome;
     },
@@ -83,6 +126,14 @@ function hostFor(records: Map<string, Record<string, any>>, tenantId: string, sl
 }
 
 describe('siteManager', () => {
+  it('kiểm tra role trước khi truy cập hoặc xác thực tài nguyên website', async () => {
+    const developerCtx: Ctx = { ...tenantA, role: 'DEVELOPER' };
+    await assert.rejects(
+      createSite(developerCtx, siteInput),
+      (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
+    );
+  });
+
   it('tạo site PENDING và ghi HOST + SLUG nguyên tử với điều kiện không trùng', async () => {
     const harness = createHarness();
 
@@ -92,11 +143,16 @@ describe('siteManager', () => {
     assert.equal(result.status, 'PENDING');
     assert.match(result.verificationCode, /^translateme-verify-/);
     assert.equal(harness.transactions.length, 1);
-    assert.equal(harness.transactions[0].length, 2);
+    assert.equal(harness.transactions[0].length, 3);
     assert.deepEqual(
-      harness.transactions[0].map((operation) => operation.Put.ConditionExpression),
+      harness.transactions[0].map((operation) => operation.Put?.ConditionExpression).filter(Boolean),
       ['attribute_not_exists(PK)', 'attribute_not_exists(SK)'],
     );
+    const tenantStatusCheck = harness.transactions[0][2].ConditionCheck;
+    assert.deepEqual(tenantStatusCheck.Key, { PK: 'TENANT#tenant-a', SK: 'CONFIG' });
+    assert.equal(tenantStatusCheck.ConditionExpression, 'attribute_exists(PK) AND #status = :active');
+    assert.deepEqual(tenantStatusCheck.ExpressionAttributeNames, { '#status': 'status' });
+    assert.deepEqual(tenantStatusCheck.ExpressionAttributeValues, { ':active': 'ACTIVE' });
     assert.equal(harness.records.get('TENANT#PLATFORM#SLUG#site-example::META')?.tenantId, 'tenant-a');
     assert.equal(hostFor(harness.records, 'tenant-a', result.slug)?.status, 'PENDING');
   });
@@ -118,7 +174,13 @@ describe('siteManager', () => {
         homeUrl,
       );
       assert.equal(harness.transactions.length, 0, homeUrl);
-      assert.equal(harness.records.size, 0, homeUrl);
+      assert.equal(
+        [...harness.records.values()].some((record) =>
+          record.SK?.startsWith('HOST#') || record.PK?.includes('#SLUG#')
+        ),
+        false,
+        homeUrl,
+      );
     }
   });
 
@@ -169,6 +231,27 @@ describe('siteManager', () => {
     assert.deepEqual(harness.requestedUrls, ['https://site.example/translateme-verification.txt']);
   });
 
+  it('không xác minh website nếu tenant bị khóa trong lúc tải trang', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+    harness.setFetchOutcome(successfulFetch(
+      `<meta name="translateme-site-verification" content="${created.verificationCode}">`,
+    ));
+    harness.dependencies.safeFetch = async () => {
+      const config = harness.records.get('TENANT#tenant-a::CONFIG');
+      if (config) config.status = 'LOCKED';
+      return successfulFetch(
+        `<meta name="translateme-site-verification" content="${created.verificationCode}">`,
+      );
+    };
+
+    await assert.rejects(
+      verifySite(tenantA, created.slug, 'META', harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'TENANT_SUSPENDED',
+    );
+    assert.equal(hostFor(harness.records, 'tenant-a', created.slug)?.status, 'PENDING');
+  });
+
   it('trả lỗi VERIFICATION_CODE_MISMATCH cho FILE sai và giữ PENDING', async () => {
     const harness = createHarness();
     const created = await createSite(tenantA, siteInput, harness.dependencies);
@@ -199,6 +282,143 @@ describe('siteManager', () => {
         error.details?.reason === 'BLOCKED',
     );
     assert.equal(hostFor(harness.records, 'tenant-a', created.slug)?.status, 'PENDING');
+  });
+
+  it('pauseSite chuyển ACTIVE sang PAUSED và chạy invalidation', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+    const host = hostFor(harness.records, 'tenant-a', created.slug);
+    assert.ok(host);
+    host.status = 'ACTIVE';
+
+    assert.deepEqual(await pauseSite(tenantA, created.slug, harness.dependencies), {
+      status: 'PAUSED',
+      invalidation: {
+        paths: [`/${created.slug}/*`],
+        mode: 'WILDCARD',
+      },
+    });
+    assert.equal(hostFor(harness.records, 'tenant-a', created.slug)?.status, 'PAUSED');
+    assert.deepEqual(harness.invalidations, [{ slugs: [created.slug] }]);
+  });
+
+  it('resumeSite chuyển PAUSED sang ACTIVE và chạy invalidation', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+    const host = hostFor(harness.records, 'tenant-a', created.slug);
+    assert.ok(host);
+    host.status = 'PAUSED';
+
+    assert.deepEqual(await resumeSite(tenantA, created.slug, harness.dependencies), {
+      status: 'ACTIVE',
+      invalidation: {
+        paths: [`/${created.slug}/*`],
+        mode: 'WILDCARD',
+      },
+    });
+    assert.equal(hostFor(harness.records, 'tenant-a', created.slug)?.status, 'ACTIVE');
+    assert.deepEqual(harness.invalidations, [{ slugs: [created.slug] }]);
+  });
+
+  it('pauseSite và resumeSite từ chối cập nhật nếu CONFIG bị khóa', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+    const host = hostFor(harness.records, 'tenant-a', created.slug);
+    const config = harness.records.get('TENANT#tenant-a::CONFIG');
+    assert.ok(host);
+    assert.ok(config);
+
+    host.status = 'ACTIVE';
+    config.status = 'LOCKED';
+    await assert.rejects(
+      pauseSite(tenantA, created.slug, harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'TENANT_SUSPENDED',
+    );
+    assert.equal(host.status, 'ACTIVE');
+
+    host.status = 'PAUSED';
+    await assert.rejects(
+      resumeSite(tenantA, created.slug, harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'TENANT_SUSPENDED',
+    );
+    assert.equal(host.status, 'PAUSED');
+    assert.deepEqual(harness.invalidations, []);
+  });
+
+  it('resumeSite từ chối PENDING và không chạy invalidation', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+
+    await assert.rejects(
+      resumeSite(tenantA, created.slug, harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'VERSION_CONFLICT',
+    );
+    assert.equal(hostFor(harness.records, 'tenant-a', created.slug)?.status, 'PENDING');
+    assert.deepEqual(harness.invalidations, []);
+  });
+
+  it('pauseSite từ chối trạng thái khác ACTIVE và không chạy invalidation', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+
+    await assert.rejects(
+      pauseSite(tenantA, created.slug, harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'VERSION_CONFLICT',
+    );
+    assert.equal(hostFor(harness.records, 'tenant-a', created.slug)?.status, 'PENDING');
+    assert.deepEqual(harness.invalidations, []);
+  });
+
+  it('chuyển ConditionalCheckFailedException thành VERSION_CONFLICT', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+    harness.dependencies.db.updateSiteStatus = async () => {
+      throw Object.assign(new Error('The conditional request failed'), {
+        name: 'ConditionalCheckFailedException',
+      });
+    };
+
+    await assert.rejects(
+      resumeSite(tenantA, created.slug, harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'VERSION_CONFLICT',
+    );
+    assert.deepEqual(harness.invalidations, []);
+  });
+
+  it('trả về NOT_FOUND khi website không tồn tại', async () => {
+    const harness = createHarness();
+
+    await assert.rejects(
+      pauseSite(tenantA, 'missing-site', harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
+    );
+  });
+
+  it('cho phép thử lại invalidation sau khi trạng thái đã đổi', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+    const host = hostFor(harness.records, 'tenant-a', created.slug);
+    assert.ok(host);
+    host.status = 'ACTIVE';
+
+    let attempts = 0;
+    harness.dependencies.invalidateSites = async (_ctx, options) => {
+      attempts += 1;
+      if (attempts === 1) throw new AppError('CACHE_INVALIDATION_FAILED', 'CloudFront unavailable');
+      return { paths: [`/${options.slugs[0]}/*`], mode: 'WILDCARD' };
+    };
+
+    await assert.rejects(
+      pauseSite(tenantA, created.slug, harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'CACHE_INVALIDATION_FAILED',
+    );
+    assert.equal(host.status, 'PAUSED');
+
+    assert.deepEqual(await pauseSite(tenantA, created.slug, harness.dependencies), {
+      status: 'PAUSED',
+      invalidation: { paths: [`/${created.slug}/*`], mode: 'WILDCARD' },
+    });
+    assert.equal(attempts, 2);
   });
 
   it('chỉ một tenant đăng ký thành công khi hai tenant cùng đăng ký slug', async () => {

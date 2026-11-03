@@ -57,6 +57,21 @@ const inv = createInvalidator({ seg, cdn, wildcardThreshold: cfg.wildcardThresho
 
 Môi trường dev chưa có distribution và kiểm thử của 3.8 dùng `createMemoryCdn()` (CloudFront giả trong bộ nhớ: lần xóa chuyển `Completed` sau một lần `getInvalidation`; `failWith` để giả lập lỗi).
 
+## Xóa cache cả website (3.1/3.2 – khóa tenant, tạm dừng/bật lại website)
+
+`invalidateForSites(ctx, { slugs })` dùng khi trạng thái website hoặc tenant đổi, để QC-3 (hiệu lực ≤ 60 s) không bị cache CloudFront (tới 7 ngày) vô hiệu hóa.
+
+- Mỗi website một wildcard `/<slug>/*` (mọi ngôn ngữ). Bỏ slug sai dạng, loại trùng, sắp xếp.
+- Chia lô tối đa 15 wildcard (`CLOUDFRONT_WILDCARD_LIMIT`). `CallerReference = t:<tenantId>:<uuid>` như M8.
+- **Khác `invalidateForSentences`:** có lô lỗi thì **ném** `AppError('CACHE_INVALIDATION_FAILED')` (platform handler map 503). Ghi trạng thái rồi xóa cache là thao tác lặp lại được, nên người dùng chỉ cần bấm lại.
+- Kết quả: `{ paths, mode: 'WILDCARD', status: 'SUBMITTED' | 'NOTHING_TO_DO' | 'NOT_CONFIGURED', invalidationIds }` (`status`, `invalidationIds` tùy chọn trong kiểu để bản giả cũ vẫn hợp lệ).
+- Bản mặc định (hàm export `invalidateForSites`, `siteManager` và `platform/tenantStatus` đang dùng) tự dựng CloudFront từ `CLOUDFRONT_DISTRIBUTION_ID`, nạp `@aws-sdk/client-cloudfront` bằng import động khi có biến này.
+  - Thiếu biến khi chạy trong Lambda (`AWS_LAMBDA_FUNCTION_NAME` có giá trị): ném `CACHE_INVALIDATION_FAILED`, không im lặng bỏ qua.
+  - Thiếu biến khi chạy local/test: trả `NOT_CONFIGURED`, ghi log `CDN_NOT_CONFIGURED`.
+  - `configureSiteInvalidation(cdn | null)` để thay bản mặc định (test hoặc tự truyền `cdn`).
+- Cũng có trong `createInvalidator(...).invalidateForSites` (dùng chung `cdn`) và `createSiteInvalidator({ cdn })`.
+- **IaC:** Lambda console-api và platform-api cần `CLOUDFRONT_DISTRIBUTION_ID` trong biến môi trường (quyền `cloudfront:CreateInvalidation` đã có trong `iam.yaml`).
+
 ## Cần TV1 xác nhận
 
 - **Query string trong khóa cache CloudFront.** Xóa theo đường dẫn chính xác chỉ xóa bản không có query. Nếu cache policy của đường dẫn bản dịch đưa query string vào khóa cache, các biến thể `?page=2`… phải chờ hết `s-maxage`. Đề xuất cache policy cho bản dịch không dùng query string trong khóa cache, hoặc chấp nhận độ trễ này và ghi vào báo cáo.

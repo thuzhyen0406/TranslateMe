@@ -1,18 +1,10 @@
-/**
- * Hằng số vai trò (Role) và trạng thái dùng chung cho Cognito Trigger, Authorizer và REST API.
- *
- * TODO(nhóm - xác nhận với TV3): Thống nhất chính xác giá trị chuỗi của ROLES với TV3
- * vì Lambda Authorizer và tầng API sẽ đọc trực tiếp `custom:role` / Cognito Group theo đúng các chuỗi này.
- */
+import type { Role } from './types.js';
 
 export const ROLES = Object.freeze({
-  TENANT_ADMIN: 'Tenant Admin',
-  DEVELOPER: 'Developer',
-  REVIEWER: 'Reviewer',
-  PLATFORM_ADMIN: 'Platform Admin',
+  TENANT_ADMIN: 'TENANT_ADMIN',
+  DEVELOPER: 'DEVELOPER',
+  REVIEWER: 'REVIEWER',
 } as const);
-
-export type Role = (typeof ROLES)[keyof typeof ROLES];
 
 /** Chỉ cho phép mời thành viên với 2 vai trò này (không cho tạo Tenant Admin hay Platform Admin qua inviteMember). */
 export const INVITABLE_ROLES = Object.freeze([ROLES.DEVELOPER, ROLES.REVIEWER] as const);
@@ -32,3 +24,27 @@ export const COGNITO_CUSTOM_ATTRIBUTES = Object.freeze({
   TENANT_ID: 'custom:tenant_id',
   ROLE: 'custom:role',
 } as const);
+
+const CLAIM_TO_ROLE: Record<string, Role> = {
+  tenant_admin: ROLES.TENANT_ADMIN,
+  developer: ROLES.DEVELOPER,
+  reviewer: ROLES.REVIEWER,
+  'Tenant Admin': ROLES.TENANT_ADMIN,
+  Developer: ROLES.DEVELOPER,
+  Reviewer: ROLES.REVIEWER,
+};
+
+const ROLE_TO_CLAIM: Record<Role, string> = {
+  TENANT_ADMIN: 'tenant_admin',
+  DEVELOPER: 'developer',
+  REVIEWER: 'reviewer',
+};
+
+export function roleFromClaim(value: unknown): Role | null {
+  if (typeof value !== 'string') return null;
+  return CLAIM_TO_ROLE[value] ?? null;
+}
+
+export function claimForRole(role: Role): string {
+  return ROLE_TO_CLAIM[role];
+}
