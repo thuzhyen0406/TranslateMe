@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getVisibleMenuItems, ROLE_DISPLAY_LABEL } from '../services/cognitoAuth.js';
 import type { AuthenticatedSession, ConsoleMenuKey } from '../types/auth.js';
+import { GlossaryPage } from './GlossaryPage.js';
 import { MembersPage } from './MembersPage.js';
 
 interface ConsoleLayoutProps {
@@ -9,7 +10,9 @@ interface ConsoleLayoutProps {
 
 export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session }) => {
   const visibleMenus = useMemo(() => getVisibleMenuItems(session.role), [session.role]);
-  const [activeMenu, setActiveMenu] = useState<ConsoleMenuKey>('members');
+  const [activeMenu, setActiveMenu] = useState<ConsoleMenuKey>(() =>
+    session.role === 'TENANT_ADMIN' ? 'members' : 'glossary',
+  );
 
   useEffect(() => {
     if (!visibleMenus.some((m) => m.key === activeMenu)) {
@@ -63,6 +66,8 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session }) => {
       <main className="flex-1 min-w-0">
         {activeMenu === 'members' ? (
           <MembersPage session={session} />
+        ) : activeMenu === 'glossary' ? (
+          <GlossaryPage session={session} />
         ) : (
           <div className="p-8 max-w-4xl">
             <div className="bg-white rounded-xl border border-gray-200 p-8 shadow-sm">
