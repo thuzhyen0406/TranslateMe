@@ -146,13 +146,38 @@ export async function createSite(
         },
         ConditionExpression: 'attribute_not_exists(SK)'
       }
-    }
+    },
+    {
+      ConditionCheck: {
+        TableName: TABLE_NAME,
+        Key: keys.config(ctx),
+        ConditionExpression: 'attribute_exists(PK) AND #status = :active',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':active': 'ACTIVE' },
+      },
+    },
   ];
 
   try {
     await deps.db.transact(ctx, transactOps, { platformSlugReservation: true });
   } catch (err: any) {
     if (err.name === 'TransactionCanceledException') {
+      const cancellationReasons = Array.isArray(err.CancellationReasons) ? err.CancellationReasons : [];
+      const configCheckFailed = cancellationReasons[2]?.Code === 'ConditionalCheckFailed';
+      if (configCheckFailed || cancellationReasons.length === 0) {
+        // Một số runtime/clients không trả CancellationReasons. Đọc CONFIG nhất quán
+        // để phân biệt tenant vừa bị khóa với lỗi trùng slug.
+        const currentConfig = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
+        if (!currentConfig) {
+          throw new AppError('NOT_FOUND', 'Không tìm thấy cấu hình tenant');
+        }
+        if (currentConfig.status !== 'ACTIVE') {
+          throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị khóa, không thể tạo website');
+        }
+        if (configCheckFailed) {
+          throw new AppError('VERSION_CONFLICT', 'Trạng thái tenant đã thay đổi, vui lòng thử lại');
+        }
+      }
       throw new AppError('DUPLICATE_SLUG', 'Slug đã tồn tại trên hệ thống');
     }
     throw err;

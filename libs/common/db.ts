@@ -171,7 +171,7 @@ export const db = {
   },
 
   async listTenantSites(ctx: Ctx): Promise<Array<Record<string, any>>> {
-    return db.query(ctx, `TENANT#${ctx.tenantId}`, 'HOST#');
+    return db.query(ctx, `TENANT#${ctx.tenantId}`, 'HOST#', { consistent: true });
   },
 
   async transact(

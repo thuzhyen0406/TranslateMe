@@ -39,6 +39,8 @@ function createHarness() {
   const invalidations: Array<{ slugs: readonly string[] }> = [];
   let fetchOutcome: SafeFetchOutcome = successfulFetch('');
   const keyOf = (item: { PK: string; SK: string }) => `${item.PK}::${item.SK}`;
+  records.set('TENANT#tenant-a::CONFIG', { PK: 'TENANT#tenant-a', SK: 'CONFIG', status: 'ACTIVE' });
+  records.set('TENANT#tenant-b::CONFIG', { PK: 'TENANT#tenant-b', SK: 'CONFIG', status: 'ACTIVE' });
 
   const dependencies: SiteManagerDependencies = {
     async assertTenantWritable() {},
@@ -50,6 +52,11 @@ function createHarness() {
         if (hasConflict) {
           throw Object.assign(new Error('Conditional transaction failed'), {
             name: 'TransactionCanceledException',
+            CancellationReasons: [
+              { Code: 'ConditionalCheckFailed' },
+              { Code: 'None' },
+              { Code: 'None' },
+            ],
           });
         }
 
@@ -118,11 +125,16 @@ describe('siteManager', () => {
     assert.equal(result.status, 'PENDING');
     assert.match(result.verificationCode, /^translateme-verify-/);
     assert.equal(harness.transactions.length, 1);
-    assert.equal(harness.transactions[0].length, 2);
+    assert.equal(harness.transactions[0].length, 3);
     assert.deepEqual(
-      harness.transactions[0].map((operation) => operation.Put.ConditionExpression),
+      harness.transactions[0].map((operation) => operation.Put?.ConditionExpression).filter(Boolean),
       ['attribute_not_exists(PK)', 'attribute_not_exists(SK)'],
     );
+    const tenantStatusCheck = harness.transactions[0][2].ConditionCheck;
+    assert.deepEqual(tenantStatusCheck.Key, { PK: 'TENANT#tenant-a', SK: 'CONFIG' });
+    assert.equal(tenantStatusCheck.ConditionExpression, 'attribute_exists(PK) AND #status = :active');
+    assert.deepEqual(tenantStatusCheck.ExpressionAttributeNames, { '#status': 'status' });
+    assert.deepEqual(tenantStatusCheck.ExpressionAttributeValues, { ':active': 'ACTIVE' });
     assert.equal(harness.records.get('TENANT#PLATFORM#SLUG#site-example::META')?.tenantId, 'tenant-a');
     assert.equal(hostFor(harness.records, 'tenant-a', result.slug)?.status, 'PENDING');
   });
@@ -144,7 +156,13 @@ describe('siteManager', () => {
         homeUrl,
       );
       assert.equal(harness.transactions.length, 0, homeUrl);
-      assert.equal(harness.records.size, 0, homeUrl);
+      assert.equal(
+        [...harness.records.values()].some((record) =>
+          record.SK?.startsWith('HOST#') || record.PK?.includes('#SLUG#')
+        ),
+        false,
+        homeUrl,
+      );
     }
   });
 
