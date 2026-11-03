@@ -8,7 +8,12 @@ import { AppError, keys, type Ctx } from '../../../../libs/common/types.js';
 import {
   acceptTranslation,
   checkInvalidationStatus,
+  configureDefaultCloudFrontCdn,
+  createReviewDependencies,
+  createReviewLambdaHandler,
+  extractReviewCtxFromEvent,
   getTranslation,
+  handleReviewApiGatewayRoute,
   handleReviewRoute,
   listTranslations,
   restoreMachineTranslation,
@@ -546,7 +551,19 @@ describe('Task 3.8 – Duyệt bản dịch (F5)', () => {
       (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
     );
 
-    // 2. Thành viên không còn ACTIVE trong bảng MEMBER -> bị từ chối với PERMISSION_DENIED
+    // 2. Thiếu hoặc rỗng ctx.sub -> bị từ chối ngay với UNAUTHORIZED (không bỏ qua kiểm tra MEMBER)
+    const missingSubCtx: Ctx = { tenantId: TENANT_A, via: 'JWT', requestId: 'req-no-sub', role: 'REVIEWER' };
+    await assert.rejects(
+      listTranslations(missingSubCtx, {}, deps),
+      (err: unknown) => err instanceof AppError && err.code === 'UNAUTHORIZED',
+    );
+    const emptySubCtx: Ctx = { ...reviewerCtx, sub: '   ' };
+    await assert.rejects(
+      acceptTranslation(emptySubCtx, { src: 'vi', tgt: 'en', hash: seeded.hash, expectedVersion: 1 }, deps),
+      (err: unknown) => err instanceof AppError && err.code === 'UNAUTHORIZED',
+    );
+
+    // 3. Thành viên không còn ACTIVE trong bảng MEMBER -> bị từ chối với PERMISSION_DENIED
     const removedReviewerCtx: Ctx = { ...reviewerCtx, sub: 'u_removed_reviewer' };
     store.set(`TENANT#${TENANT_A}||MEMBER#u_removed_reviewer`, {
       PK: `TENANT#${TENANT_A}`,
@@ -643,6 +660,7 @@ describe('Task 3.8 – Duyệt bản dịch (F5)', () => {
       via: 'JWT',
       requestId: 'req-other',
       role: 'TENANT_ADMIN',
+      sub: 'u_other_admin',
     };
     storeTenantBConfig(deps);
     await assert.rejects(
@@ -656,9 +674,166 @@ describe('Task 3.8 – Duyệt bản dịch (F5)', () => {
         if (c.tenantId === TENANT_B && k.SK === 'CONFIG') {
           return { PK: keys.config(c).PK, SK: 'CONFIG', status: 'ACTIVE', glossaryVersion: 1 };
         }
+        if (c.tenantId === TENANT_B && k.SK === 'MEMBER#u_other_admin') {
+          return {
+            PK: keys.member(c, 'u_other_admin').PK,
+            SK: 'MEMBER#u_other_admin',
+            sub: 'u_other_admin',
+            role: 'TENANT_ADMIN',
+            status: 'ACTIVE',
+          };
+        }
         return origGet(c, k, o);
       };
     }
+  });
+
+  it('invalidation mặc định yêu cầu CloudFront thật (không dùng memory CDN ngầm) và hỗ trợ cấu hình CdnClient', async () => {
+    const { deps, seedTmEntry } = createReviewHarness();
+    const seeded = seedTmEntry({
+      sourceText: 'Xe đưa đón sân bay.',
+      tgt: 'Airport shuttle.',
+      label: 'MACHINE',
+      version: 1,
+    });
+
+    const prevDistId = process.env.CLOUDFRONT_DISTRIBUTION_ID;
+    delete process.env.CLOUDFRONT_DISTRIBUTION_ID;
+    configureDefaultCloudFrontCdn(null);
+
+    try {
+      const prodDepsWithoutDist = createReviewDependencies({ db: deps.db, env: {} });
+      await assert.rejects(
+        checkInvalidationStatus(reviewerCtx, 'I000000000001', prodDepsWithoutDist),
+        (err: unknown) => (err as { name?: string })?.name === 'MissingCloudFrontDistributionId',
+      );
+    } finally {
+      if (prevDistId !== undefined) process.env.CLOUDFRONT_DISTRIBUTION_ID = prevDistId;
+      configureDefaultCloudFrontCdn(null);
+    }
+    assert.ok(seeded.hash);
+  });
+
+  it('handleReviewApiGatewayRoute và createReviewLambdaHandler nối các route /console/translations* và /console/invalidations* với API Gateway', async () => {
+    const { deps, seg, seedTmEntry } = createReviewHarness();
+    const seeded = seedTmEntry({
+      sourceText: 'Bữa sáng tự chọn.',
+      tgt: 'Buffet breakfast.',
+      label: 'MACHINE',
+      needsReview: true,
+      version: 1,
+    });
+    await seg.writePageSegments(reviewerCtx, 'en', segPath('homestay-abc', 'bua-sang'), [seeded.hash]);
+
+    // 1. Đường dẫn không thuộc F5 trả về null để router chung chuyển tiếp
+    const unrelated = await handleReviewApiGatewayRoute(
+      { httpMethod: 'GET', path: '/console/glossary/terms' },
+      reviewerCtx,
+      deps,
+    );
+    assert.equal(unrelated, null);
+
+    // 2. Lambda handler trích xuất Ctx từ Cognito Authorizer claims và xử lý GET / PUT / GET invalidation
+    const lambdaHandler = createReviewLambdaHandler(deps);
+
+    const unauthRes = await lambdaHandler({
+      httpMethod: 'GET',
+      path: '/console/translations',
+      requestContext: { requestId: 'req-unauth', authorizer: { claims: {} } },
+    });
+    assert.equal(unauthRes.statusCode, 401);
+
+    const listRes = await lambdaHandler({
+      httpMethod: 'GET',
+      path: '/prod/console/translations',
+      queryStringParameters: { tab: 'REVIEW', src: 'vi', tgt: 'en' },
+      requestContext: {
+        requestId: 'req-gw-list',
+        authorizer: {
+          claims: {
+            'custom:tenant_id': TENANT_A,
+            'custom:role': 'REVIEWER',
+            sub: 'u_reviewer_01',
+          },
+        },
+      },
+    });
+    assert.equal(listRes.statusCode, 200);
+    const listBody = JSON.parse(listRes.body);
+    assert.equal(listBody.request_id, 'req-gw-list');
+    assert.equal(listBody.total, 1);
+
+    const publishRes = await lambdaHandler({
+      httpMethod: 'PUT',
+      path: '/console/translations',
+      body: JSON.stringify({
+        src: 'vi',
+        tgt: 'en',
+        hash: seeded.hash,
+        newTgt: 'Daily buffet breakfast.',
+        expectedVersion: 1,
+      }),
+      requestContext: {
+        requestId: 'req-gw-put',
+        authorizer: {
+          claims: {
+            'custom:tenant_id': TENANT_A,
+            'custom:role': 'REVIEWER',
+            sub: 'u_reviewer_01',
+          },
+        },
+      },
+    });
+    assert.equal(publishRes.statusCode, 200);
+    const publishBody = JSON.parse(publishRes.body);
+    assert.equal(publishBody.entry.label, 'HUMAN');
+    assert.equal(publishBody.invalidation.status, 'SUBMITTED');
+
+    // Xung đột phiên bản trả về HTTP 409 kèm details.latest
+    const conflictRes = await lambdaHandler({
+      httpMethod: 'PUT',
+      path: '/console/translations',
+      body: JSON.stringify({
+        src: 'vi',
+        tgt: 'en',
+        hash: seeded.hash,
+        newTgt: 'Stale edit.',
+        expectedVersion: 1,
+      }),
+      requestContext: {
+        requestId: 'req-gw-409',
+        authorizer: {
+          claims: {
+            'custom:tenant_id': TENANT_A,
+            'custom:role': 'REVIEWER',
+            sub: 'u_reviewer_01',
+          },
+        },
+      },
+    });
+    assert.equal(conflictRes.statusCode, 409);
+    const conflictBody = JSON.parse(conflictRes.body);
+    assert.equal(conflictBody.error.code, 'VERSION_CONFLICT');
+    assert.equal(conflictBody.error.details.latest.version, 2);
+
+    // Kiểm tra extractReviewCtxFromEvent
+    const extracted = extractReviewCtxFromEvent({
+      requestContext: {
+        requestId: 'req-ctx',
+        authorizer: {
+          jwt: {
+            claims: {
+              'custom:tenant_id': TENANT_A,
+              'custom:role': 'TENANT_ADMIN',
+              sub: 'u_admin_01',
+            },
+          },
+        },
+      },
+    });
+    assert.equal(extracted.tenantId, TENANT_A);
+    assert.equal(extracted.role, 'TENANT_ADMIN');
+    assert.equal(extracted.sub, 'u_admin_01');
   });
 
   it('tương thích tuyệt đối với chữ ký tối thiểu đã chốt: invalidateForSentences(ctx, { src, tgt, hashes }): Promise<{ paths, mode, invalidationId? }>', async () => {

@@ -22,8 +22,10 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { db, requireRole } from '../../../libs/common/db.js';
 import {
+  cloudFrontCdn,
   createInvalidator,
-  createMemoryCdn,
+  invalidationConfigFromEnv,
+  type CdnClient,
   type InvalidationProgress,
   type InvalidationStatus,
   type InvalidationSubmitStatus,
@@ -31,7 +33,7 @@ import {
 import { compareMarkers } from '../../../libs/common/markers.js';
 import { createDynamoSegDb, createSEG } from '../../../libs/common/seg.js';
 import { tmKey } from '../../../libs/common/tm.js';
-import { AppError, keys, type Ctx, type Lang, type Sha256Hex } from '../../../libs/common/types.js';
+import { AppError, keys, type Ctx, type Lang, type Role, type Sha256Hex } from '../../../libs/common/types.js';
 
 const TABLE_NAME = process.env.TABLE_NAME || 'translate-data';
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
@@ -149,12 +151,76 @@ export interface ReviewDependencies {
 }
 
 // ============================================================================
-// Phụ thuộc mặc định
+// Phụ thuộc mặc định (kết nối CloudFront thật qua cloudFrontCdn & CLOUDFRONT_DISTRIBUTION_ID)
 // ============================================================================
 
 const defaultDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const defaultSeg = createSEG({ db: createDynamoSegDb(defaultDocClient, TABLE_NAME) });
-const defaultInvalidator = createInvalidator({ seg: defaultSeg, cdn: createMemoryCdn() });
+
+let configuredCdnClient: CdnClient | null = null;
+let cachedEnvCdn: { distributionId: string; client: CdnClient } | null = null;
+
+/**
+ * Cho phép C6 / tầng khởi tạo Lambda cấu hình sẵn `CdnClient` thật (ví dụ từ `cloudFrontCdn(...)`).
+ * Nếu không gọi hàm này, `defaultCdn` sẽ tự động đọc `CLOUDFRONT_DISTRIBUTION_ID` từ `process.env`
+ * và nạp `@aws-sdk/client-cloudfront`.
+ */
+export function configureDefaultCloudFrontCdn(cdn: CdnClient | null): void {
+  configuredCdnClient = cdn;
+}
+
+async function resolveDefaultCdnClient(): Promise<CdnClient> {
+  if (configuredCdnClient) {
+    return configuredCdnClient;
+  }
+  const { distributionId } = invalidationConfigFromEnv(process.env);
+  if (!distributionId) {
+    throw Object.assign(
+      new Error('Chưa cấu hình biến môi trường CLOUDFRONT_DISTRIBUTION_ID cho xóa cache CloudFront'),
+      { name: 'MissingCloudFrontDistributionId' },
+    );
+  }
+  if (cachedEnvCdn && cachedEnvCdn.distributionId === distributionId) {
+    return cachedEnvCdn.client;
+  }
+  const cfModuleName = '@aws-sdk/client-cloudfront';
+  const cf = (await import(cfModuleName)) as {
+    CloudFrontClient: new (cfg: Record<string, unknown>) => { send(command: unknown): Promise<unknown> };
+    CreateInvalidationCommand: new (input: never) => unknown;
+    GetInvalidationCommand: new (input: never) => unknown;
+  };
+  const client = cloudFrontCdn(
+    new cf.CloudFrontClient({}),
+    {
+      CreateInvalidationCommand: cf.CreateInvalidationCommand,
+      GetInvalidationCommand: cf.GetInvalidationCommand,
+    },
+    distributionId,
+  );
+  cachedEnvCdn = { distributionId, client };
+  return client;
+}
+
+const defaultCloudFrontCdn: CdnClient = {
+  async createInvalidation(input) {
+    const cdn = await resolveDefaultCdnClient();
+    return cdn.createInvalidation(input);
+  },
+  async getInvalidation(id) {
+    const cdn = await resolveDefaultCdnClient();
+    return cdn.getInvalidation(id);
+  },
+};
+
+function getDefaultInvalidator() {
+  const cfg = invalidationConfigFromEnv(process.env);
+  return createInvalidator({
+    seg: defaultSeg,
+    cdn: defaultCloudFrontCdn,
+    wildcardThreshold: cfg.wildcardThreshold,
+    batchSize: cfg.batchSize,
+  });
+}
 
 const defaultReviewDb: ReviewDb = {
   ...db,
@@ -182,12 +248,31 @@ const defaultReviewDb: ReviewDb = {
   },
 };
 
-const defaultDependencies: ReviewDependencies = {
-  db: defaultReviewDb,
-  invalidateForSentences: (ctx, req) => defaultInvalidator.invalidateForSentences(ctx, req),
-  getInvalidationStatus: (ctx, id) => defaultInvalidator.getInvalidationStatus(ctx, id),
-  now: () => Date.now(),
-};
+export function createReviewDependencies(options?: {
+  db?: ReviewDb;
+  cdn?: CdnClient;
+  env?: Record<string, string | undefined>;
+  now?: () => number;
+}): ReviewDependencies {
+  const cfg = invalidationConfigFromEnv(options?.env ?? process.env);
+  const invalidator = options?.cdn
+    ? createInvalidator({
+        seg: defaultSeg,
+        cdn: options.cdn,
+        wildcardThreshold: cfg.wildcardThreshold,
+        batchSize: cfg.batchSize,
+      })
+    : null;
+
+  return {
+    db: options?.db ?? defaultReviewDb,
+    invalidateForSentences: (ctx, req) => (invalidator ?? getDefaultInvalidator()).invalidateForSentences(ctx, req),
+    getInvalidationStatus: (ctx, id) => (invalidator ?? getDefaultInvalidator()).getInvalidationStatus(ctx, id),
+    now: options?.now ?? (() => Date.now()),
+  };
+}
+
+const defaultDependencies: ReviewDependencies = createReviewDependencies();
 
 // ============================================================================
 // Hàm phụ trợ kiểm tra quyền, MEMBER, trạng thái tenant & chuẩn hóa dữ liệu
@@ -218,7 +303,7 @@ function validateExpectedVersion(version: unknown): number {
 /**
  * Kiểm tra quyền truy cập F5 (Bảng 1.2, QC-6 M5/M6, QC-7):
  *  - Chỉ `TENANT_ADMIN` và `REVIEWER` được truy cập Duyệt bản dịch (`DEVELOPER` bị từ chối).
- *  - Nếu `ctx.sub` có mặt, kiểm tra bản ghi `MEMBER#<sub>` trong DynamoDB phải tồn tại và có `status = 'ACTIVE'`.
+ *  - Bắt buộc `ctx.sub` phải có mặt và kiểm tra bản ghi `MEMBER#<sub>` trong DynamoDB phải tồn tại và có `status = 'ACTIVE'`.
  *  - Nếu `mode === 'WRITE'` và `CONFIG.status === 'LOCKED'`, từ chối với `TENANT_SUSPENDED`.
  */
 async function assertReviewAccess(
@@ -234,16 +319,23 @@ async function assertReviewAccess(
     throw new AppError('FORBIDDEN', 'Ngữ cảnh tenant không hợp lệ');
   }
 
+  if (ctx.via && ctx.via !== 'JWT') {
+    throw new AppError('UNAUTHORIZED', 'Thao tác duyệt bản dịch yêu cầu phiên đăng nhập Console (JWT)');
+  }
+
   requireRole(ctx, ['TENANT_ADMIN', 'REVIEWER']);
 
-  if (typeof ctx.sub === 'string' && ctx.sub.trim() !== '') {
-    const member = await deps.db.get(ctx, keys.member(ctx, ctx.sub.trim()), { consistent: true });
-    if (!member || member.status !== 'ACTIVE') {
-      throw new AppError(
-        'PERMISSION_DENIED',
-        'Tài khoản thành viên không tồn tại hoặc không còn ở trạng thái hoạt động (ACTIVE) trong tenant',
-      );
-    }
+  const sub = typeof ctx.sub === 'string' ? ctx.sub.trim() : '';
+  if (!sub) {
+    throw new AppError('UNAUTHORIZED', 'Thiếu định danh người dùng (ctx.sub) trong ngữ cảnh xác thực');
+  }
+
+  const member = await deps.db.get(ctx, keys.member(ctx, sub), { consistent: true });
+  if (!member || member.status !== 'ACTIVE') {
+    throw new AppError(
+      'PERMISSION_DENIED',
+      'Tài khoản thành viên không tồn tại hoặc không còn ở trạng thái hoạt động (ACTIVE) trong tenant',
+    );
   }
 
   const config = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
@@ -988,3 +1080,239 @@ export async function handleReviewRoute(
 
   throw new AppError('INVALID_REQUEST', `Route hoặc phương thức không được hỗ trợ: ${req.method} ${req.path}`);
 }
+
+// ============================================================================
+// 7. Kết nối API Gateway Proxy Event & Lambda Handler cho `/console/*` (C6)
+// ============================================================================
+
+export interface ReviewApiGatewayEvent {
+  httpMethod?: string;
+  path?: string;
+  rawPath?: string;
+  queryStringParameters?: Record<string, string | undefined> | null;
+  body?: string | null;
+  isBase64Encoded?: boolean;
+  requestContext?: {
+    requestId?: string;
+    http?: { method?: string; path?: string };
+    authorizer?: {
+      claims?: Record<string, unknown>;
+      jwt?: { claims?: Record<string, unknown> };
+    };
+  };
+}
+
+export interface ReviewApiGatewayResponse {
+  statusCode: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
+const VALID_ROLES: readonly Role[] = ['TENANT_ADMIN', 'DEVELOPER', 'REVIEWER'];
+
+/**
+ * Trích xuất ngữ cảnh `Ctx` từ Cognito User Pool Authorizer claims trên API Gateway (`/console/*`).
+ */
+export function extractReviewCtxFromEvent(event: ReviewApiGatewayEvent): Ctx {
+  const requestId = event.requestContext?.requestId ?? 'req-unknown';
+  const claims =
+    event.requestContext?.authorizer?.claims ??
+    event.requestContext?.authorizer?.jwt?.claims ??
+    {};
+
+  const tenantId = String(claims['custom:tenant_id'] ?? claims.tenant_id ?? '').trim();
+  const rawRole = String(claims['custom:role'] ?? claims.role ?? '').trim();
+  const sub = String(claims.sub ?? claims['cognito:username'] ?? '').trim();
+
+  if (!tenantId || !sub || !VALID_ROLES.includes(rawRole as Role)) {
+    throw new AppError(
+      'UNAUTHORIZED',
+      'Phiên đăng nhập không hợp lệ hoặc thiếu thông tin xác thực (tenant_id, role, sub)',
+    );
+  }
+
+  return {
+    tenantId,
+    role: rawRole as Role,
+    sub,
+    via: 'JWT',
+    requestId,
+  };
+}
+
+function statusForReviewError(code: string): number {
+  switch (code) {
+    case 'UNAUTHORIZED':
+      return 401;
+    case 'FORBIDDEN':
+    case 'PERMISSION_DENIED':
+    case 'TENANT_SUSPENDED':
+      return 403;
+    case 'NOT_FOUND':
+      return 404;
+    case 'VERSION_CONFLICT':
+      return 409;
+    case 'INVALID_REQUEST':
+    case 'PLACEHOLDER_MISMATCH':
+    case 'UNSUPPORTED_LANGUAGE':
+      return 400;
+    default:
+      return 500;
+  }
+}
+
+function normalizeRoutePath(rawPath: string): string {
+  const trimmed = rawPath.replace(/\/+$/, '');
+  const idx = trimmed.indexOf('/console/');
+  return idx >= 0 ? trimmed.slice(idx) : trimmed;
+}
+
+/**
+ * Bộ định tuyến mức sự kiện API Gateway cho nhóm `/console/translations*` và `/console/invalidations*`.
+ * Trả về `null` nếu đường dẫn không thuộc nhóm F5 để router chung của Console Lambda (`/console/{proxy+}`)
+ * chuyển tiếp sang các mô-đun khác (`handlePrewarmRoute`, `handleGlossaryRoute`, ...).
+ */
+export async function handleReviewApiGatewayRoute(
+  event: ReviewApiGatewayEvent,
+  ctx: Ctx,
+  deps: ReviewDependencies = defaultDependencies,
+): Promise<ReviewApiGatewayResponse | null> {
+  const rawPath = event.path ?? event.rawPath ?? event.requestContext?.http?.path ?? '';
+  const path = normalizeRoutePath(rawPath);
+
+  if (
+    path !== '/console/translations' &&
+    !path.startsWith('/console/translations/') &&
+    !path.startsWith('/console/invalidations/')
+  ) {
+    return null;
+  }
+
+  const requestId = event.requestContext?.requestId ?? ctx.requestId ?? 'req-unknown';
+  const headers = {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  };
+  const respond = (statusCode: number, payload: Record<string, unknown>): ReviewApiGatewayResponse => ({
+    statusCode,
+    headers,
+    body: JSON.stringify({ request_id: requestId, ...payload }),
+  });
+
+  const method = (event.httpMethod ?? event.requestContext?.http?.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'POST' && method !== 'PUT') {
+    return respond(400, {
+      error: {
+        code: 'INVALID_REQUEST',
+        message: `Phương thức HTTP không được hỗ trợ: ${method}`,
+      },
+    });
+  }
+
+  try {
+    let parsedBody: Record<string, any> = {};
+    if (event.body) {
+      const rawBody = event.isBase64Encoded
+        ? Buffer.from(event.body, 'base64').toString('utf8')
+        : event.body;
+      try {
+        parsedBody = JSON.parse(rawBody);
+      } catch {
+        throw new AppError('INVALID_REQUEST', 'Nội dung JSON trong yêu cầu không hợp lệ');
+      }
+      if (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) {
+        throw new AppError('INVALID_REQUEST', 'Nội dung yêu cầu phải là một JSON object');
+      }
+    }
+
+    const result = await handleReviewRoute(
+      ctx,
+      {
+        method,
+        path,
+        query: event.queryStringParameters ?? undefined,
+        body: parsedBody,
+      },
+      deps,
+    );
+
+    const payload =
+      result && typeof result === 'object' && !Array.isArray(result)
+        ? (result as Record<string, unknown>)
+        : { data: result };
+
+    return respond(200, payload);
+  } catch (err) {
+    if (err instanceof AppError) {
+      return respond(statusForReviewError(err.code), {
+        error: {
+          code: err.code,
+          message: err.message,
+          ...(err.details ? { details: err.details } : {}),
+        },
+      });
+    }
+    return respond(500, {
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: 'Lỗi tạm thời phía hệ thống, vui lòng thử lại.',
+      },
+    });
+  }
+}
+
+/**
+ * Tạo AWS Lambda handler hoàn chỉnh cho nhóm endpoint Duyệt bản dịch (`/console/translations*`, `/console/invalidations*`).
+ */
+export function createReviewLambdaHandler(deps: ReviewDependencies = defaultDependencies) {
+  return async (event: ReviewApiGatewayEvent): Promise<ReviewApiGatewayResponse> => {
+    const requestId = event.requestContext?.requestId ?? 'req-unknown';
+    const headers = {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    };
+    try {
+      const ctx = extractReviewCtxFromEvent(event);
+      const response = await handleReviewApiGatewayRoute(event, ctx, deps);
+      if (!response) {
+        return {
+          statusCode: 404,
+          headers,
+          body: JSON.stringify({
+            request_id: requestId,
+            error: { code: 'NOT_FOUND', message: 'Không tìm thấy endpoint.' },
+          }),
+        };
+      }
+      return response;
+    } catch (err) {
+      if (err instanceof AppError) {
+        return {
+          statusCode: statusForReviewError(err.code),
+          headers,
+          body: JSON.stringify({
+            request_id: requestId,
+            error: {
+              code: err.code,
+              message: err.message,
+              ...(err.details ? { details: err.details } : {}),
+            },
+          }),
+        };
+      }
+      return {
+        statusCode: 500,
+        headers,
+        body: JSON.stringify({
+          request_id: requestId,
+          error: { code: 'INTERNAL_ERROR', message: 'Lỗi tạm thời phía hệ thống.' },
+        }),
+      };
+    }
+  };
+}
+
+/**
+ * AWS Lambda entrypoint cho nhóm route `/console/translations*` và `/console/invalidations*`.
+ */
+export const handler = createReviewLambdaHandler();
