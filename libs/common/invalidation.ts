@@ -88,6 +88,41 @@ export interface SiteInvalidationRequest {
 
 export type SiteInvalidator = (ctx: Ctx, req: SiteInvalidationRequest) => Promise<SiteInvalidationResult>;
 
+export interface SiteInvalidatorOptions {
+  /** Khoảng cách giữa các lần hỏi GetInvalidation; mặc định 1 giây. */
+  pollIntervalMs?: number;
+  /** Ngân sách thời gian chung cho toàn bộ job đồng bộ; mặc định 12 phút. */
+  maxWaitMs?: number;
+  /** Số lần retry CreateInvalidation khi CloudFront báo đã hết quota wildcard. */
+  maxCreateAttempts?: number;
+  /** Backoff ban đầu cho TooManyInvalidationsInProgress; mặc định 500 ms. */
+  retryBaseMs?: number;
+  /** Backoff tối đa; mặc định 10 giây. */
+  retryMaxMs?: number;
+  /** Tiêm đồng hồ/chờ để môi trường gọi có thể điều khiển thời gian. */
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+function cloudFrontErrorName(error: unknown): string {
+  if (!error || typeof error !== 'object') return '';
+  const err = error as { name?: unknown; Code?: unknown; code?: unknown };
+  return String(err.name ?? err.Code ?? err.code ?? '');
+}
+
+function isWildcardQuotaError(error: unknown): boolean {
+  const name = cloudFrontErrorName(error);
+  const status = error && typeof error === 'object'
+    ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
+    : undefined;
+  return name === 'TooManyInvalidationsInProgress' ||
+    status === 429;
+}
+
+function waitFor(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Cổng tới CloudFront (C1). Bản thật: cloudFrontCdn(); bản giả cho dev/test: createMemoryCdn(). */
 export interface CdnClient {
   createInvalidation(input: { callerReference: string; paths: string[] }): Promise<{ id: string }>;
@@ -148,10 +183,12 @@ function sitePaths(slugs: readonly string[]): string[] {
 }
 
 /**
- * Xóa toàn bộ cache của các website (khóa tenant, tạm dừng/bật lại website).
- * Ném CACHE_INVALIDATION_FAILED nếu có lô CloudFront lỗi; gọi lại với cùng slugs để thử lại.
+ * Biến thể cũ: gửi mọi lô rồi trả ID ngay, không chờ CloudFront hoàn tất.
+ * Giữ lại để tương thích với callers cần semantics cũ; luồng pause/lock mặc định không dùng hàm này.
  */
-export function createSiteInvalidator(deps: Pick<InvalidationDeps, 'cdn' | 'uuid' | 'metric'>): SiteInvalidator {
+export function createSiteInvalidatorSubmitOnly(
+  deps: Pick<InvalidationDeps, 'cdn' | 'uuid' | 'metric'>,
+): SiteInvalidator {
   const uuid = deps.uuid ?? (() => globalThis.crypto.randomUUID());
   return async (ctx, req) => {
     const paths = sitePaths(req.slugs);
@@ -163,11 +200,14 @@ export function createSiteInvalidator(deps: Pick<InvalidationDeps, 'cdn' | 'uuid
     for (let i = 0; i < paths.length; i += CLOUDFRONT_WILDCARD_LIMIT) {
       const batch = paths.slice(i, i + CLOUDFRONT_WILDCARD_LIMIT);
       try {
-        const out = await deps.cdn.createInvalidation({ callerReference: `${callerReferencePrefix(ctx.tenantId)}${uuid()}`, paths: batch });
+        const out = await deps.cdn.createInvalidation({
+          callerReference: `${callerReferencePrefix(ctx.tenantId)}${uuid()}`,
+          paths: batch,
+        });
         invalidationIds.push(out.id);
-      } catch (err) {
+      } catch (error) {
         failed += batch.length;
-        firstError ??= errName(err);
+        firstError ??= errName(error);
       }
     }
     try {
@@ -180,6 +220,106 @@ export function createSiteInvalidator(deps: Pick<InvalidationDeps, 'cdn' | 'uuid
         'CACHE_INVALIDATION_FAILED',
         `Chưa làm mới được cache của ${failed}/${paths.length} website (${firstError}), vui lòng thử lại`,
       );
+    }
+    return { paths, mode: 'WILDCARD', status: 'SUBMITTED', invalidationIds };
+  };
+}
+
+/**
+ * Xóa toàn bộ cache của các website (khóa tenant, tạm dừng/bật lại website).
+ * Gửi tối đa 15 wildcard mỗi lô, chờ lô hoàn tất rồi mới gửi lô sau. Nếu quota
+ * CloudFront chưa trống, retry có backoff; lỗi hoặc hết ngân sách chờ sẽ ném
+ * CACHE_INVALIDATION_FAILED để callers không báo thao tác thành công một phần.
+ */
+export function createSiteInvalidator(
+  deps: Pick<InvalidationDeps, 'cdn' | 'uuid' | 'metric'>,
+  options: SiteInvalidatorOptions = {},
+): SiteInvalidator {
+  const uuid = deps.uuid ?? (() => globalThis.crypto.randomUUID());
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? waitFor;
+  const pollIntervalMs = Math.max(50, options.pollIntervalMs ?? 1000);
+  const maxWaitMs = Math.max(1000, options.maxWaitMs ?? 12 * 60 * 1000);
+  const maxCreateAttempts = Math.max(1, options.maxCreateAttempts ?? 5);
+  const retryBaseMs = Math.max(50, options.retryBaseMs ?? 500);
+  const retryMaxMs = Math.max(retryBaseMs, options.retryMaxMs ?? 10_000);
+
+  const waitForCompletion = async (id: string, deadline: number): Promise<void> => {
+    let lastError: unknown;
+    while (now() < deadline) {
+      try {
+        const invalidation = await deps.cdn.getInvalidation(id);
+        if (!invalidation) {
+          throw new AppError('CACHE_INVALIDATION_FAILED', `CloudFront không tìm thấy invalidation ${id}`);
+        }
+        if (invalidation.status.toLowerCase() === 'completed') return;
+        if (invalidation.status.toLowerCase() !== 'inprogress' && invalidation.status.toLowerCase() !== 'in_progress') {
+          throw new AppError(
+            'CACHE_INVALIDATION_FAILED',
+            `CloudFront trả trạng thái không xác định cho invalidation ${id}: ${invalidation.status}`,
+          );
+        }
+        lastError = undefined;
+      } catch (error) {
+        if (error instanceof AppError || !isWildcardQuotaError(error)) throw error;
+        lastError = error;
+      }
+      const remaining = deadline - now();
+      if (remaining > 0) await sleep(Math.min(pollIntervalMs, remaining));
+    }
+    throw new AppError(
+      'CACHE_INVALIDATION_FAILED',
+      `Hết thời gian chờ CloudFront hoàn tất invalidation ${id}${lastError ? ` (${cloudFrontErrorName(lastError)})` : ''}`,
+      { invalidationId: id },
+    );
+  };
+
+  return async (ctx, req) => {
+    const paths = sitePaths(req.slugs);
+    if (!paths.length) return { paths, mode: 'WILDCARD', status: 'NOTHING_TO_DO', invalidationIds: [] };
+
+    const invalidationIds: string[] = [];
+    const deadline = now() + maxWaitMs;
+    let completedPaths = 0;
+    for (let i = 0; i < paths.length; i += CLOUDFRONT_WILDCARD_LIMIT) {
+      const batch = paths.slice(i, i + CLOUDFRONT_WILDCARD_LIMIT);
+      let invalidationId: string | undefined;
+      for (let attempt = 0; attempt < maxCreateAttempts && !invalidationId; attempt++) {
+        try {
+          const out = await deps.cdn.createInvalidation({
+            callerReference: `${callerReferencePrefix(ctx.tenantId)}${uuid()}`,
+            paths: batch,
+          });
+          invalidationId = out.id;
+          invalidationIds.push(out.id);
+        } catch (error) {
+          const remaining = deadline - now();
+          if (!isWildcardQuotaError(error) || attempt + 1 >= maxCreateAttempts || remaining <= 0) {
+            const errorName = cloudFrontErrorName(error) || errName(error);
+            throw new AppError(
+              'CACHE_INVALIDATION_FAILED',
+              `Chưa gửi được cache invalidation cho ${batch.length}/${paths.length} website (${errorName}), vui lòng thử lại`,
+              { completedPaths, failedPaths: paths.slice(i), invalidationIds: [...invalidationIds] },
+            );
+          }
+          const backoff = Math.min(retryMaxMs, retryBaseMs * 2 ** attempt, remaining);
+          await sleep(backoff);
+        }
+      }
+
+      if (!invalidationId) {
+        throw new AppError('CACHE_INVALIDATION_FAILED', 'Không tạo được CloudFront invalidation');
+      }
+
+      // Chỉ gửi lô tiếp theo sau khi lô hiện tại hoàn tất. Như vậy số wildcard
+      // do lệnh này tạo ra đang chạy đồng thời không vượt CLOUDFRONT_WILDCARD_LIMIT.
+      await waitForCompletion(invalidationId, deadline);
+      completedPaths += batch.length;
+    }
+    try {
+      deps.metric?.('invalidation.paths', completedPaths, { mode: 'site' });
+    } catch {
+      // metric không bao giờ làm hỏng yêu cầu (QC-9)
     }
     return { paths, mode: 'WILDCARD', status: 'SUBMITTED', invalidationIds };
   };
