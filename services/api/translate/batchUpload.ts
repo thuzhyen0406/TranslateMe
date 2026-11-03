@@ -23,6 +23,7 @@ export interface BatchUploadDeps {
   expiresIn?: number;
   now?: () => Date;
   signUrl?: (client: S3Client, command: PutObjectCommand, options: { expiresIn: number }) => Promise<string>;
+  tenantS3Client?: (tenantId: string) => S3Client;
 }
 
 export interface BatchUploadResponse {
@@ -100,9 +101,10 @@ export function createBatchUploadUrlHandler(deps: BatchUploadDeps) {
         Metadata: { tenantId, uploadId },
       });
       const expiresIn = deps.expiresIn ?? 900;
+      const signingClient = deps.tenantS3Client?.(tenantId) ?? deps.s3 as S3Client;
       const url = deps.signUrl
-        ? await deps.signUrl(new S3Client({}), command, { expiresIn })
-        : await getSignedUrl(deps.s3 as S3Client, command, { expiresIn });
+        ? await deps.signUrl(signingClient, command, { expiresIn })
+        : await getSignedUrl(signingClient, command, { expiresIn });
 
       return json(200, {
         request_id: requestId,

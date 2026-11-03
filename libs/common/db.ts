@@ -9,9 +9,13 @@ import {
   BatchGetCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { Ctx, AppError, keys, type Role } from './types.js';
+import { createTenantDocumentClientRouter } from './tenantAws.js';
 
 const client = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(client);
+const docClient = createTenantDocumentClientRouter(DynamoDBDocumentClient.from(client), {
+  roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN,
+  sessionName: 'common-db',
+});
 const TABLE_NAME = process.env.TABLE_NAME || 'translate-data';
 
 function assertTenantAccess(ctx: Ctx, key: { PK: string }): void {
@@ -182,6 +186,9 @@ export const db = {
         const cancellationReasons = Array.isArray(error.CancellationReasons) ? error.CancellationReasons : [];
         if (cancellationReasons[1]?.Code === 'ConditionalCheckFailed') {
           throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị khóa');
+        }
+        if (cancellationReasons[0]?.Code === 'ConditionalCheckFailed') {
+          throw new AppError('VERSION_CONFLICT', 'Trạng thái website đã thay đổi');
         }
       }
       if (error?.name === 'ConditionalCheckFailedException') {

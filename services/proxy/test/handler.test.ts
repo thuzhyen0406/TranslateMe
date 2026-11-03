@@ -57,6 +57,18 @@ describe('parseProxyPath / buildOriginUrl', () => {
 });
 
 describe('proxy – luồng thành công', () => {
+  it('đọc lại trạng thái trước khi trả trang, redirect nếu website vừa bị khóa', async () => {
+    let reads = 0;
+    const { handler } = setup({
+      resolveSite: async () => ++reads === 1 ? SITE : { ...SITE, tenantStatus: 'LOCKED' },
+    });
+    const res = await handler(ev('/homestay-abc/en/phong-nghi/'));
+    assert.equal(reads, 2);
+    assert.equal(res.statusCode, 302);
+    assert.equal(res.headers.location, 'https://homestay-abc.vn/phong-nghi/');
+    assert.equal(res.headers['cache-control'], 'public, max-age=0, s-maxage=60');
+  });
+
   it('tải, dịch, ráp HTML và trả cache dài', async () => {
     const { handler, fetchPage, logger } = setup();
     const res = await handler(ev('/homestay-abc/en/phong-nghi/', 'GET', 'ref=fb'));
@@ -218,6 +230,16 @@ describe('proxy – từ chối và chuyển hướng', () => {
 });
 
 describe('depsFromEnv', () => {
+  it('không dùng cấu hình website tĩnh trong Lambda vì không thể cập nhật trạng thái pause/lock', async () => {
+    const logger = fakeLogger();
+    const deps = depsFromEnv({
+      AWS_LAMBDA_FUNCTION_NAME: 'translateme-prod-proxy',
+      PROXY_SITES_JSON: JSON.stringify([SITE]),
+    } as NodeJS.ProcessEnv, logger);
+    assert.equal(await deps.resolveSite('homestay-abc'), null);
+    assert.ok(!logger.errors.some((entry) => entry.action === 'INVALID_PROXY_SITES_JSON'));
+  });
+
   it('đọc PROXY_SITES_JSON, BASE_MODE, PUBLIC_BASE_URL, ngân sách thời gian', async () => {
     const logger = fakeLogger();
     const d = depsFromEnv(

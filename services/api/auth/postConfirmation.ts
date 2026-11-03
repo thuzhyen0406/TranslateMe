@@ -34,6 +34,7 @@ import {
   type TransactWriteItemsCommandInput,
 } from '@aws-sdk/client-dynamodb';
 import { COGNITO_CUSTOM_ATTRIBUTES, ROLES, claimForRole } from '../../../libs/common/roles.js';
+import { createTenantDocumentClientRouter } from '../../../libs/common/tenantAws.js';
 
 // ============================================================================
 // Hằng số cấu hình & Kiểu sự kiện Cognito PostConfirmation
@@ -204,7 +205,14 @@ let defaultDdbClient: DynamoDBClient | undefined;
 let defaultCognitoClient: CognitoIdentityProviderClient | undefined;
 
 function getDefaultDdbClient(): DynamoDBClient {
-  if (!defaultDdbClient) defaultDdbClient = new DynamoDBClient({});
+  if (!defaultDdbClient) {
+    const base = new DynamoDBClient({});
+    defaultDdbClient = createTenantDocumentClientRouter(base as never, {
+      roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN,
+      sessionName: 'post-confirmation',
+      createClient: (credentials) => new DynamoDBClient({ credentials }) as never,
+    }) as never as DynamoDBClient;
+  }
   return defaultDdbClient;
 }
 

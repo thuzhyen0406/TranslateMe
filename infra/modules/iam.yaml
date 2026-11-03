@@ -13,6 +13,9 @@ Parameters:
   PayloadBucketArn:
     Type: String
     Description: S3 bucket ARN used for asynchronous proxy payloads.
+  BatchUploadBucketArn:
+    Type: String
+    Description: S3 bucket ARN used for tenant batch upload objects.
   WorkerFunctionArn:
     Type: String
     Description: Worker Lambda ARN invoked asynchronously by the proxy.
@@ -25,6 +28,62 @@ Parameters:
     AllowedPattern: '[A-Za-z0-9_-]+'
 
 Resources:
+  TenantDataAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'translateme-${StageName}-tenant-data'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-proxy'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-worker'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-console-api'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-translate-api'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-platform-api'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-post-confirmation'
+      Policies:
+        - PolicyName: tenant-data-session-maximum
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TenantPartitionDataAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:ConditionCheckItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !Ref TableArn
+                  - !Sub '${TableArn}/index/GSI2'
+                  - !Sub '${TableArn}/index/GSI3'
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - 'TENANT#t_*'
+                      - 'TENANT#PLATFORM#SLUG#*'
+              - Sid: TenantPayloadObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${PayloadBucketArn}/worker/*'
+              - Sid: TenantBatchUploadObjects
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${BatchUploadBucketArn}/batch/*'
+
   ProxyExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -42,33 +101,17 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: ReadAndWriteTenantData
+              - Sid: ReadPlatformSlugMapping
                 Effect: Allow
-                Action:
-                  - dynamodb:GetItem
-                  - dynamodb:BatchGetItem
-                  - dynamodb:PutItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:Query
-                  - dynamodb:TransactWriteItems
-                  - dynamodb:ConditionCheckItem
-                  - dynamodb:BatchWriteItem
-                Resource:
-                  - !Ref TableArn
-                  - !Sub '${TableArn}/index/GSI2'
+                Action: dynamodb:GetItem
+                Resource: !Ref TableArn
                 Condition:
-                  ForAllValues:StringLike:
-                    dynamodb:LeadingKeys:
-                      - 'TENANT#t_*'
-                      - 'TENANT#PLATFORM#SLUG#*'
-              - Sid: WriteProxyPayloads
+                  StringLike:
+                    dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
+              - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: s3:PutObject
-                Resource: !Sub '${PayloadBucketArn}/worker/*'
-              - Sid: ReadProxyPayloads
-                Effect: Allow
-                Action: s3:GetObject
-                Resource: !Sub '${PayloadBucketArn}/worker/*'
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InvokeAsyncWorker
                 Effect: Allow
                 Action: lambda:InvokeFunction
@@ -95,30 +138,17 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: ReadAndWriteTenantData
+              - Sid: ReadPlatformSlugMapping
                 Effect: Allow
-                Action:
-                  - dynamodb:GetItem
-                  - dynamodb:BatchGetItem
-                  - dynamodb:PutItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:Query
-                  - dynamodb:TransactWriteItems
-                  - dynamodb:ConditionCheckItem
-                  - dynamodb:BatchWriteItem
-                Resource:
-                  - !Ref TableArn
-                  - !Sub '${TableArn}/index/GSI2'
+                Action: dynamodb:GetItem
+                Resource: !Ref TableArn
                 Condition:
-                  ForAllValues:StringLike:
-                    dynamodb:LeadingKeys:
-                      - 'TENANT#t_*'
-              - Sid: ReadAndWriteWorkerPayloads
+                  StringLike:
+                    dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
+              - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                Resource: !Sub '${PayloadBucketArn}/worker/*'
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: TranslateText
                 Effect: Allow
                 Action: translate:TranslateText
@@ -141,27 +171,17 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: TenantDataAccess
+              - Sid: ReserveWebsiteSlug
                 Effect: Allow
-                Action:
-                  - dynamodb:GetItem
-                  - dynamodb:BatchGetItem
-                  - dynamodb:PutItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:DeleteItem
-                  - dynamodb:Query
-                  - dynamodb:TransactWriteItems
-                  - dynamodb:ConditionCheckItem
-                  - dynamodb:BatchWriteItem
-                Resource:
-                  - !Ref TableArn
-                  - !Sub '${TableArn}/index/GSI2'
-                  - !Sub '${TableArn}/index/GSI3'
+                Action: dynamodb:PutItem
+                Resource: !Ref TableArn
                 Condition:
-                  ForAllValues:StringLike:
-                    dynamodb:LeadingKeys:
-                      - 'TENANT#t_*'
-                      - 'TENANT#PLATFORM#SLUG#*'
+                  StringLike:
+                    dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
+              - Sid: AssumeTenantDataAccessRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InviteTenantMembers
                 Effect: Allow
                 Action: cognito-idp:AdminCreateUser
@@ -192,25 +212,17 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: ReadAndWriteTenantData
+              - Sid: ReadPlatformKeyMapping
                 Effect: Allow
-                Action:
-                  - dynamodb:GetItem
-                  - dynamodb:BatchGetItem
-                  - dynamodb:PutItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:Query
-                  - dynamodb:TransactWriteItems
-                  - dynamodb:ConditionCheckItem
-                  - dynamodb:BatchWriteItem
-                Resource:
-                  - !Ref TableArn
-                  - !Sub '${TableArn}/index/GSI2'
+                Action: dynamodb:GetItem
+                Resource: !Ref TableArn
                 Condition:
-                  ForAllValues:StringLike:
-                    dynamodb:LeadingKeys:
-                      - 'TENANT#t_*'
-                      - 'TENANT#PLATFORM#KEY#*'
+                  StringLike:
+                    dynamodb:LeadingKeys: 'TENANT#PLATFORM#KEY#*'
+              - Sid: AssumeTenantDataAccessRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: TranslateText
                 Effect: Allow
                 Action: translate:TranslateText
@@ -219,10 +231,6 @@ Resources:
                 Effect: Allow
                 Action: comprehend:DetectDominantLanguage
                 Resource: '*'
-              - Sid: SignBatchUploadURLs
-                Effect: Allow
-                Action: s3:PutObject
-                Resource: !Sub '${PayloadBucketArn}/batch/*'
 
   PlatformApiExecutionRole:
     Type: AWS::IAM::Role
@@ -241,16 +249,10 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: ReadTenantSitesAndUpdateTenantConfig
+              - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action:
-                  - dynamodb:GetItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:Query
-                Resource: !Ref TableArn
-                Condition:
-                  ForAllValues:StringLike:
-                    dynamodb:LeadingKeys: ['TENANT#t_*']
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InvalidateWebsiteCache
                 Effect: Allow
                 Action: cloudfront:CreateInvalidation
@@ -273,25 +275,19 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: CreateTenantAndPlatformMappings
+              - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action:
-                  - dynamodb:TransactWriteItems
-                  - dynamodb:PutItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:ConditionCheckItem
-                Resource: !Ref TableArn
-                Condition:
-                  ForAllValues:StringLike:
-                    dynamodb:LeadingKeys:
-                      - 'TENANT#t_*'
-                      - 'TENANT#PLATFORM#SLUG#*'
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: SetTenantClaimsOnConfirmedUser
                 Effect: Allow
                 Action: cognito-idp:AdminUpdateUserAttributes
                 Resource: !Ref UserPoolArn
 
 Outputs:
+  TenantDataAccessRoleArn:
+    Description: Target role assumed with an inline policy scoped to the request tenant.
+    Value: !GetAtt TenantDataAccessRole.Arn
   ProxyExecutionRoleArn:
     Description: Attach to the website proxy Lambda.
     Value: !GetAtt ProxyExecutionRole.Arn

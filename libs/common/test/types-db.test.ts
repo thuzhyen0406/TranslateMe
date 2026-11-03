@@ -22,6 +22,7 @@ let server: Server;
 let dbApi: typeof import('../db.js');
 let slugExists = true;
 let configStatus = 'ACTIVE';
+let hostStatus = 'PAUSED';
 const previousEnvironment = {
   AWS_ENDPOINT_URL: process.env.AWS_ENDPOINT_URL,
   AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
@@ -66,6 +67,26 @@ before(async () => {
         }
       } else if (target.endsWith('.Query')) {
         result = { Items: [{ PK: { S: 'TENANT#tenant-1' }, SK: { S: 'HOST#one' } }] };
+      } else if (target.endsWith('.TransactWriteItems')) {
+        const update = body.TransactItems?.[0].Update;
+        if (update && body.TransactItems?.[1].ConditionCheck) {
+          const expectedStatus = update.ExpressionAttributeValues?.[':expected']?.S;
+          const reasons = configStatus !== 'ACTIVE'
+            ? [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }]
+            : hostStatus !== expectedStatus
+              ? [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }]
+              : [{ Code: 'None' }, { Code: 'None' }];
+          if (reasons.some((reason) => reason.Code === 'ConditionalCheckFailed')) {
+            response.writeHead(400, { 'content-type': 'application/x-amz-json-1.0' });
+            response.end(JSON.stringify({
+              __type: 'com.amazonaws.dynamodb.v20120810#TransactionCanceledException',
+              message: 'Transaction cancelled',
+              CancellationReasons: reasons,
+            }));
+            return;
+          }
+          hostStatus = update.ExpressionAttributeValues?.[':next']?.S ?? hostStatus;
+        }
       }
 
       response.writeHead(200, { 'content-type': 'application/x-amz-json-1.0' });
@@ -100,6 +121,7 @@ beforeEach(() => {
   requests.length = 0;
   slugExists = true;
   configStatus = 'ACTIVE';
+  hostStatus = 'PAUSED';
 });
 
 describe('types.ts', () => {
@@ -169,6 +191,24 @@ describe('db.ts', () => {
       PK: { S: 'TENANT#tenant-1' },
       SK: { S: 'CONFIG' },
     });
+  });
+
+  it('updateSiteStatus trả TENANT_SUSPENDED nếu CONFIG bị khóa trong transaction', async () => {
+    configStatus = 'LOCKED';
+
+    await assert.rejects(
+      dbApi.db.updateSiteStatus(ctx, 'demo', 'PAUSED', 'ACTIVE'),
+      (error: unknown) => error instanceof AppError && error.code === 'TENANT_SUSPENDED',
+    );
+  });
+
+  it('updateSiteStatus trả VERSION_CONFLICT nếu trạng thái HOST không còn khớp', async () => {
+    hostStatus = 'ACTIVE';
+
+    await assert.rejects(
+      dbApi.db.updateSiteStatus(ctx, 'demo', 'PAUSED', 'ACTIVE'),
+      (error: unknown) => error instanceof AppError && error.code === 'VERSION_CONFLICT',
+    );
   });
 
   it('query gửi partition key và tùy chọn sort-key prefix', async () => {

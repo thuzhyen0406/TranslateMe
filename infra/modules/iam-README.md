@@ -1,9 +1,10 @@
 # Lambda IAM roles
 
-`iam.yaml` is the CloudFormation IAM module for the current TranslateMe Lambda
-boundaries. It creates execution roles; it does not grant API Gateway permission
-to invoke a Lambda. Invocation is granted separately by the
-`AWS::Lambda::Permission` resources in `api-gateway.yaml`.
+`iam.yaml` creates Lambda execution roles plus a tenant-data role. Runtime data
+requests assume the tenant-data role with an inline STS session policy bound to
+the authenticated/resolved `tenantId`. `lambdas.yaml` attaches each execution
+role to its Lambda and supplies `TENANT_DATA_ACCESS_ROLE_ARN`. API Gateway
+invocation permissions remain in `api-gateway.yaml`.
 
 ## Roles and owning handlers
 
@@ -15,30 +16,25 @@ to invoke a Lambda. Invocation is granted separately by the
 | `TranslateApiExecutionRoleArn` | API-key translation Lambda | Tenant data/TM/usage, `GSI2`, Translate and Comprehend |
 | `PlatformApiExecutionRoleArn` | Platform Admin Lambda | Read site rows, update tenant CONFIG, cache invalidation |
 | `PostConfirmationExecutionRoleArn` | Cognito PostConfirmation trigger | Create tenant/mapping records and set Cognito claims |
+| `TenantDataAccessRoleArn` | Assumed per request by tenant-facing functions | DynamoDB access constrained by the STS session policy to one tenant partition |
 
 ## Deployment and wiring
 
-1. Deploy the data and identity stacks first.
-2. Deploy this template as its own stack with the table ARN, User Pool ARN,
-   payload bucket ARN, worker function ARN, and CloudFront distribution ARN.
-3. Pass the matching role ARN output to each Lambda's `Role` property in the
-   application stack. Do not attach these roles to API Gateway.
-4. Keep the role ARN outputs as stack exports/parameters in the application
-   deployment; do not copy role ARNs into source code.
-
-There is not yet an application Lambda stack in this repository that declares
-all six functions, so the outputs are prepared for that integration. The
-current `infra/template.yaml` Hello Lambda remains a sample and should continue
-using its own execution role.
+1. Deploy data and identity stacks.
+2. Deploy `iam.yaml`, supplying the exact worker function ARN.
+3. Deploy `lambdas.yaml` with the six code artifacts and the matching role ARN
+   outputs, including `TenantDataAccessRoleArn`.
+4. Pass the function ARN outputs to `api-gateway.yaml`; do not attach execution
+   roles to API Gateway.
+5. Configure the Cognito User Pool PostConfirmation trigger to the output Lambda.
 
 ## Security boundary and known integration work
 
-- The actual tenant ID format in this project is `t_` followed by the generated
-  identifier. DynamoDB IAM `LeadingKeys` therefore limits tenant partition
-  keys to `TENANT#t_*`; it does not provide per-tenant isolation for a shared
-  Lambda role. Request-level tenant binding and authorization remain mandatory
-  in the handlers/data layer. Per-invocation STS session policies are outside
-  the current MVP plan.
+- The actual tenant ID format is `t_` followed by the generated identifier.
+  The session policy restricts `dynamodb:LeadingKeys` to that exact tenant
+  partition (plus the platform slug reservation prefix required by site
+  creation). Execution roles have no direct tenant-partition data permissions.
+  Data-layer validation remains defense in depth and must not be removed.
 - `PlatformApiExecutionRole` must query `HOST#` records so the current lock
   handler can collect slugs for CloudFront invalidation. IAM can scope this to
   tenant partition keys but not the `HOST#` sort-key prefix with
@@ -54,10 +50,9 @@ using its own execution role.
   exact API Gateway control-plane actions to a dedicated policy only after its
   implementation is known. In particular, do not grant `apigateway:GET` for
   API key resources, which could expose a stored key value.
-- S3/KMS settings and Lambda environment variables are configured by the
-  function/data stacks. DynamoDB uses service-side encryption, so these
-  execution roles do not need direct KMS data-key permissions for ordinary
-  DynamoDB calls.
+- `lambdas.yaml` supplies the tenant role ARN and table/bucket settings. S3/KMS
+  configuration remains owned by the data stack. DynamoDB uses service-side
+  encryption, so ordinary DynamoDB calls do not need direct KMS permissions.
 - `translate:TranslateText` and `comprehend:DetectDominantLanguage` require
   `Resource: '*'` in their supported IAM authorization model. Keep these
   actions separate from DynamoDB/S3 statements.

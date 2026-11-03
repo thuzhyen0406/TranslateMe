@@ -8,6 +8,7 @@ import { ComprehendClient, DetectDominantLanguageCommand } from '@aws-sdk/client
 import { TranslateClient } from '@aws-sdk/client-translate';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { createTenantDocumentClientRouter, createTenantS3Client } from '../../../libs/common/tenantAws.js';
 import { S3Client } from '@aws-sdk/client-s3';
 import { segmentBlock } from '../../../libs/common/segmenter.js';
 import { normalize_hash } from '../../../libs/common/text-utils.js';
@@ -264,15 +265,33 @@ export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> => {
       const requestId = event.requestContext?.requestId ?? 'unknown';
       return Promise.resolve(realtimeJson(500, { request_id: requestId, error: { code: 'INTERNAL_ERROR', message: 'Thiếu cấu hình upload batch.' } }));
     }
-    const ddb = DynamoDBDocumentClient.from(new DynamoDBClient(), { marshallOptions: { removeUndefinedValues: true } });
-    return createBatchUploadUrlHandler({ tableName, batchBucket, ddb, s3: new S3Client({}) })({
+    const ddb = createTenantDocumentClientRouter(
+      DynamoDBDocumentClient.from(new DynamoDBClient(), { marshallOptions: { removeUndefinedValues: true } }),
+      { roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN, sessionName: 'translate-api' },
+    ) as DynamoDBDocumentClient;
+    return createBatchUploadUrlHandler({
+      tableName,
+      batchBucket,
+      ddb,
+      s3: new S3Client({}),
+      tenantS3Client: (tenantId) => createTenantS3Client(
+        process.env.TENANT_DATA_ACCESS_ROLE_ARN ?? '',
+        tenantId,
+        process.env.TENANT_BATCH_UPLOAD_BUCKET_ARN ?? '',
+        'batch',
+        'batch-upload',
+      ) as unknown as S3Client,
+    })({
       body: event.body,
       requestContext: event.requestContext,
     }) as Promise<RealtimeResponse>;
   }
   const tableName = process.env.TABLE_NAME;
   if (!tableName) return Promise.resolve(apiError(500, 'INTERNAL_ERROR', 'Thiếu cấu hình bảng dữ liệu.', event.requestContext?.requestId ?? 'unknown'));
-  const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
+  const ddb = createTenantDocumentClientRouter(
+    DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } }),
+    { roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN, sessionName: 'translate-api' },
+  ) as DynamoDBDocumentClient;
   const comprehend = new ComprehendClient({});
   const translate = new TranslateClient({ maxAttempts: 3 });
   return createRealtimeHandler({ tableName, ddb, usage: new UsageService(ddb, { tableName }), translate, detectLanguage: async (text) => {

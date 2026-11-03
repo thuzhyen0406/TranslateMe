@@ -31,7 +31,13 @@ function setup(options: { locked?: boolean } = {}) {
 
 describe('POST /translate/batch/upload-url', () => {
   it('tạo presigned URL được tenant xác thực sở hữu', async () => {
-    const handler = await createBatchUploadUrlHandler(setup());
+    const deps = setup();
+    let scopedTo: string | undefined;
+    deps.tenantS3Client = (tenantId) => {
+      scopedTo = tenantId;
+      return {} as never;
+    };
+    const handler = await createBatchUploadUrlHandler(deps);
     const response = await handler({
       body: JSON.stringify({ fileName: 'documents.csv', contentType: 'text/csv' }),
       requestContext: { requestId: 'req-batch', authorizer: { tenantId: 'tenant-a', keyId: 'key-a' } },
@@ -43,6 +49,7 @@ describe('POST /translate/batch/upload-url', () => {
     assert.equal(payload.expiresIn, 900);
     assert.match(payload.key, /^batch\/tenant-a\/.+\/documents\.csv$/);
     assert.equal(payload.url, 'https://signed.example/upload');
+    assert.equal(scopedTo, 'tenant-a');
   });
 
   it('yêu cầu API key hợp lệ', async () => {

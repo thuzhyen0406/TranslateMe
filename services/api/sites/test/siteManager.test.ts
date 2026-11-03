@@ -320,6 +320,31 @@ describe('siteManager', () => {
     assert.deepEqual(harness.invalidations, [{ slugs: [created.slug] }]);
   });
 
+  it('pauseSite và resumeSite từ chối cập nhật nếu CONFIG bị khóa', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+    const host = hostFor(harness.records, 'tenant-a', created.slug);
+    const config = harness.records.get('TENANT#tenant-a::CONFIG');
+    assert.ok(host);
+    assert.ok(config);
+
+    host.status = 'ACTIVE';
+    config.status = 'LOCKED';
+    await assert.rejects(
+      pauseSite(tenantA, created.slug, harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'TENANT_SUSPENDED',
+    );
+    assert.equal(host.status, 'ACTIVE');
+
+    host.status = 'PAUSED';
+    await assert.rejects(
+      resumeSite(tenantA, created.slug, harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'TENANT_SUSPENDED',
+    );
+    assert.equal(host.status, 'PAUSED');
+    assert.deepEqual(harness.invalidations, []);
+  });
+
   it('resumeSite từ chối PENDING và không chạy invalidation', async () => {
     const harness = createHarness();
     const created = await createSite(tenantA, siteInput, harness.dependencies);
