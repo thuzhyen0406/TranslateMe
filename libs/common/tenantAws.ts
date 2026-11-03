@@ -43,6 +43,7 @@ export function tenantSessionPolicy(
     Action: [
       'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem',
       'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem', 'dynamodb:BatchWriteItem',
+      'dynamodb:TransactWriteItems',
     ],
     Resource: '*',
     Condition: {
@@ -157,4 +158,3 @@ export function createTenantS3Client(
   const policy = tenantSessionPolicy(tenantId, buckets);
   return new S3Client({ credentials: createTenantCredentialsProvider(roleArn, tenantId, policy, undefined, sessionName) });
 }
-

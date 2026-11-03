@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { createTenantDocumentClientRouter, tenantSessionPolicy } from '../tenantAws.js';
 
 describe('tenant-scoped AWS sessions', () => {
   it('session policy limits LeadingKeys to one tenant plus slug reservations', () => {
     const policy = JSON.parse(tenantSessionPolicy('t_aaaaaaaaaaaaaaaaaaaaaaaa'));
+    assert.ok(policy.Statement[0].Action.includes('dynamodb:TransactWriteItems'));
     const keys = policy.Statement[0].Condition['ForAllValues:StringLike']['dynamodb:LeadingKeys'];
     assert.deepEqual(keys, [
       'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa',
@@ -13,6 +16,11 @@ describe('tenant-scoped AWS sessions', () => {
     ]);
     assert.ok(!keys.some((key: string) => key.includes('t_*')));
     assert.throws(() => tenantSessionPolicy('t_bad#other'), /Invalid tenant ID/);
+  });
+
+  it('IAM tenant role grants TransactWriteItems', () => {
+    const iamTemplate = readFileSync(resolve(process.cwd(), '../../infra/modules/iam.yaml'), 'utf8');
+    assert.match(iamTemplate, /dynamodb:TransactWriteItems/);
   });
 
   it('session policy scopes S3 objects to the requesting tenant prefix', () => {

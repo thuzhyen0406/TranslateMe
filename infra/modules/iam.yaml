@@ -64,6 +64,7 @@ Resources:
                   - dynamodb:Query
                   - dynamodb:ConditionCheckItem
                   - dynamodb:BatchWriteItem
+                  - dynamodb:TransactWriteItems
                 Resource:
                   - !Ref TableArn
                   - !Sub '${TableArn}/index/GSI2'
