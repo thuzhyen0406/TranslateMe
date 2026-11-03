@@ -27,6 +27,9 @@ import {
   type CognitoPostConfirmationEvent,
   type PostConfirmationLogger,
 } from '../postConfirmation.js';
+import { contextFromIdTokenClaims } from '../context.js';
+import { db } from '../../../../libs/common/db.js';
+import { AppError } from '../../../../libs/common/types.js';
 
 // ============================================================================
 // Công cụ giả lập (Mock) DynamoDB, Cognito và Logger (không dùng mạng/AWS)
@@ -444,5 +447,69 @@ describe('inviteMember', () => {
     assert.equal(isInvitableRole(ROLES.REVIEWER), true);
     assert.equal(isInvitableRole(ROLES.TENANT_ADMIN), false);
     assert.equal(isInvitableRole('PLATFORM_ADMIN'), false);
+  });
+});
+
+describe('contextFromIdTokenClaims', () => {
+  const claims = {
+    sub: 'reviewer-sub',
+    'custom:tenant_id': 't_reviewer_tenant',
+    'custom:role': 'reviewer',
+  };
+
+  async function assertPermissionDenied(member: unknown): Promise<void> {
+    const originalGet = db.get;
+    db.get = async () => member as any;
+    try {
+      await assert.rejects(
+        contextFromIdTokenClaims(claims, 'reviewer-request'),
+        (error: unknown) =>
+          error instanceof AppError && error.code === 'PERMISSION_DENIED',
+      );
+    } finally {
+      db.get = originalGet;
+    }
+  }
+
+  for (const memberRole of [ROLES.TENANT_ADMIN, 'Tenant Admin']) {
+    it(`chấp nhận MEMBER role ${memberRole}`, async () => {
+      const originalGet = db.get;
+      db.get = async () =>
+        ({
+          status: 'ACTIVE',
+          role: memberRole,
+        } as any);
+      try {
+        const ctx = await contextFromIdTokenClaims(
+          {
+            sub: 'admin-sub',
+            'custom:tenant_id': 't_admin_tenant',
+            'custom:role': 'tenant_admin',
+          },
+          'admin-request',
+        );
+        assert.equal(ctx.role, ROLES.TENANT_ADMIN);
+      } finally {
+        db.get = originalGet;
+      }
+    });
+  }
+
+  it('từ chối MEMBER không ở trạng thái ACTIVE', async () => {
+    await assertPermissionDenied({
+      status: 'DISABLED',
+      role: ROLES.REVIEWER,
+    });
+  });
+
+  it('từ chối khi vai trò claim khác vai trò MEMBER', async () => {
+    await assertPermissionDenied({
+      status: 'ACTIVE',
+      role: ROLES.DEVELOPER,
+    });
+  });
+
+  it('từ chối khi không có MEMBER', async () => {
+    await assertPermissionDenied(null);
   });
 });

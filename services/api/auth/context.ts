@@ -1,10 +1,17 @@
 import { AppError, keys, type Ctx, type Role } from '../../../libs/common/types.js';
 import { db } from '../../../libs/common/db.js';
-import { roleFromClaim } from '../../../libs/common/roles.js';
+import { ROLES, roleFromClaim } from '../../../libs/common/roles.js';
 
 type Claims = Record<string, unknown>;
 
 function memberRole(value: unknown): Role | null {
+  if (
+    value === ROLES.TENANT_ADMIN ||
+    value === ROLES.DEVELOPER ||
+    value === ROLES.REVIEWER
+  ) {
+    return value;
+  }
   return roleFromClaim(value);
 }
 
