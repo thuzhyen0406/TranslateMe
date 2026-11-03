@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getVisibleMenuItems, ROLE_DISPLAY_LABEL } from '../services/cognitoAuth.js';
 import type { AuthenticatedSession, ConsoleMenuKey } from '../types/auth.js';
 import { MembersPage } from './MembersPage.js';
+import { ReviewPage } from './ReviewPage.js';
 
 interface ConsoleLayoutProps {
   session: AuthenticatedSession;
@@ -9,13 +10,15 @@ interface ConsoleLayoutProps {
 
 export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session }) => {
   const visibleMenus = useMemo(() => getVisibleMenuItems(session.role), [session.role]);
-  const [activeMenu, setActiveMenu] = useState<ConsoleMenuKey>('members');
+  const [activeMenu, setActiveMenu] = useState<ConsoleMenuKey>(() =>
+    session.role === 'REVIEWER' ? 'review' : 'members',
+  );
 
   useEffect(() => {
     if (!visibleMenus.some((m) => m.key === activeMenu)) {
-      setActiveMenu(visibleMenus[0]?.key ?? 'glossary');
+      setActiveMenu(session.role === 'REVIEWER' ? 'review' : (visibleMenus[0]?.key ?? 'glossary'));
     }
-  }, [visibleMenus, activeMenu]);
+  }, [visibleMenus, activeMenu, session.role]);
 
   return (
     <div className="min-h-[calc(100vh-4rem)] flex bg-[#f4f7f6]">
@@ -63,6 +66,8 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session }) => {
       <main className="flex-1 min-w-0">
         {activeMenu === 'members' ? (
           <MembersPage session={session} />
+        ) : activeMenu === 'review' ? (
+          <ReviewPage session={session} />
         ) : (
           <div className="p-8 max-w-4xl">
             <div className="bg-white rounded-xl border border-gray-200 p-8 shadow-sm">
