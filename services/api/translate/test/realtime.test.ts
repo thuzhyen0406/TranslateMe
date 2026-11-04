@@ -29,6 +29,8 @@ function setup(options: {
   glossaryPageSize?: number;
   /** terminologyName đã đồng bộ trong CONFIG (mặc định: chưa đồng bộ) */
   configTerminologyName?: string;
+  glossaryQueryFails?: boolean;
+  getGlossaryState?: (ctx: any) => Promise<any>;
   locked?: boolean;
   quotaExceeded?: boolean;
   tmWriteFails?: boolean;
@@ -61,6 +63,7 @@ function setup(options: {
         };
       }
       if (command instanceof QueryCommand) {
+        if (options.glossaryQueryFails) throw Object.assign(new Error('DynamoDB query failed'), { name: 'ThrottlingException' });
         const all = options.glossaryTerms ?? [];
         const size = options.glossaryPageSize;
         if (!size) return { Items: all };
@@ -154,6 +157,7 @@ function setup(options: {
     ddb: ddb as unknown as RealtimeDeps['ddb'],
     usage: usage as unknown as RealtimeDeps['usage'],
     translate,
+    getGlossaryState: options.getGlossaryState,
     detectLanguage: async () => options.detected ?? { language: 'vi', confidence: 0.99 },
     now: () => new Date('2026-10-29T00:00:00.000Z'),
   } satisfies RealtimeDeps;
@@ -408,5 +412,38 @@ describe('POST /translate/realtime', () => {
     assert.equal(test.stored[0].label, 'HUMAN');
     assert.equal(test.stored[0].needsReview, true);
     assert.equal(test.stored[0].GSI3PK, `TENANT#${TENANT}#TM#REVIEW`);
+  });
+
+  it('lỗi đọc Glossary trong fallback -> trả 500 và không lưu TM entry tươi (3.9)', async () => {
+    const test = setup({
+      glossaryQueryFails: true,
+      glossaryTerms: [
+        { SK: 'TERM#hội an', normalized: 'hội an', sourceTerm: 'Hội An', type: 'KEEP', sinceVersion: 1 },
+      ],
+    });
+    const response = await test.handler(event({ text: 'Xin chào Hội An.', source_lang: 'vi', target_lang: 'en' }));
+    const body = responseBody(response);
+
+    assert.equal(response.statusCode, 500);
+    assert.equal(body.error.code, 'INTERNAL_ERROR');
+    assert.equal(test.translateCalls, 0, 'không được gọi Translate khi đọc Glossary lỗi');
+    assert.equal(test.stored.length, 0, 'không được tạo bản ghi TM mới');
+    assert.equal(test.calls.some((call) => call.name === 'UpdateCommand'), false, 'không được gọi UpdateCommand ghi TM');
+  });
+
+  it('deps.getGlossaryState ném lỗi -> trả 500 và không lưu TM entry tươi (3.9)', async () => {
+    const test = setup({
+      getGlossaryState: async () => {
+        throw new Error('Glossary reader timeout');
+      },
+    });
+    const response = await test.handler(event({ text: 'Xin chào Hội An.', source_lang: 'vi', target_lang: 'en' }));
+    const body = responseBody(response);
+
+    assert.equal(response.statusCode, 500);
+    assert.equal(body.error.code, 'INTERNAL_ERROR');
+    assert.equal(test.translateCalls, 0, 'không được gọi Translate khi getGlossaryState lỗi');
+    assert.equal(test.stored.length, 0, 'không được tạo bản ghi TM mới');
+    assert.equal(test.calls.some((call) => call.name === 'UpdateCommand'), false, 'không được gọi UpdateCommand ghi TM');
   });
 });

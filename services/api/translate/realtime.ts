@@ -100,6 +100,7 @@ async function resolveTenant(event: RealtimeEvent, deps: RealtimeDeps): Promise<
  * Ưu tiên `deps.getGlossaryState` nếu có; ngược lại truy vấn phân trang các mục `TERM#` từ `TENANT#<t>#GLOSS`.
  * Chỉ trả `terminologyName` khi `CONFIG.terminologyName` đã được đồng bộ và có ít nhất 1 thuật ngữ hiệu lực;
  * nếu chưa đồng bộ hoặc chưa có thuật ngữ hiệu lực thì trả `null` để không gửi tên Custom Terminology chưa tồn tại.
+ * Ném lỗi khi truy vấn thất bại để bên gọi thử lại thay vì tiếp tục với danh sách rỗng rồi lưu TM sai.
  */
 async function loadRealtimeGlossary(
   ctx: Ctx,
@@ -117,49 +118,41 @@ async function loadRealtimeGlossary(
   if (version <= 0) {
     return { version: 0, terminologyName: null, terms: [] };
   }
-  try {
-    const rawItems: Record<string, any>[] = [];
-    let exclusiveStartKey: Record<string, any> | undefined;
-    do {
-      const glossRes = await deps.ddb.send(
-        new QueryCommand({
-          TableName: deps.tableName,
-          KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
-          ExpressionAttributeValues: {
-            ':pk': `TENANT#${ctx.tenantId}#GLOSS`,
-            ':skPrefix': 'TERM#',
-          },
-          ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-        }),
-      );
-      if (glossRes.Items) {
-        rawItems.push(...(glossRes.Items as Record<string, any>[]));
-      }
-      exclusiveStartKey = glossRes.LastEvaluatedKey as Record<string, any> | undefined;
-    } while (exclusiveStartKey);
+  const rawItems: Record<string, any>[] = [];
+  let exclusiveStartKey: Record<string, any> | undefined;
+  do {
+    const glossRes = await deps.ddb.send(
+      new QueryCommand({
+        TableName: deps.tableName,
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
+        ExpressionAttributeValues: {
+          ':pk': `TENANT#${ctx.tenantId}#GLOSS`,
+          ':skPrefix': 'TERM#',
+        },
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    if (glossRes.Items) {
+      rawItems.push(...(glossRes.Items as Record<string, any>[]));
+    }
+    exclusiveStartKey = glossRes.LastEvaluatedKey as Record<string, any> | undefined;
+  } while (exclusiveStartKey);
 
-    const terms: GlossaryState['terms'] = rawItems.map((item) => ({
-      normalized: String(item.normalized ?? String(item.SK ?? '').replace(/^TERM#/, '')),
-      sourceTerm: typeof item.sourceTerm === 'string' ? item.sourceTerm : String(item.normalized ?? ''),
-      sourceLang: typeof item.sourceLang === 'string' ? item.sourceLang : 'vi',
-      type: item.type === 'KEEP' ? 'KEEP' : 'FIXED',
-      translations: item.translations && typeof item.translations === 'object' ? { ...item.translations } : {},
-      sinceVersion: Number(item.sinceVersion ?? 1),
-      deleted: Boolean(item.deleted),
-    }));
-    const hasActiveTerms = terms.some((t) => !t.deleted);
-    return {
-      version,
-      terminologyName: hasActiveTerms ? syncedTerminologyName : null,
-      terms,
-    };
-  } catch {
-    return {
-      version,
-      terminologyName: null,
-      terms: [],
-    };
-  }
+  const terms: GlossaryState['terms'] = rawItems.map((item) => ({
+    normalized: String(item.normalized ?? String(item.SK ?? '').replace(/^TERM#/, '')),
+    sourceTerm: typeof item.sourceTerm === 'string' ? item.sourceTerm : String(item.normalized ?? ''),
+    sourceLang: typeof item.sourceLang === 'string' ? item.sourceLang : 'vi',
+    type: item.type === 'KEEP' ? 'KEEP' : 'FIXED',
+    translations: item.translations && typeof item.translations === 'object' ? { ...item.translations } : {},
+    sinceVersion: Number(item.sinceVersion ?? 1),
+    deleted: Boolean(item.deleted),
+  }));
+  const hasActiveTerms = terms.some((t) => !t.deleted);
+  return {
+    version,
+    terminologyName: hasActiveTerms ? syncedTerminologyName : null,
+    terms,
+  };
 }
 
 /**
