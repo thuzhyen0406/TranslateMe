@@ -88,13 +88,27 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.ok(sitesRes);
     assert.equal(sitesRes.statusCode, 200);
 
-    // 3. Module Thành viên (E.5) - POST /console/members/invite
+    // 3. Module Thành viên (E.5) - GET /console/members (TENANT_ADMIN) & POST /console/members/invite
     const fakeMemberDeps = {
       cognitoClient: {
         send: async () => ({ User: { Username: 'developer@example.com', Attributes: [{ Name: 'sub', Value: 'sub-dev-1' }] } }),
       },
       userPoolId: 'us-east-1_mock',
+      db: {
+        query: async () => [{ PK: 'TENANT#t_a', SK: 'MEMBER#u_1', role: 'TENANT_ADMIN' }],
+      },
     };
+    const memberListRes = await handleMembersApiGatewayRoute(
+      event('/console/members', claims, 'GET'),
+      adminCtx,
+      fakeMemberDeps as any,
+    );
+    assert.ok(memberListRes);
+    assert.equal(memberListRes.statusCode, 200);
+    const parsedMemberList = JSON.parse(memberListRes.body);
+    assert.equal(parsedMemberList.items.length, 1);
+    assert.equal(parsedMemberList.items[0].SK, 'MEMBER#u_1');
+
     const memberRes = await handleMembersApiGatewayRoute(
       event('/console/members/invite', claims, 'POST', { email: 'developer@example.com', role: 'DEVELOPER' }),
       adminCtx,
@@ -104,5 +118,36 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(memberRes.statusCode, 200);
     const parsedMember = JSON.parse(memberRes.body);
     assert.equal(parsedMember.username, 'developer@example.com');
+  });
+
+  it('GET /console/members chỉ cho phép TENANT_ADMIN; từ chối REVIEWER và DEVELOPER với 403 PERMISSION_DENIED', async () => {
+    const reviewerCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'req-rev', role: 'REVIEWER', sub: 'u_rev' };
+    const developerCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'req-dev', role: 'DEVELOPER', sub: 'u_dev' };
+
+    // 1. Kiểm tra trực tiếp qua handleMembersApiGatewayRoute
+    const revRes = await handleMembersApiGatewayRoute(event('/console/members'), reviewerCtx);
+    assert.ok(revRes);
+    assert.equal(revRes.statusCode, 403);
+    assert.equal(JSON.parse(revRes.body).error?.code, 'PERMISSION_DENIED');
+
+    const devRes = await handleMembersApiGatewayRoute(event('/console/members'), developerCtx);
+    assert.ok(devRes);
+    assert.equal(devRes.statusCode, 403);
+    assert.equal(JSON.parse(devRes.body).error?.code, 'PERMISSION_DENIED');
+
+    // 2. Kiểm tra thông qua toàn bộ router Lambda mặc định (createConsoleHandler)
+    const handler = createConsoleHandler();
+
+    const routerRevRes = await handler(
+      event('/console/members', { 'custom:tenant_id': 't_a', 'custom:role': 'reviewer', sub: 'u_rev' }, 'GET'),
+    );
+    assert.equal(routerRevRes.statusCode, 403);
+    assert.equal(JSON.parse(routerRevRes.body).error?.code, 'PERMISSION_DENIED');
+
+    const routerDevRes = await handler(
+      event('/console/members', { 'custom:tenant_id': 't_a', 'custom:role': 'developer', sub: 'u_dev' }, 'GET'),
+    );
+    assert.equal(routerDevRes.statusCode, 403);
+    assert.equal(JSON.parse(routerDevRes.body).error?.code, 'PERMISSION_DENIED');
   });
 });

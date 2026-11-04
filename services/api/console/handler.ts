@@ -218,10 +218,21 @@ export async function handleSitesApiGatewayRoute(
 /**
  * 3. Adapter HTTP cho nhóm route Quản lý Thành viên E.5 (`/console/members*`).
  */
+export type MemberRouteDeps = InviteMemberDeps & {
+  db?: {
+    query?: (
+      ctx: Ctx,
+      pk: string,
+      skPrefix?: string,
+      opts?: { consistent?: boolean },
+    ) => Promise<any[]>;
+  };
+};
+
 export async function handleMembersApiGatewayRoute(
   event: ConsoleEvent,
   ctx: Ctx,
-  deps?: InviteMemberDeps,
+  deps?: MemberRouteDeps,
 ): Promise<ConsoleResponse | null> {
   const rawPath = event.path ?? (event as { rawPath?: string }).rawPath ?? '';
   const path = normalizeConsolePath(rawPath);
@@ -243,9 +254,11 @@ export async function handleMembersApiGatewayRoute(
   }
 
   try {
-    // GET /console/members -> lấy danh sách thành viên của tenant
+    // GET /console/members -> lấy danh sách thành viên của tenant (chỉ dành cho TENANT_ADMIN)
     if (method === 'GET' && (subPath === '' || subPath === '/')) {
-      const items = await db.query(ctx, `TENANT#${ctx.tenantId}`, 'MEMBER#', { consistent: true });
+      requireRole(ctx, ['TENANT_ADMIN']);
+      const queryFn = deps?.db?.query ?? db.query;
+      const items = await queryFn(ctx, `TENANT#${ctx.tenantId}`, 'MEMBER#', { consistent: true });
       return {
         statusCode: 200,
         headers: HEADERS,
