@@ -9,14 +9,17 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node --test dist/services/api/auth/test/auth.test.js dist/services/api/sites/test/siteManager.test.js dist/services/api/glossary/test/glossaryManager.test.js dist/services/api/review/test/reviewManager.test.js dist/services/api/translate/test/realtime.test.js"
+    "test": "tsc -p tsconfig.json && node --test dist/services/api/auth/test/auth.test.js dist/services/api/sites/test/siteManager.test.js dist/services/api/glossary/test/glossaryManager.test.js dist/services/api/review/test/reviewManager.test.js dist/services/api/console/test/handler.test.js dist/services/api/translate/test/realtime.test.js dist/services/api/translate/test/batchUpload.test.js dist/services/api/platform/test/tenantStatus.test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudfront": "^3.650.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.650.0",
     "@aws-sdk/client-comprehend": "^3.650.0",
     "@aws-sdk/client-dynamodb": "^3.650.0",
+    "@aws-sdk/client-s3": "^3.650.0",
     "@aws-sdk/client-translate": "^3.650.0",
-    "@aws-sdk/lib-dynamodb": "^3.1156.0"
+    "@aws-sdk/lib-dynamodb": "^3.1156.0",
+    "@aws-sdk/s3-request-presigner": "^3.650.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",

@@ -143,7 +143,7 @@ Sau khi TV1 deploy hạ tầng lên AWS, chạy lần lượt 6 kịch bản dư
   - Mở bảng DynamoDB kiểm tra có **đúng 2 bản ghi** cùng `PK = "TENANT#t_..."`:
     - Bản ghi `SK = "CONFIG"` có `organizationName = "Demo Org"`, `plan = "Free"`, `status = "ACTIVE"`, `glossaryVersion = 0`.
     - Bản ghi `SK = "MEMBER#<sub>"` có `email`, `role = "Tenant Admin"`, `status = "ACTIVE"`.
-  - Kiểm tra user trên Cognito đã có `custom:tenant_id = "t_..."` và `custom:role = "Tenant Admin"`.
+  - Kiểm tra user trên Cognito đã có `custom:tenant_id = "t_..."` và `custom:role = "tenant_admin"` (các deployment cũ có thể đang lưu `Tenant Admin` và được đọc tương thích).
 
 - [ ] **2. Đăng ký trùng email:**
   - Gọi lại `SignUp` với cùng địa chỉ email vừa xác nhận (thử cả viết hoa `USER@domain.com`).
@@ -168,6 +168,6 @@ Sau khi TV1 deploy hạ tầng lên AWS, chạy lần lượt 6 kịch bản dư
   - **Kết quả bắt buộc:** Cả hai trường hợp đều trả về cùng một mã lỗi và thông điệp giống hệt nhau (`NotAuthorizedException: Incorrect username or password.`), không tiết lộ lỗi `UserNotFoundException`.
 
 - [ ] **6. Mời thành viên -> Đăng nhập mật khẩu tạm -> Buộc đổi mật khẩu:**
-  - Gọi hàm `inviteMember(tenantId, "reviewer1@example.com", "Reviewer")`.
-  - Kiểm tra hộp thư `reviewer1@example.com` nhận được email chứa mật khẩu tạm; trạng thái user trên Cognito là `FORCE_CHANGE_PASSWORD`, có sẵn `custom:tenant_id` và `custom:role = "Reviewer"`.
+  - Gọi hàm `inviteMember(tenantId, "reviewer1@example.com", "REVIEWER")`.
+  - Kiểm tra hộp thư `reviewer1@example.com` nhận được email chứa mật khẩu tạm; trạng thái user trên Cognito là `FORCE_CHANGE_PASSWORD`, có sẵn `custom:tenant_id` và `custom:role = "reviewer"`.
   - Dùng mật khẩu tạm đăng nhập trên Web Console -> Cognito trả về challenge `NEW_PASSWORD_REQUIRED` buộc người dùng đặt mật khẩu mới trước khi cấp token.

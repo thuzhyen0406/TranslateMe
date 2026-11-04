@@ -9,7 +9,7 @@
  *     - CONFIG: PK = "TENANT#<t>", SK = "CONFIG"
  *     - MEMBER: PK = "TENANT#<t>", SK = "MEMBER#<sub>"
  *     với `ConditionExpression: "attribute_not_exists(PK)"` để idempotent khi Cognito gọi lại.
- *  5. Gọi `AdminUpdateUserAttributes` gán `custom:tenant_id` và `custom:role = Tenant Admin`.
+ *  5. Gọi `AdminUpdateUserAttributes` gán `custom:tenant_id` và `custom:role = tenant_admin`.
  *  6. Khi lỗi: ghi log JSON có cấu trúc (tuyệt đối không log mật khẩu/mã xác nhận) và ném lỗi
  *     để tránh trạng thái user đã xác nhận nhưng không có tenant.
  *
@@ -33,7 +33,8 @@ import {
   TransactWriteItemsCommand,
   type TransactWriteItemsCommandInput,
 } from '@aws-sdk/client-dynamodb';
-import { COGNITO_CUSTOM_ATTRIBUTES, ROLES } from '../../../libs/common/roles.js';
+import { COGNITO_CUSTOM_ATTRIBUTES, ROLES, claimForRole } from '../../../libs/common/roles.js';
+import { createTenantDocumentClientRouter } from '../../../libs/common/tenantAws.js';
 
 // ============================================================================
 // Hằng số cấu hình & Kiểu sự kiện Cognito PostConfirmation
@@ -204,7 +205,14 @@ let defaultDdbClient: DynamoDBClient | undefined;
 let defaultCognitoClient: CognitoIdentityProviderClient | undefined;
 
 function getDefaultDdbClient(): DynamoDBClient {
-  if (!defaultDdbClient) defaultDdbClient = new DynamoDBClient({});
+  if (!defaultDdbClient) {
+    const base = new DynamoDBClient({});
+    defaultDdbClient = createTenantDocumentClientRouter(base as never, {
+      roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN,
+      sessionName: 'post-confirmation',
+      createClient: (credentials) => new DynamoDBClient({ credentials }) as never,
+    }) as never as DynamoDBClient;
+  }
   return defaultDdbClient;
 }
 
@@ -337,7 +345,7 @@ export function createPostConfirmationHandler(deps: PostConfirmationDeps = {}) {
       }
     }
 
-    // 5. Gán custom:tenant_id và custom:role = Tenant Admin trên Cognito User Pool
+    // 5. Gán custom:tenant_id và custom:role = tenant_admin trên Cognito User Pool
     try {
       await cognito.send(
         new AdminUpdateUserAttributesCommand({
@@ -345,7 +353,7 @@ export function createPostConfirmationHandler(deps: PostConfirmationDeps = {}) {
           Username: event.userName,
           UserAttributes: [
             { Name: COGNITO_CUSTOM_ATTRIBUTES.TENANT_ID, Value: tenantId },
-            { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: ROLES.TENANT_ADMIN },
+            { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: claimForRole(ROLES.TENANT_ADMIN) },
           ],
         }),
       );

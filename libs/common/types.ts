@@ -12,7 +12,7 @@ export interface Ctx {
   keyId?: string;
 }
 
-export type ErrorCode = 
+export type ErrorCode =
   | 'FORBIDDEN'
   | 'PERMISSION_DENIED'
   | 'UNAUTHORIZED'
@@ -29,6 +29,7 @@ export type ErrorCode =
   | 'UNSUPPORTED_LANGUAGE'
   | 'NOT_FOUND'
   | 'VERSION_CONFLICT'
+  | 'CACHE_INVALIDATION_FAILED'
   | 'INTERNAL_ERROR';
 
 export class AppError extends Error {
