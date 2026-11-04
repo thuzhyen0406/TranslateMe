@@ -56,7 +56,7 @@ Parameters:
   ConsoleHandler:
     Type: String
     Default: services/api/console/handler.handler
-    Description: Console router (services/api/console/handler.ts) dispatching /console/* routes, including F5 review.
+    Description: Unified Console API router (services/api/console/handler.ts) dispatching all /console/* routes (review, glossary, sites, members). Can be overridden to a dedicated handler (e.g. services/api/review/reviewManager.reviewLambdaHandler) if deploying routes to separate Lambdas.
   TranslateHandler:
     Type: String
     Default: services/api/translate/realtime.handler
