@@ -2,8 +2,11 @@
 
 `iam.yaml` creates Lambda execution roles plus a tenant-data role. Runtime data
 requests assume the tenant-data role with an inline STS session policy bound to
-the authenticated/resolved `tenantId`. `lambdas.yaml` attaches each execution
-role to its Lambda and supplies `TENANT_DATA_ACCESS_ROLE_ARN`. API Gateway
+the authenticated/resolved `tenantId`; STS session tags bind the target role's
+maximum policy to that same tenant. Website creation uses a separate
+`TenantWebsiteDataAccessRoleArn` for the one-time tenant plus platform slug
+reservation transaction. `lambdas.yaml` attaches each execution role to its
+Lambda and supplies the role ARNs. API Gateway
 invocation permissions remain in `api-gateway.yaml`.
 
 ## Roles and owning handlers
@@ -19,14 +22,15 @@ invocation permissions remain in `api-gateway.yaml`.
 | `PlatformApiExecutionRoleArn` | Platform Admin Lambda | Read site rows, update tenant CONFIG, cache invalidation |
 | `PostConfirmationExecutionRoleArn` | Cognito PostConfirmation trigger | Create tenant/mapping records and set Cognito claims |
 | `TenantDataAccessRoleArn` | Assumed per request by tenant-facing functions | DynamoDB access constrained by the STS session policy to one tenant partition |
+| `TenantWebsiteDataAccessRoleArn` | Assumed only by Website Lambda during website creation | Transaction item-level `PutItem`/`ConditionCheckItem` permissions for tenant records and the platform slug reservation |
 
 ## Deployment and wiring
 
 1. Deploy data and identity stacks.
 2. Deploy `iam.yaml`, supplying the exact worker function ARN and data-stack KMS key ARN.
 3. Deploy `lambdas.yaml` with the code artifacts and matching role ARN
-   outputs, including both `TenantDataAccessRoleArn` and
-   `TenantPayloadAccessRoleArn`. Set `PayloadBucketArn`, `PayloadBucketName`,
+   outputs, including `TenantDataAccessRoleArn`,
+   `TenantWebsiteDataAccessRoleArn`, and `TenantPayloadAccessRoleArn`. Set `PayloadBucketArn`, `PayloadBucketName`,
    and `KmsKeyArn` from the data stack outputs.
 4. Pass `WebsiteFunctionArn` as well as the other function ARNs to
    `api-gateway.yaml`; `/console/hosts*` management routes are directed to the
@@ -37,9 +41,10 @@ invocation permissions remain in `api-gateway.yaml`.
 ## Security boundary and known integration work
 
 - The actual tenant ID format is `t_` followed by the generated identifier.
-  The session policy restricts `dynamodb:LeadingKeys` to that exact tenant
-  partition (plus the platform slug reservation prefix required by site
-  creation). Execution roles have no direct tenant-partition data permissions.
+  Session tags bind each target role's maximum policy to the assumed tenant;
+  tenant session policies further restrict `dynamodb:LeadingKeys`. Only the
+  website creation client adds the platform slug reservation partition.
+  Execution roles have no direct tenant-partition data permissions.
   Data-layer validation remains defense in depth and must not be removed.
 - `PlatformApiExecutionRole` must query `HOST#` records so the current lock
   handler can collect slugs for CloudFront invalidation. IAM can scope this to

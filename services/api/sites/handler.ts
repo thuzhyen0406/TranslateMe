@@ -7,7 +7,13 @@ type WebsiteEvent = {
   httpMethod?: string;
   path?: string;
   rawPath?: string;
-  requestContext?: { requestId?: string; authorizer?: { claims?: Record<string, unknown> } };
+  resource?: string;
+  requestContext?: {
+    requestId?: string;
+    stage?: string;
+    path?: string;
+    authorizer?: { claims?: Record<string, unknown> };
+  };
   pathParameters?: Record<string, string | undefined>;
   body?: string | null;
 };
@@ -25,7 +31,7 @@ export async function handler(event: WebsiteEvent) {
       throw new AppError('PERMISSION_DENIED', 'Chỉ Tenant Admin được quản lý website');
     }
 
-    const path = event.rawPath ?? event.path ?? '';
+    const path = normalizedRequestPath(event);
     const method = event.httpMethod ?? 'GET';
     const slug = event.pathParameters?.slug ?? event.pathParameters?.proxy?.split('/').filter(Boolean)[0] ?? path.split('/').filter(Boolean)[2];
     let body: Record<string, unknown> = {};
@@ -88,4 +94,14 @@ export async function handler(event: WebsiteEvent) {
 
 function response(statusCode: number, body: Record<string, unknown>) {
   return { statusCode, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }, body: JSON.stringify(body) };
+}
+
+function normalizedRequestPath(event: WebsiteEvent): string {
+  let path = event.rawPath ?? event.path ?? event.requestContext?.path ?? event.resource ?? '';
+  const stagePrefix = event.requestContext?.stage ? `/${event.requestContext.stage}` : '';
+  if (stagePrefix && (path === stagePrefix || path.startsWith(`${stagePrefix}/`))) {
+    path = path.slice(stagePrefix.length) || '/';
+  }
+  if (!path.startsWith('/')) path = `/${path}`;
+  return path.length > 1 ? path.replace(/\/+$/, '') : path;
 }

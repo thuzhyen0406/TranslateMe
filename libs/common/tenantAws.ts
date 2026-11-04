@@ -54,17 +54,18 @@ export function tenantSessionPolicy(
   } = {},
 ): string {
   if (!/^t_[A-Za-z0-9_-]{1,64}$/.test(tenantId)) throw new TypeError('Invalid tenant ID');
+  const leadingKeys = [`TENANT#${tenantId}`, `TENANT#${tenantId}#*`];
+  if (allowPlatformSlugReservations) leadingKeys.push('TENANT#PLATFORM#SLUG#*');
   const statements: Array<Record<string, unknown>> = [{
     Effect: 'Allow',
     Action: [
       'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem',
       'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem', 'dynamodb:BatchWriteItem',
-      'dynamodb:TransactWriteItems',
     ],
     Resource: '*',
     Condition: {
       'ForAllValues:StringLike': {
-        'dynamodb:LeadingKeys': [`TENANT#${tenantId}`, `TENANT#${tenantId}#*`],
+        'dynamodb:LeadingKeys': leadingKeys,
       },
     },
   }];
@@ -133,6 +134,7 @@ export function createTenantCredentialsProvider(
           RoleArn: roleArn,
           RoleSessionName: `${sessionName}-${tenantId}`.slice(0, 64),
           SourceIdentity: tenantId,
+          Tags: [{ Key: 'TenantId', Value: tenantId }],
           Policy: policy,
         })) as typeof result;
       } catch (error) {
@@ -189,7 +191,7 @@ export function createTenantDocumentClientRouter(
     if (!pending) {
       pending = (async () => {
         if (!roleArn) throw new Error('TENANT_DATA_ACCESS_ROLE_ARN is required in Lambda');
-        const credentials = createTenantCredentialsProvider(
+                const credentials = createTenantCredentialsProvider(
           roleArn,
           tenantId,
           tenantSessionPolicy(tenantId, options),

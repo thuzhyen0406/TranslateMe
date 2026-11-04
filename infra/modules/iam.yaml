@@ -63,8 +63,12 @@ Resources:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-platform-api'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-post-confirmation'
               StringLike:
-                sts:SourceIdentity:
-                  - 't_*'
+                sts:SourceIdentity: 't_*'
+              StringEquals:
+                aws:RequestTag/TenantId: '${sts:SourceIdentity}'
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - TenantId
       Policies:
         - PolicyName: tenant-data-session-maximum
           PolicyDocument:
@@ -81,31 +85,25 @@ Resources:
                   - dynamodb:Query
                   - dynamodb:ConditionCheckItem
                   - dynamodb:BatchWriteItem
-                  - dynamodb:TransactWriteItems
                 Resource:
                   - !Ref TableArn
                   - !Sub '${TableArn}/index/GSI2'
                   - !Sub '${TableArn}/index/GSI3'
-                Condition:
+                                Condition:
                   ForAllValues:StringLike:
                     dynamodb:LeadingKeys:
-                      - 'TENANT#t_*'
-              - Sid: ReserveWebsiteSlug
-                Effect: Allow
-                Action: dynamodb:TransactWriteItems
-                Resource: !Ref TableArn
-                Condition:
-                  ForAllValues:StringLike:
-                    dynamodb:LeadingKeys:
-                      - 'TENANT#t_*'
-                      - 'TENANT#PLATFORM#SLUG#*'
+                      - 'TENANT#${aws:PrincipalTag/TenantId}'
+                      - 'TENANT#${aws:PrincipalTag/TenantId}#*'
               - Sid: TenantBatchUploadObjects
                 Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${BatchUploadBucketArn}/batch/${aws:PrincipalTag/TenantId}/*'
+              - Sid: TenantDataKmsUse
+                Effect: Allow
                 Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                Resource: !Sub '${BatchUploadBucketArn}/batch/*/input/*'
-              - Sid: TenantBatchUploadKmsAccess
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref BatchUploadKmsKeyArn
                 Effect: Allow
                 Action:
                   - kms:Decrypt
@@ -126,17 +124,21 @@ Resources:
           - Effect: Allow
             Principal:
               AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
-            Action:
+                        Action:
               - sts:AssumeRole
-              - sts:SetSourceIdentity
+              - sts:TagSession
             Condition:
               ArnLike:
                 aws:PrincipalArn:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-proxy'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-worker'
               StringLike:
-                sts:SourceIdentity:
-                  - 't_*'
+                sts:SourceIdentity: 't_*'
+              StringEquals:
+                aws:RequestTag/TenantId: '${sts:SourceIdentity}'
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - TenantId
       Policies:
         - PolicyName: tenant-worker-payload-maximum
           PolicyDocument:
@@ -147,7 +149,7 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: !Sub '${PayloadBucketArn}/tenant/*/worker/*'
+                Resource: !Sub '${PayloadBucketArn}/tenant/${!aws:PrincipalTag/TenantId}/worker/*'
               - Sid: PayloadKmsUse
                 Effect: Allow
                 Action:
@@ -158,6 +160,53 @@ Resources:
                   StringEquals:
                     kms:ViaService: !Sub 's3.${AWS::Region}.amazonaws.com'
                     kms:EncryptionContext:aws:s3:arn: !Ref PayloadBucketArn
+
+  TenantWebsiteDataAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'translateme-${StageName}-tenant-website-data'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+            Condition:
+              ArnLike:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-website-api'
+              StringLike:
+                sts:SourceIdentity: 't_*'
+              StringEquals:
+                aws:RequestTag/TenantId: '${sts:SourceIdentity}'
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - TenantId
+      Policies:
+        - PolicyName: website-tenant-slug-transaction
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WebsiteTenantAndSlugTransaction
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:ConditionCheckItem
+                Resource: !Ref TableArn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - 'TENANT#${aws:PrincipalTag/TenantId}'
+                      - 'TENANT#${aws:PrincipalTag/TenantId}#*'
+                      - 'TENANT#PLATFORM#SLUG#*'
+              - Sid: WebsiteTenantDataKmsUse
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref KmsKeyArn
 
   ProxyExecutionRole:
     Type: AWS::IAM::Role
@@ -191,7 +240,7 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
-                Resource: !GetAtt TenantDataAccessRole.Arn
+                                Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InvokeAsyncWorker
                 Effect: Allow
                 Action: lambda:InvokeFunction
@@ -206,7 +255,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - sts:AssumeRole
-                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantPayloadAccessRole.Arn
 
   WorkerExecutionRole:
@@ -239,7 +288,7 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
-                Resource: !GetAtt TenantDataAccessRole.Arn
+                                Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: TranslateText
                 Effect: Allow
                 Action: translate:TranslateText
@@ -248,7 +297,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - sts:AssumeRole
-                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantPayloadAccessRole.Arn
 
   ConsoleApiExecutionRole:
@@ -326,15 +375,23 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: AssumeTenantDataAccessRole
+                            - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
                 Action:
                   - sts:AssumeRole
-                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
+              - Sid: AssumeTenantWebsiteDataAccessRole
+                Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                  - sts:TagSession
+                Resource: !GetAtt TenantWebsiteDataAccessRole.Arn
               - Sid: WebsiteCacheInvalidation
                 Effect: Allow
-                Action: cloudfront:CreateInvalidation
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
                 Resource: !Ref CloudFrontDistributionArn
 
   TranslateApiExecutionRole:
@@ -442,6 +499,9 @@ Outputs:
   TenantPayloadAccessRoleArn:
     Description: Target role assumed with a session policy scoped to one tenant payload prefix.
     Value: !GetAtt TenantPayloadAccessRole.Arn
+  TenantWebsiteDataAccessRoleArn:
+    Description: Target role used only for tenant website creation slug transactions.
+    Value: !GetAtt TenantWebsiteDataAccessRole.Arn
   ProxyExecutionRoleArn:
     Description: Attach to the website proxy Lambda.
     Value: !GetAtt ProxyExecutionRole.Arn
