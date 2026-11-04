@@ -543,14 +543,14 @@ describe('Task 3.8 – Duyệt bản dịch (F5)', () => {
       version: 1,
     });
 
-    // 1. DEVELOPER bị từ chối truy cập F5 (PERMISSION_DENIED)
+    // 1. DEVELOPER bị từ chối truy cập F5 với FORBIDDEN (theo đúng contract Bảng 1.2 / F5)
     await assert.rejects(
       listTranslations(devCtx, {}, deps),
-      (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
+      (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
     );
     await assert.rejects(
       acceptTranslation(devCtx, { src: 'vi', tgt: 'en', hash: seeded.hash, expectedVersion: 1 }, deps),
-      (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
+      (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
     );
 
     // 2. Thiếu hoặc rỗng ctx.sub -> bị từ chối ngay với UNAUTHORIZED (không bỏ qua kiểm tra MEMBER)
@@ -853,6 +853,44 @@ describe('Task 3.8 – Duyệt bản dịch (F5)', () => {
     assert.equal(make('REVIEWER').role, 'REVIEWER');
     assert.throws(() => make('superuser'), (err: unknown) => (err as { code?: string }).code === 'UNAUTHORIZED');
     assert.throws(() => make(''), (err: unknown) => (err as { code?: string }).code === 'UNAUTHORIZED');
+  });
+
+  it('extractReviewCtxFromEvent chỉ chấp nhận claims.sub thật từ Cognito, từ chối khi chỉ có cognito:username', () => {
+    // Có cognito:username nhưng thiếu sub -> bắt buộc từ chối UNAUTHORIZED
+    assert.throws(
+      () =>
+        extractReviewCtxFromEvent({
+          requestContext: {
+            requestId: 'req-username-no-sub',
+            authorizer: {
+              claims: {
+                'custom:tenant_id': TENANT_A,
+                'custom:role': 'reviewer',
+                'cognito:username': 'reviewer_john',
+              },
+            },
+          },
+        }),
+      (err: unknown) => err instanceof AppError && err.code === 'UNAUTHORIZED',
+    );
+
+    // Có sub hợp lệ -> trích xuất đúng
+    const parsed = extractReviewCtxFromEvent({
+      requestContext: {
+        requestId: 'req-sub-ok',
+        authorizer: {
+          claims: {
+            'custom:tenant_id': TENANT_A,
+            'custom:role': 'reviewer',
+            sub: 'sub-uuid-abc-123',
+            'cognito:username': 'reviewer_john',
+          },
+        },
+      },
+    });
+    assert.equal(parsed.sub, 'sub-uuid-abc-123');
+    assert.equal(parsed.tenantId, TENANT_A);
+    assert.equal(parsed.role, 'REVIEWER');
   });
 
   it('tương thích tuyệt đối với chữ ký tối thiểu đã chốt: invalidateForSentences(ctx, { src, tgt, hashes }): Promise<{ paths, mode, invalidationId? }>', async () => {

@@ -337,7 +337,12 @@ async function assertReviewAccess(
     throw new AppError('UNAUTHORIZED', 'Thao tác duyệt bản dịch yêu cầu phiên đăng nhập Console (JWT)');
   }
 
-  requireRole(ctx, ['TENANT_ADMIN', 'REVIEWER']);
+  if (!ctx.role || (ctx.role !== 'TENANT_ADMIN' && ctx.role !== 'REVIEWER')) {
+    throw new AppError(
+      'FORBIDDEN',
+      'Vai trò không được phép truy cập màn Duyệt bản dịch (chỉ TENANT_ADMIN và REVIEWER)',
+    );
+  }
 
   const sub = typeof ctx.sub === 'string' ? ctx.sub.trim() : '';
   if (!sub) {
@@ -1136,7 +1141,7 @@ export function extractReviewCtxFromEvent(event: ReviewApiGatewayEvent): Ctx {
 
   const tenantId = String(claims['custom:tenant_id'] ?? claims.tenant_id ?? '').trim();
   const rawRole = String(claims['custom:role'] ?? claims.role ?? '').trim();
-  const sub = String(claims.sub ?? claims['cognito:username'] ?? '').trim();
+  const sub = String(claims.sub ?? '').trim();
   // Cognito lưu custom:role dạng chữ thường (tenant_admin, reviewer...); chuẩn hóa về Role nội bộ.
   const role: Role | null =
     roleFromClaim(rawRole) ?? (VALID_ROLES.includes(rawRole as Role) ? (rawRole as Role) : null);
