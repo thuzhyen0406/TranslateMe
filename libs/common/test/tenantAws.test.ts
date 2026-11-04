@@ -7,7 +7,9 @@ import { createTenantDocumentClientRouter, tenantSessionPolicy } from '../tenant
 describe('tenant-scoped AWS sessions', () => {
   it('session policy limits LeadingKeys to one tenant without platform slug reservations', () => {
     const policy = JSON.parse(tenantSessionPolicy('t_aaaaaaaaaaaaaaaaaaaaaaaa'));
-    assert.ok(policy.Statement[0].Action.includes('dynamodb:TransactWriteItems'));
+    assert.ok(policy.Statement[0].Action.includes('dynamodb:PutItem'));
+    assert.ok(policy.Statement[0].Action.includes('dynamodb:ConditionCheckItem'));
+    assert.ok(!policy.Statement[0].Action.includes('dynamodb:TransactWriteItems'));
     const keys = policy.Statement[0].Condition['ForAllValues:StringLike']['dynamodb:LeadingKeys'];
     assert.deepEqual(keys, [
       'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa',
@@ -37,11 +39,18 @@ describe('tenant-scoped AWS sessions', () => {
     });
   });
 
-  it('IAM tenant role grants TransactWriteItems', () => {
+  it('IAM tenant role grants TransactWriteItems and requires session tags', () => {
     const iamTemplate = readFileSync(resolve(process.cwd(), '../../infra/modules/iam.yaml'), 'utf8');
     assert.match(iamTemplate, /dynamodb:TransactWriteItems/);
-    assert.match(iamTemplate, /sts:SetSourceIdentity/);
     assert.match(iamTemplate, /sts:TagSession/);
+    assert.match(iamTemplate, /aws:RequestTag\/TenantId/);
+    
+    const websiteTransaction = iamTemplate.match(/Sid: WebsiteTenantAndSlugTransaction[\s\S]*?(?=\n              - Sid:|\n  [A-Z])/);
+    assert.ok(websiteTransaction, 'website transaction IAM statement exists');
+    assert.match(websiteTransaction[0], /dynamodb:PutItem/);
+    assert.match(websiteTransaction[0], /dynamodb:ConditionCheckItem/);
+    assert.doesNotMatch(websiteTransaction[0], /dynamodb:(?:DeleteItem|UpdateItem)/);
+  });
   });
 
   it('session policy scopes S3 objects to the requesting tenant prefix', () => {
@@ -78,9 +87,9 @@ describe('tenant-scoped AWS sessions', () => {
     await router.send({ input: { Key: { PK: 'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa', SK: 'CONFIG' } } } as never);
     await router.send({ input: { Key: { PK: 'TENANT#PLATFORM#SLUG#site-a', SK: 'META' } } } as never);
     assert.deepEqual(routed, ['tenant', 'base']);
-    assert.deepEqual(assumed, ['t_aaaaaaaaaaaaaaaaaaaaaaaa']);
+        assert.deepEqual(assumed, ['t_aaaaaaaaaaaaaaaaaaaaaaaa']);
     assert.equal(assumeCommands[0].input.SourceIdentity, 't_aaaaaaaaaaaaaaaaaaaaaaaa');
-    assert.equal(assumeCommands[0].input.Tags, undefined);
+    assert.deepEqual(assumeCommands[0].input.Tags, [{ Key: 'TenantId', Value: 't_aaaaaaaaaaaaaaaaaaaaaaaa' }]);
     assert.ok(assumeCommands[0].input.Policy);
   });
 
