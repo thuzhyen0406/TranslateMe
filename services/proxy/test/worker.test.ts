@@ -200,6 +200,24 @@ describe('worker C13 – FINISH_PAGE', () => {
     assert.equal(logger.infos[0].glossaryPostCheckFlagged, 1);
   });
 
+  it('đọc Glossary lỗi -> dừng ERROR, không tra/ghi TM, không đặt hạn mức, không gọi Translate (3.9)', async () => {
+    const db = memoryTmDb();
+    const { worker, client, quota, logger } = setup({
+      db,
+      getGlossaryState: async () => {
+        throw Object.assign(new Error('down'), { name: 'ProvisionedThroughputExceededException' });
+      },
+    });
+    const r = await worker({ ...BASE, sentences: withHash(['Một', 'Hai']) });
+    assert.equal(r.status, 'ERROR');
+    assert.equal(r.reason, 'GLOSSARY_READ_ERROR');
+    assert.equal(r.pending, 2);
+    assert.equal(client.calls.length, 0);
+    assert.equal(quota.reserves.length, 0);
+    assert.equal(db.store.size, 0);
+    assert.equal(logger.errors[0].action, 'WORKER_GLOSSARY_ERROR');
+  });
+
   it('hết hạn mức -> QUOTA_EXCEEDED, không gọi Translate', async () => {
     const { worker, client } = setup({ quota: fakeQuota({ limit: 1 }) });
     const r = await worker({ ...BASE, sentences: withHash(['Một câu dài']) });

@@ -25,6 +25,10 @@ function setup(options: {
   memoryLabel?: 'MACHINE' | 'HUMAN';
   memoryGlossaryVersion?: number;
   glossaryTerms?: Array<Record<string, any>>;
+  /** Chia glossaryTerms thành nhiều trang Query (LastEvaluatedKey) để kiểm thử phân trang */
+  glossaryPageSize?: number;
+  /** terminologyName đã đồng bộ trong CONFIG (mặc định: chưa đồng bộ) */
+  configTerminologyName?: string;
   locked?: boolean;
   quotaExceeded?: boolean;
   tmWriteFails?: boolean;
@@ -42,10 +46,25 @@ function setup(options: {
       const input = command.input as Record<string, any>;
       calls.push({ name, input });
       if (command instanceof GetCommand) {
-        return { Item: { status: options.locked ? 'LOCKED' : 'ACTIVE', charLimit: 50_000, glossaryVersion: 7 } };
+        return {
+          Item: {
+            status: options.locked ? 'LOCKED' : 'ACTIVE',
+            charLimit: 50_000,
+            glossaryVersion: 7,
+            ...(options.configTerminologyName ? { terminologyName: options.configTerminologyName } : {}),
+          },
+        };
       }
       if (command instanceof QueryCommand) {
-        return { Items: options.glossaryTerms ?? [] };
+        const all = options.glossaryTerms ?? [];
+        const size = options.glossaryPageSize;
+        if (!size) return { Items: all };
+        const start = Number((input.ExclusiveStartKey as { offset?: number } | undefined)?.offset ?? 0);
+        const next = start + size;
+        return {
+          Items: all.slice(start, next),
+          ...(next < all.length ? { LastEvaluatedKey: { offset: next } } : {}),
+        };
       }
       if (command instanceof BatchGetCommand) {
         const keys = input.RequestItems[TABLE].Keys as Array<{ PK: string; SK: string }>;
@@ -294,6 +313,47 @@ describe('POST /translate/realtime', () => {
     assert.equal(body.characters_from_memory, 0);
     assert.equal(test.stored[0].needsReview, true, 'hậu kiểm phát hiện thiếu Hoi An Ancient Town -> needsReview = true');
     assert.equal(test.stored[0].GSI3PK, `TENANT#${TENANT}#TM#REVIEW`);
+  });
+
+  it('tenant chưa đồng bộ Custom Terminology vẫn dịch được và không gửi tên terminology (3.9)', async () => {
+    const test = setup();
+    const response = await test.handler(event({ text: 'Xin chào.', source_lang: 'vi', target_lang: 'en' }));
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(responseBody(response).translated_text, 'XIN CHÀO.');
+    assert.equal(test.translateCalls, 1);
+    assert.equal(test.translateInputs[0].TerminologyNames, undefined, 'không được gửi tm-<tenantId> dự phòng');
+  });
+
+  it('có thuật ngữ hiệu lực và CONFIG đã đồng bộ terminologyName thì gửi đúng tên đó (3.9)', async () => {
+    const test = setup({
+      configTerminologyName: 'tm-t_test',
+      glossaryTerms: [
+        { SK: 'TERM#homestay abc', normalized: 'homestay abc', sourceTerm: 'Homestay ABC', type: 'KEEP', sinceVersion: 1 },
+      ],
+    });
+    const response = await test.handler(event({ text: 'Xin chào.', source_lang: 'vi', target_lang: 'en' }));
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(test.translateInputs[0].TerminologyNames, ['tm-t_test']);
+  });
+
+  it('fallback đọc Glossary phân trang theo LastEvaluatedKey, không bỏ sót thuật ngữ (3.9)', async () => {
+    const terms = ['a', 'b', 'c'].map((word, index) => ({
+      SK: `TERM#${word}`,
+      normalized: word,
+      sourceTerm: word,
+      type: 'FIXED',
+      translations: { en: `T-${word}` },
+      sinceVersion: 3 + index,
+    }));
+    const test = setup({ glossaryTerms: terms, glossaryPageSize: 1, memory: 'Old.', memoryLabel: 'MACHINE', memoryGlossaryVersion: 2 });
+    // Câu chỉ chứa thuật ngữ nằm ở trang Query cuối cùng (c) -> bản MACHINE cũ phải bị coi lỗi thời và dịch lại
+    const response = await test.handler(event({ text: 'Xin c.', source_lang: 'vi', target_lang: 'en' }));
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(test.calls.filter((call) => call.name === 'QueryCommand').length, 3, 'phải đọc đủ 3 trang');
+    assert.equal(test.translateCalls, 1, 'thuật ngữ ở trang cuối được nhận ra nên dịch lại');
   });
 
   it('giữ nguyên bản HUMAN khi thuật ngữ đổi nhưng gắn nhãn Cần xem lại khi tra (3.9)', async () => {

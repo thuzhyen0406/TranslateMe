@@ -125,13 +125,23 @@ export function createWorkerHandler(deps: WorkerDeps) {
       if (!validSentences(sentences)) return reject('INVALID_SENTENCES');
       res.received = sentences.length;
 
-      // Thuật ngữ hiện hành (có thể đã đổi từ lúc proxy gửi); lỗi thì dùng giá trị trong sự kiện
+      // Thuật ngữ hiện hành (có thể đã đổi từ lúc proxy gửi).
+      // Nếu đọc Glossary lỗi thì dừng xử lý (status = ERROR) trước khi tra/ghi TM hay đặt hạn mức,
+      // tránh bỏ sót việc gắn cờ HUMAN lỗi thời hoặc ghi bản MACHINE vào TM mà chưa qua hậu kiểm thuật ngữ.
       let glossary: GlossaryState = { version: event.glossaryVersion, terminologyName: event.terminologyName, terms: [] };
       if (deps.getGlossaryState) {
         try {
           glossary = await deps.getGlossaryState(ctx);
         } catch (err) {
-          log.glossaryError = err instanceof Error ? err.name : 'Unknown';
+          const errName = err instanceof Error ? err.name : 'Unknown';
+          log.glossaryError = errName;
+          logger.error({
+            ...log,
+            action: 'WORKER_GLOSSARY_ERROR',
+            error: errName,
+            message: String(err).slice(0, 200),
+          });
+          return finish({ ...res, status: 'ERROR', reason: 'GLOSSARY_READ_ERROR', pending: sentences.length });
         }
       }
 
