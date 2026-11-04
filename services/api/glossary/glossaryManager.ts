@@ -449,7 +449,7 @@ function buildConfigVersionUpdateOp(
       Key: keys.config(ctx),
       UpdateExpression: 'SET glossaryVersion = :new, updatedAt = :now',
       ConditionExpression:
-        'attribute_exists(PK) AND (attribute_not_exists(glossaryVersion) OR glossaryVersion = :old) AND #st <> :locked',
+        'attribute_exists(PK) AND (attribute_not_exists(glossaryVersion) OR glossaryVersion = :old) AND #st = :active',
       ExpressionAttributeNames: {
         '#st': 'status',
       },
@@ -457,7 +457,7 @@ function buildConfigVersionUpdateOp(
         ':new': newVersion,
         ':old': oldVersion,
         ':now': updatedAt,
-        ':locked': 'LOCKED',
+        ':active': 'ACTIVE',
       },
     },
   };
@@ -1029,7 +1029,10 @@ export async function importCsv(
   // Giao dịch nguyên tử duy nhất (1 Update CONFIG + tối đa 99 Put GLOSS <= 100 mục)
   await executeGlossaryTransaction(
     ctx,
-    [buildConfigVersionUpdateOp(ctx, oldVersion, newVersion, updatedAt), ...glossPutOps],
+    [
+      buildConfigVersionUpdateOp(ctx, oldVersion, newVersion, updatedAt),
+      ...glossPutOps,
+    ],
     deps,
   );
 
@@ -1090,7 +1093,8 @@ function decodeTermPathParam(raw?: string): string {
  *  - `GET /console/glossary` (hoặc `/console/glossary/terms`): cho phép `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER`.
  *  - `PUT /console/glossary/terms/{term}`: chỉ `TENANT_ADMIN`.
  *  - `DELETE /console/glossary/terms/{term}`: chỉ `TENANT_ADMIN`.
- *  - `POST /console/glossary/import` (preview hoặc commit): chỉ `TENANT_ADMIN`.
+ *  - `POST /console/glossary/import/preview`: cho phép các role được phép đọc glossary.
+ *  - `POST /console/glossary/import` (commit): chỉ `TENANT_ADMIN`.
  */
 export async function handleGlossaryRoute(
   ctx: Ctx,
@@ -1102,10 +1106,8 @@ export async function handleGlossaryRoute(
     return listGlossary(ctx, deps);
   }
 
-  // Mọi thao tác ghi (PUT, DELETE, POST import) chỉ dành cho TENANT_ADMIN (ném FORBIDDEN nếu sai vai trò)
-  requireRole(ctx, ['TENANT_ADMIN']);
-
   if (req.method === 'PUT') {
+    requireRole(ctx, ['TENANT_ADMIN']);
     const body = req.body ?? {};
     const paramFromPath = req.path.startsWith('/console/glossary/terms/')
       ? req.path.slice('/console/glossary/terms/'.length)
@@ -1139,6 +1141,7 @@ export async function handleGlossaryRoute(
   }
 
   if (req.method === 'DELETE') {
+    requireRole(ctx, ['TENANT_ADMIN']);
     const paramFromPath = req.path.startsWith('/console/glossary/terms/')
       ? req.path.slice('/console/glossary/terms/'.length)
       : '';
@@ -1154,6 +1157,12 @@ export async function handleGlossaryRoute(
     const isPreviewPath = req.path.endsWith('/preview');
     const mode: 'PREVIEW' | 'COMMIT' =
       isPreviewPath || body.mode === 'PREVIEW' ? 'PREVIEW' : 'COMMIT';
+    requireRole(
+      ctx,
+      mode === 'PREVIEW'
+        ? ['TENANT_ADMIN', 'DEVELOPER', 'REVIEWER']
+        : ['TENANT_ADMIN'],
+    );
     const onDuplicate: 'KEEP_EXISTING' | 'OVERWRITE' =
       body.onDuplicate === 'KEEP_EXISTING' ? 'KEEP_EXISTING' : 'OVERWRITE';
     return importCsv(ctx, csv, mode, onDuplicate, deps);

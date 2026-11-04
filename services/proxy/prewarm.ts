@@ -7,7 +7,7 @@
  *
  *  - ReadSitemap: kiểm tra lại tenant và website (QC-6); tải sitemap.xml của trang chủ qua safeFetch (chặn SSRF);
  *    đọc cả sitemap index (một cấp); chỉ giữ URL cùng website với trang chủ đã xác minh; loại trùng; bỏ URL
- *    không phải trang HTML; giới hạn PREWARM_MAX_URLS; chia lô ghi ra S3 dưới prewarm/<tenantId>/<jobId>/;
+ *    không phải trang HTML; giới hạn PREWARM_MAX_URLS; chia lô ghi ra S3 dưới worker/<tenantId>/prewarm/<jobId>/;
  *    JOB -> RUNNING với total = số URL × số ngôn ngữ đích.
  *  - PrewarmPages (C13, chế độ trang): mỗi URL × ngôn ngữ chạy lõi proxy F2 (bước 1–5 và 7: tải, tách câu, tra TM,
  *    đặt trước hạn mức, dịch, ghi TM và SEG, đếm ký tự vào WEB#slug) nhưng bỏ HTML trả về và không đếm lượt xem trang.
@@ -32,7 +32,7 @@ export const MAX_CHILD_SITEMAPS = 20;
 export const SITEMAP_MAX_BYTES = 5 * 1024 * 1024;
 export const SITEMAP_CONTENT_TYPES = ['application/xml', 'text/xml'];
 
-export const prewarmKeyPrefix = (tenantId: string, jobId: string): string => `prewarm/${tenantId}/${jobId}/`;
+export const prewarmKeyPrefix = (tenantId: string, jobId: string): string => `worker/${tenantId}/prewarm/${jobId}/`;
 
 // ---------------------------------------------------------------------------
 // Thông điệp
@@ -309,7 +309,7 @@ export async function prewarmPages(event: PrewarmPagesEvent, deps: PrewarmDeps):
   const langs = checkLangs(event.target_langs);
   const prefix = prewarmKeyPrefix(event.tenant_id, event.job_id);
   if (typeof event.urls_key !== 'string' || !event.urls_key.startsWith(prefix) || event.urls_key.includes('..')) {
-    throw new PrewarmError('INVALID_EVENT', 'urls_key nằm ngoài prewarm/<tenantId>/<jobId>/');
+    throw new PrewarmError('INVALID_EVENT', 'urls_key nằm ngoài worker/<tenantId>/prewarm/<jobId>/');
   }
   if (!deps.store || !deps.renderPage) throw new PrewarmError('MISCONFIGURED', 'Thiếu kho S3 hoặc lõi proxy');
   const site = await checkSite(deps, event.tenant_id, event.slug);
