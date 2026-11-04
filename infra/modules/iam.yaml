@@ -191,6 +191,7 @@ Resources:
             Statement:
               - Sid: WebsiteTenantAndSlugTransaction
                 Effect: Allow
+                # TransactWriteItems is authorized by the item-level actions below.
                 Action:
                   - dynamodb:PutItem
                   - dynamodb:ConditionCheckItem

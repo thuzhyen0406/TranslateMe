@@ -42,6 +42,18 @@ export async function handler(event: WebsiteEvent) {
     } catch {
       throw new AppError('INVALID_REQUEST', 'Body không hợp lệ');
     }
+    // Accept Console snake_case fields while retaining the original camelCase API.
+    for (const [camelCase, snakeCase] of [
+      ['homeUrl', 'home_url'],
+      ['displayName', 'display_name'],
+      ['sourceLang', 'source_lang'],
+      ['targetLangs', 'target_langs'],
+      ['noTranslateSelectors', 'no_translate_selectors'],
+    ]) {
+      if (body[camelCase] === undefined && body[snakeCase] !== undefined) {
+        body[camelCase] = body[snakeCase];
+      }
+    }
     if ('tenantId' in body || 'tenant_id' in body) {
       throw new AppError('INVALID_REQUEST', 'Không được gửi tenantId trong body');
     }
@@ -50,15 +62,22 @@ export async function handler(event: WebsiteEvent) {
     if (path === '/console/websites' && method === 'GET') {
       const sites = await db.listTenantSites(ctx);
       result = { websites: sites };
+      // `hosts` is the Console contract; retain `websites` for existing callers.
+      (result as Record<string, unknown>).hosts = sites;
     } else if (path === '/console/websites' && method === 'POST') {
       if (
         typeof body.homeUrl !== 'string' || typeof body.displayName !== 'string' ||
         typeof body.sourceLang !== 'string' || !Array.isArray(body.targetLangs) ||
-        !body.targetLangs.every((language) => typeof language === 'string')
+        !body.targetLangs.every((language) => typeof language === 'string') ||
+        (body.noTranslateSelectors !== undefined &&
+          (!Array.isArray(body.noTranslateSelectors) ||
+            !body.noTranslateSelectors.every((selector) => typeof selector === 'string')))
       ) {
         throw new AppError('INVALID_REQUEST', 'Thiếu hoặc sai kiểu thông tin website');
       }
       result = await createSite(ctx, body as never);
+      // Preserve the original top-level fields and add the Console's `host` envelope.
+      result = { ...(result as Record<string, unknown>), host: result };
     } else if (!slug) {
       throw new AppError('NOT_FOUND', 'Không tìm thấy website');
     } else if (path.endsWith('/verify') && method === 'POST') {
