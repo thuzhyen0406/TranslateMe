@@ -87,6 +87,79 @@ describe('startPrewarm (POST /console/hosts/{slug}/prewarm)', () => {
     assert.deepEqual([job?.status, job?.reason], ['FAILED', 'START_FAILED']);
   });
 
+  it('tạo JOB trước rồi mới trỏ HOST.prewarm sang job đó', async () => {
+    const s = await setup();
+    const update = s.db.update.bind(s.db);
+    const seen: Array<string | undefined> = [];
+    s.deps.db = {
+      ...s.db,
+      async update(c, params) {
+        if (params.Key.SK.startsWith('HOST#')) {
+          const jobId = (params.ExpressionAttributeValues?.[':p'] as { jobId: string }).jobId;
+          seen.push((await s.jobs.get(c, jobId))?.status);
+        }
+        return update(c, params);
+      },
+    };
+    await startPrewarm(admin, 'homestay-abc', {}, s.deps);
+    assert.deepEqual(seen, ['QUEUED'], 'lúc ghi HOST.prewarm job đã tồn tại');
+  });
+
+  it('ghi HOST.prewarm lỗi (không phải điều kiện) -> job vừa tạo FAILED (HOST_UPDATE_FAILED), HOST giữ nguyên, không StartExecution', async () => {
+    const s = await setup();
+    const created: string[] = [];
+    const put = s.db.put.bind(s.db);
+    s.deps.db = {
+      ...s.db,
+      async put(c, item, cond) {
+        if (item.entityType === 'JOB') created.push(String(item.jobId));
+        return put(c, item, cond);
+      },
+      async update(c, params) {
+        if (params.Key.SK.startsWith('HOST#')) throw Object.assign(new Error('x'), { name: 'ProvisionedThroughputExceededException' });
+        return s.db.update(c, params);
+      },
+    };
+    await assert.rejects(startPrewarm(admin, 'homestay-abc', {}, s.deps), { name: 'ProvisionedThroughputExceededException' });
+    assert.equal(created.length, 1);
+    const job = await s.jobs.get(admin, created[0]);
+    assert.deepEqual([job?.status, job?.reason], ['FAILED', 'HOST_UPDATE_FAILED']);
+    assert.equal((await s.db.get(admin, keys.host(admin, 'homestay-abc')))?.prewarm, undefined);
+    assert.equal(s.starts.length, 0);
+  });
+
+  it('hai lần bấm đồng thời: lần kia trỏ HOST trước -> trả job của lần kia, job của mình FAILED (SUPERSEDED), chỉ một StartExecution', async () => {
+    const s = await setup();
+    const created: string[] = [];
+    const put = s.db.put.bind(s.db);
+    let raced = false;
+    const racingDb: PrewarmManagerDeps['db'] = {
+      ...s.db,
+      async put(c, item, cond) {
+        if (item.entityType === 'JOB') created.push(String(item.jobId));
+        return put(c, item, cond);
+      },
+      async update(c, params) {
+        if (!raced && params.Key.SK.startsWith('HOST#')) {
+          raced = true;
+          // Yêu cầu kia chạy trọn vẹn đúng lúc giữa bước tạo job và bước ghi HOST của yêu cầu này
+          await startPrewarm(admin, 'homestay-abc', {}, { ...s.deps, db: racingDb });
+        }
+        return s.db.update(c, params);
+      },
+    };
+    s.deps.db = racingDb;
+    const r = await startPrewarm(admin, 'homestay-abc', {}, s.deps);
+    assert.equal(created.length, 2);
+    const [mine, winner] = created;
+    assert.equal(r.existing, true);
+    assert.equal(r.job.job_id, winner);
+    assert.deepEqual(((await s.db.get(admin, keys.host(admin, 'homestay-abc')))?.prewarm as { jobId: string }).jobId, winner);
+    const lost = await s.jobs.get(admin, mine);
+    assert.deepEqual([lost?.status, lost?.reason], ['FAILED', 'SUPERSEDED']);
+    assert.deepEqual(s.starts.map((x) => x.name), [winner]);
+  });
+
   it('kiểm tra vai trò, phiên, tenant, website', async () => {
     const s = await setup();
     await assert.rejects(startPrewarm(dev, 'homestay-abc', {}, s.deps), isCode('FORBIDDEN'));
