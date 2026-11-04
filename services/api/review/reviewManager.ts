@@ -32,6 +32,7 @@ import {
 } from '../../../libs/common/invalidation.js';
 import { compareMarkers } from '../../../libs/common/markers.js';
 import { createDynamoSegDb, createSEG } from '../../../libs/common/seg.js';
+import { roleFromClaim } from '../../../libs/common/roles.js';
 import { tmKey } from '../../../libs/common/tm.js';
 import { AppError, keys, type Ctx, type Lang, type Role, type Sha256Hex } from '../../../libs/common/types.js';
 
@@ -1123,8 +1124,11 @@ export function extractReviewCtxFromEvent(event: ReviewApiGatewayEvent): Ctx {
   const tenantId = String(claims['custom:tenant_id'] ?? claims.tenant_id ?? '').trim();
   const rawRole = String(claims['custom:role'] ?? claims.role ?? '').trim();
   const sub = String(claims.sub ?? claims['cognito:username'] ?? '').trim();
+  // Cognito lưu custom:role dạng chữ thường (tenant_admin, reviewer...); chuẩn hóa về Role nội bộ.
+  const role: Role | null =
+    roleFromClaim(rawRole) ?? (VALID_ROLES.includes(rawRole as Role) ? (rawRole as Role) : null);
 
-  if (!tenantId || !sub || !VALID_ROLES.includes(rawRole as Role)) {
+  if (!tenantId || !sub || !role) {
     throw new AppError(
       'UNAUTHORIZED',
       'Phiên đăng nhập không hợp lệ hoặc thiếu thông tin xác thực (tenant_id, role, sub)',
@@ -1133,7 +1137,7 @@ export function extractReviewCtxFromEvent(event: ReviewApiGatewayEvent): Ctx {
 
   return {
     tenantId,
-    role: rawRole as Role,
+    role,
     sub,
     via: 'JWT',
     requestId,

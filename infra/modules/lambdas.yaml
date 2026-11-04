@@ -55,7 +55,8 @@ Parameters:
     Default: services/proxy/worker.handler
   ConsoleHandler:
     Type: String
-    Description: Handler exported by the packaged Console API adapter.
+    Default: services/api/console/handler.handler
+    Description: Console router (services/api/console/handler.ts) dispatching /console/* routes, including F5 review.
   TranslateHandler:
     Type: String
     Default: services/api/translate/realtime.handler

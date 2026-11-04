@@ -23,6 +23,7 @@
     "sites/**/*.ts",
     "glossary/**/*.ts",
     "review/**/*.ts",
+    "console/**/*.ts",
     "translate/**/*.ts",
     "platform/**/*.ts",
     "../../libs/common/roles.ts",

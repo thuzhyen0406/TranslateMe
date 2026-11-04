@@ -541,14 +541,14 @@ describe('Task 3.8 – Duyệt bản dịch (F5)', () => {
       version: 1,
     });
 
-    // 1. DEVELOPER bị từ chối truy cập F5 (FORBIDDEN)
+    // 1. DEVELOPER bị từ chối truy cập F5 (PERMISSION_DENIED)
     await assert.rejects(
       listTranslations(devCtx, {}, deps),
-      (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
+      (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
     );
     await assert.rejects(
       acceptTranslation(devCtx, { src: 'vi', tgt: 'en', hash: seeded.hash, expectedVersion: 1 }, deps),
-      (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
+      (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
     );
 
     // 2. Thiếu hoặc rỗng ctx.sub -> bị từ chối ngay với UNAUTHORIZED (không bỏ qua kiểm tra MEMBER)
@@ -834,6 +834,23 @@ describe('Task 3.8 – Duyệt bản dịch (F5)', () => {
     assert.equal(extracted.tenantId, TENANT_A);
     assert.equal(extracted.role, 'TENANT_ADMIN');
     assert.equal(extracted.sub, 'u_admin_01');
+  });
+
+  it('extractReviewCtxFromEvent chấp nhận claim custom:role chữ thường do Cognito tạo (tenant_admin, reviewer, developer)', () => {
+    const make = (role: string) =>
+      extractReviewCtxFromEvent({
+        requestContext: {
+          requestId: 'req-role',
+          authorizer: { claims: { 'custom:tenant_id': TENANT_A, 'custom:role': role, sub: 'u_01' } },
+        },
+      });
+    assert.equal(make('tenant_admin').role, 'TENANT_ADMIN');
+    assert.equal(make('reviewer').role, 'REVIEWER');
+    assert.equal(make('developer').role, 'DEVELOPER');
+    assert.equal(make('Reviewer').role, 'REVIEWER');
+    assert.equal(make('REVIEWER').role, 'REVIEWER');
+    assert.throws(() => make('superuser'), (err: unknown) => (err as { code?: string }).code === 'UNAUTHORIZED');
+    assert.throws(() => make(''), (err: unknown) => (err as { code?: string }).code === 'UNAUTHORIZED');
   });
 
   it('tương thích tuyệt đối với chữ ký tối thiểu đã chốt: invalidateForSentences(ctx, { src, tgt, hashes }): Promise<{ paths, mode, invalidationId? }>', async () => {
