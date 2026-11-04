@@ -1,0 +1,309 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TranslateMe Lambda execution roles. Deploy after the data and identity stacks,
+  then pass the role ARN outputs to the Lambda function stack.
+
+Parameters:
+  TableArn:
+    Type: String
+    Description: DynamoDB table ARN exported by the data stack.
+  UserPoolArn:
+    Type: String
+    Description: Cognito User Pool ARN used by PostConfirmation and member invitation.
+  PayloadBucketArn:
+    Type: String
+    Description: S3 bucket ARN used for asynchronous proxy payloads.
+  BatchUploadBucketArn:
+    Type: String
+    Description: S3 bucket ARN used for tenant batch upload objects.
+  WorkerFunctionArn:
+    Type: String
+    Description: Worker Lambda ARN invoked asynchronously by the proxy.
+  CloudFrontDistributionArn:
+    Type: String
+    Description: CloudFront distribution ARN invalidated by console/platform handlers.
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[A-Za-z0-9_-]+'
+
+Resources:
+  TenantDataAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'translateme-${StageName}-tenant-data'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-proxy'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-worker'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-console-api'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-translate-api'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-platform-api'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-post-confirmation'
+      Policies:
+        - PolicyName: tenant-data-session-maximum
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TenantPartitionDataAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:ConditionCheckItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:TransactWriteItems
+                Resource:
+                  - !Ref TableArn
+                  - !Sub '${TableArn}/index/GSI2'
+                  - !Sub '${TableArn}/index/GSI3'
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - 'TENANT#t_*'
+                      - 'TENANT#PLATFORM#SLUG#*'
+              - Sid: TenantPayloadObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${PayloadBucketArn}/worker/*'
+              - Sid: TenantBatchUploadObjects
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${BatchUploadBucketArn}/batch/*'
+
+  ProxyExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'translateme-${StageName}-proxy'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: proxy-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadPlatformSlugMapping
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Ref TableArn
+                Condition:
+                  StringLike:
+                    dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
+              - Sid: AssumeTenantDataAccessRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
+              - Sid: InvokeAsyncWorker
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Ref WorkerFunctionArn
+              - Sid: TranslateText
+                Effect: Allow
+                Action: translate:TranslateText
+                Resource: '*'
+
+  WorkerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'translateme-${StageName}-worker'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: worker-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadPlatformSlugMapping
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Ref TableArn
+                Condition:
+                  StringLike:
+                    dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
+              - Sid: AssumeTenantDataAccessRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
+              - Sid: TranslateText
+                Effect: Allow
+                Action: translate:TranslateText
+                Resource: '*'
+
+  ConsoleApiExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'translateme-${StageName}-console-api'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: console-api-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReserveWebsiteSlug
+                Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !Ref TableArn
+                Condition:
+                  StringLike:
+                    dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
+              - Sid: AssumeTenantDataAccessRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
+              - Sid: InviteTenantMembers
+                Effect: Allow
+                Action: cognito-idp:AdminCreateUser
+                Resource: !Ref UserPoolArn
+              - Sid: ImportGlossaryTerminology
+                Effect: Allow
+                Action: translate:ImportTerminology
+                Resource: '*'
+              - Sid: InvalidateWebsiteCache
+                Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: !Ref CloudFrontDistributionArn
+
+  TranslateApiExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'translateme-${StageName}-translate-api'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: translate-api-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadPlatformKeyMapping
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Ref TableArn
+                Condition:
+                  StringLike:
+                    dynamodb:LeadingKeys: 'TENANT#PLATFORM#KEY#*'
+              - Sid: AssumeTenantDataAccessRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
+              - Sid: TranslateText
+                Effect: Allow
+                Action: translate:TranslateText
+                Resource: '*'
+              - Sid: DetectSourceLanguage
+                Effect: Allow
+                Action: comprehend:DetectDominantLanguage
+                Resource: '*'
+
+  PlatformApiExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'translateme-${StageName}-platform-api'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: platform-api-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AssumeTenantDataAccessRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
+              - Sid: InvalidateWebsiteCache
+                Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: !Ref CloudFrontDistributionArn
+
+  PostConfirmationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'translateme-${StageName}-post-confirmation'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: post-confirmation-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AssumeTenantDataAccessRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt TenantDataAccessRole.Arn
+              - Sid: SetTenantClaimsOnConfirmedUser
+                Effect: Allow
+                Action: cognito-idp:AdminUpdateUserAttributes
+                Resource: !Ref UserPoolArn
+
+Outputs:
+  TenantDataAccessRoleArn:
+    Description: Target role assumed with an inline policy scoped to the request tenant.
+    Value: !GetAtt TenantDataAccessRole.Arn
+  ProxyExecutionRoleArn:
+    Description: Attach to the website proxy Lambda.
+    Value: !GetAtt ProxyExecutionRole.Arn
+  WorkerExecutionRoleArn:
+    Description: Attach to the asynchronous translation worker Lambda.
+    Value: !GetAtt WorkerExecutionRole.Arn
+  ConsoleApiExecutionRoleArn:
+    Description: Attach to the Console API Lambda (includes member invite and glossary import).
+    Value: !GetAtt ConsoleApiExecutionRole.Arn
+  TranslateApiExecutionRoleArn:
+    Description: Attach to the API-key translation Lambda.
+    Value: !GetAtt TranslateApiExecutionRole.Arn
+  PlatformApiExecutionRoleArn:
+    Description: Attach to the Platform Admin Lambda.
+    Value: !GetAtt PlatformApiExecutionRole.Arn
+  PostConfirmationExecutionRoleArn:
+    Description: Attach to the Cognito PostConfirmation trigger Lambda.
+    Value: !GetAtt PostConfirmationExecutionRole.Arn

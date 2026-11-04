@@ -10,9 +10,11 @@ type DynamoRequest = {
   Item?: Record<string, AttributeValue>;
   ConsistentRead?: boolean;
   KeyConditionExpression?: string;
+  UpdateExpression?: string;
   ExpressionAttributeValues?: Record<string, AttributeValue>;
+  ExpressionAttributeNames?: Record<string, string>;
   ConditionExpression?: string;
-  TransactItems?: Array<Record<string, unknown>>;
+  TransactItems?: Array<{ Update?: DynamoRequest; ConditionCheck?: DynamoRequest }>;
 };
 
 const requests: Array<{ target: string; body: DynamoRequest }> = [];
@@ -20,6 +22,7 @@ let server: Server;
 let dbApi: typeof import('../db.js');
 let slugExists = true;
 let configStatus = 'ACTIVE';
+let hostStatus = 'PAUSED';
 const previousEnvironment = {
   AWS_ENDPOINT_URL: process.env.AWS_ENDPOINT_URL,
   AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
@@ -64,6 +67,26 @@ before(async () => {
         }
       } else if (target.endsWith('.Query')) {
         result = { Items: [{ PK: { S: 'TENANT#tenant-1' }, SK: { S: 'HOST#one' } }] };
+      } else if (target.endsWith('.TransactWriteItems')) {
+        const update = body.TransactItems?.[0].Update;
+        if (update && body.TransactItems?.[1].ConditionCheck) {
+          const expectedStatus = update.ExpressionAttributeValues?.[':expected']?.S;
+          const reasons = configStatus !== 'ACTIVE'
+            ? [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }]
+            : hostStatus !== expectedStatus
+              ? [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }]
+              : [{ Code: 'None' }, { Code: 'None' }];
+          if (reasons.some((reason) => reason.Code === 'ConditionalCheckFailed')) {
+            response.writeHead(400, { 'content-type': 'application/x-amz-json-1.0' });
+            response.end(JSON.stringify({
+              __type: 'com.amazonaws.dynamodb.v20120810#TransactionCanceledException',
+              message: 'Transaction cancelled',
+              CancellationReasons: reasons,
+            }));
+            return;
+          }
+          hostStatus = update.ExpressionAttributeValues?.[':next']?.S ?? hostStatus;
+        }
       }
 
       response.writeHead(200, { 'content-type': 'application/x-amz-json-1.0' });
@@ -98,6 +121,7 @@ beforeEach(() => {
   requests.length = 0;
   slugExists = true;
   configStatus = 'ACTIVE';
+  hostStatus = 'PAUSED';
 });
 
 describe('types.ts', () => {
@@ -142,6 +166,51 @@ describe('db.ts', () => {
     assert.equal(requests[0].body.ConditionExpression, 'attribute_not_exists(PK)');
   });
 
+  it('updateSiteStatus chỉ đổi trạng thái nếu trạng thái hiện tại khớp', async () => {
+    await dbApi.db.updateSiteStatus(ctx, 'demo', 'PAUSED', 'ACTIVE');
+
+    const request = requests[0];
+    assert.equal(request.target.endsWith('.TransactWriteItems'), true);
+    const update = request.body.TransactItems?.[0].Update;
+    assert.deepEqual(update?.Key, {
+      PK: { S: 'TENANT#tenant-1' },
+      SK: { S: 'HOST#demo' },
+    });
+    assert.equal(update?.UpdateExpression, 'SET #status = :next, updatedAt = :updatedAt');
+    assert.equal(update?.ConditionExpression, 'attribute_exists(PK) AND #status = :expected');
+    assert.deepEqual(update?.ExpressionAttributeNames, { '#status': 'status' });
+    assert.deepEqual({
+      ':expected': update?.ExpressionAttributeValues?.[':expected'],
+      ':next': update?.ExpressionAttributeValues?.[':next'],
+    }, {
+      ':expected': { S: 'PAUSED' },
+      ':next': { S: 'ACTIVE' },
+    });
+    assert.equal(typeof update?.ExpressionAttributeValues?.[':updatedAt']?.S, 'string');
+    assert.deepEqual(request.body.TransactItems?.[1].ConditionCheck?.Key, {
+      PK: { S: 'TENANT#tenant-1' },
+      SK: { S: 'CONFIG' },
+    });
+  });
+
+  it('updateSiteStatus trả TENANT_SUSPENDED nếu CONFIG bị khóa trong transaction', async () => {
+    configStatus = 'LOCKED';
+
+    await assert.rejects(
+      dbApi.db.updateSiteStatus(ctx, 'demo', 'PAUSED', 'ACTIVE'),
+      (error: unknown) => error instanceof AppError && error.code === 'TENANT_SUSPENDED',
+    );
+  });
+
+  it('updateSiteStatus trả VERSION_CONFLICT nếu trạng thái HOST không còn khớp', async () => {
+    hostStatus = 'ACTIVE';
+
+    await assert.rejects(
+      dbApi.db.updateSiteStatus(ctx, 'demo', 'PAUSED', 'ACTIVE'),
+      (error: unknown) => error instanceof AppError && error.code === 'VERSION_CONFLICT',
+    );
+  });
+
   it('query gửi partition key và tùy chọn sort-key prefix', async () => {
     const items = await dbApi.db.query(ctx, 'TENANT#tenant-1', 'HOST#');
 
@@ -159,15 +228,15 @@ describe('db.ts', () => {
   it('từ chối đọc, ghi và query partition key thuộc tenant khác', async () => {
     await assert.rejects(
       dbApi.db.get(ctx, { PK: 'TENANT#other-tenant', SK: 'CONFIG' }),
-      (error: unknown) => error instanceof AppError && error.code === 'FORBIDDEN',
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
     await assert.rejects(
       dbApi.db.put(ctx, { PK: 'TENANT#other-tenant', SK: 'CONFIG' }),
-      (error: unknown) => error instanceof AppError && error.code === 'FORBIDDEN',
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
     await assert.rejects(
       dbApi.db.query(ctx, 'TENANT#other-tenant'),
-      (error: unknown) => error instanceof AppError && error.code === 'FORBIDDEN',
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
     assert.equal(requests.length, 0);
   });
@@ -175,8 +244,18 @@ describe('db.ts', () => {
   it('từ chối tenant có ID chỉ khác phần hậu tố của ID hiện tại', async () => {
     await assert.rejects(
       dbApi.db.get(ctx, { PK: 'TENANT#tenant-10', SK: 'CONFIG' }),
-      (error: unknown) => error instanceof AppError && error.code === 'FORBIDDEN',
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
+    assert.equal(requests.length, 0);
+  });
+
+  it('trả NOT_FOUND khi tenant rỗng hoặc dùng namespace nền tảng', async () => {
+    for (const tenantId of ['', 'PLATFORM']) {
+      await assert.rejects(
+        dbApi.db.get({ ...ctx, tenantId }, { PK: `TENANT#${tenantId}`, SK: 'CONFIG' }),
+        (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
+      );
+    }
     assert.equal(requests.length, 0);
   });
 
@@ -193,9 +272,9 @@ describe('db.ts', () => {
     await dbApi.db.transact(ctx, [{
       Put: {
         TableName: 'translate-data',
-        Item: { PK: 'TENANT#PLATFORM#SLUG#demo', SK: 'META' },
+        Item: { PK: 'TENANT#PLATFORM#SLUG#demo', SK: 'META', tenantId: ctx.tenantId },
       },
-    }]);
+    }], { platformSlugReservation: true });
     assert.equal(requests[1].target.endsWith('.TransactWriteItems'), true);
 
     await assert.rejects(
@@ -205,7 +284,7 @@ describe('db.ts', () => {
           Item: { PK: 'TENANT#other-tenant', SK: 'CONFIG' },
         },
       }]),
-      (error: unknown) => error instanceof AppError && error.code === 'FORBIDDEN',
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
     assert.equal(requests.length, 2);
   });

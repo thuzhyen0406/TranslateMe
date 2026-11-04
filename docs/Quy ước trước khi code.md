@@ -129,15 +129,81 @@ import {
   COGNITO_CUSTOM_ATTRIBUTES,
 } from '../../libs/common/roles.js';
 ```
-- **Giá trị chính xác của 4 vai trò (`ROLES`):**
-  - `ROLES.TENANT_ADMIN` = **`"Tenant Admin"`**
-  - `ROLES.DEVELOPER` = **`"Developer"`**
-  - `ROLES.REVIEWER` = **`"Reviewer"`**
-  - `ROLES.PLATFORM_ADMIN` = **`"Platform Admin"`**
+- **Quy ước role hiện đang được triển khai:**
+  - Vai trò nội bộ trong API và `Ctx`: `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER`.
+  - Giá trị `ROLES.TENANT_ADMIN`, `ROLES.DEVELOPER`, `ROLES.REVIEWER` tương ứng chính xác là `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER`; không dùng nhãn hiển thị `"Tenant Admin"`/`"Developer"`/`"Reviewer"`.
+- **Giá trị chính xác của 3 vai trò tenant trong `ROLES`:**
+  - `ROLES.TENANT_ADMIN` = **`"TENANT_ADMIN"`**
+  - `ROLES.DEVELOPER` = **`"DEVELOPER"`**
+  - `ROLES.REVIEWER` = **`"REVIEWER"`**
+- **Mã role dùng trong ma trận quyền và frontend:** `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER`.
 - **Tên claim/attribute trên Cognito User / Token:**
   - `custom:tenant_id` (`COGNITO_CUSTOM_ATTRIBUTES.TENANT_ID`) — định dạng `"t_<24_ky_tu_hex>"` (ví dụ: `"t_8f3a1c9e4b2d7a6f5e0c1b2a"`).
-  - `custom:role` (`COGNITO_CUSTOM_ATTRIBUTES.ROLE`) — chứa 1 trong các chuỗi thuộc `ROLES`.
+  - `custom:role` (`COGNITO_CUSTOM_ATTRIBUTES.ROLE`) — token claim chứa mã role tương ứng: `TENANT_ADMIN` -> `tenant_admin`, `DEVELOPER` -> `developer`, `REVIEWER` -> `reviewer`.
   - Quản trị viên hệ thống thuộc Cognito Group **`"PlatformAdmins"`** (`PLATFORM_ADMIN_GROUP`) trong claim `cognito:groups` và không có `custom:tenant_id`.
+
+| Vai trò | Role code | Giá trị Cognito claim `custom:role` |
+| :--- | :--- | :--- |
+| Tenant Admin | `TENANT_ADMIN` | `tenant_admin` |
+| Developer | `DEVELOPER` | `developer` |
+| Reviewer | `REVIEWER` | `reviewer` |
+
+**Platform Admin không dùng `custom:role`:** nhận diện duy nhất bằng group Cognito `PlatformAdmins` trong claim `cognito:groups`.
+
+#### Quyết định tương thích Cognito hiện có
+- **Quyết định:** chưa bỏ tương thích claim cũ; trong giai đoạn chuyển đổi, API và Console đều đọc cả hai dạng:
+  - dạng chuẩn mới: `tenant_admin`, `developer`, `reviewer`;
+  - dạng cũ hiện đã xuất hiện trong tài liệu vận hành: `Tenant Admin`, `Developer`, `Reviewer`.
+- Claim viết hoa theo mã nội bộ như `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER` không được chấp nhận làm `custom:role`.
+- **Mọi lần ghi mới** vào Cognito đều dùng duy nhất claim lowercase qua `claimForRole(...)` ở API hoặc ánh xạ tương đương ở Console; không ghi tên hiển thị cũ.
+- Khi thực hiện migrate toàn bộ user Cognito hiện có sang claim lowercase, phải cập nhật và chạy lại test contract rồi mới bỏ các nhánh tương thích tên hiển thị khỏi API và Console.
+
+### 4.5. Ma trận route/method/quyền từ Bảng 1.2, 2.8 và 2.9
+Các route dưới đây dùng role code ở phần 4.1 (không dùng nhãn hiển thị để authorize). `-` nghĩa là route không tồn tại, không được phép thay thế bằng `DELETE`.
+
+| Route | Method | Quyền |
+| :--- | :--- | :--- |
+| `/console/me` | `GET` | `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER`; Platform Admin nếu endpoint danh tính nền tảng tương ứng |
+| `/console/members` | `GET` | `TENANT_ADMIN` |
+| `/console/members/invite` | `POST` | `TENANT_ADMIN` |
+| `/console/members/{userSub}` | `PATCH` | `TENANT_ADMIN` |
+| `/console/members/{userSub}` | `DELETE` | Không dùng; dùng API revoke/remove do backend quy định |
+| `/console/websites` | `GET`, `POST` | `TENANT_ADMIN` |
+| `/console/websites/{slug}` | `GET`, `PATCH` | `TENANT_ADMIN` |
+| `/console/websites/{slug}/pause` | `PATCH` | `TENANT_ADMIN` |
+| `/console/websites/{slug}/resume` | `PATCH` | `TENANT_ADMIN` |
+| `/console/glossary` hoặc `/console/glossary/terms` | `GET` | `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER` |
+| `/console/glossary/terms/{term}` | `PUT`, `DELETE` | `TENANT_ADMIN`; các role khác bị chặn ghi/xóa |
+| `/console/glossary/import/preview` hoặc `POST /console/glossary/import` | `POST` | Preview glossary cho mọi role được phép đọc glossary; commit chỉ `TENANT_ADMIN` |
+| `/console/review` | `GET` | `TENANT_ADMIN`, `REVIEWER` |
+| `/console/review/{id}` | `PATCH` | `TENANT_ADMIN`, `REVIEWER` |
+| `/console/usage` | `GET` | `TENANT_ADMIN`, `DEVELOPER` |
+| `/console/api-keys` | `GET`, `POST` | `TENANT_ADMIN`, `DEVELOPER` |
+| `/console/api-keys/{keyId}/revoke` | `POST` | `TENANT_ADMIN`, `DEVELOPER` |
+| `/console/playground/*` | `POST` | `TENANT_ADMIN`, `DEVELOPER` |
+| `/console/documents/translate` | `POST` | `TENANT_ADMIN`, `DEVELOPER` |
+| `/console/platform/tenants` | `GET`, `POST` | `PlatformAdmins` |
+| `/console/platform/tenants/{tenantId}/lock` | `PATCH` | `PlatformAdmins` |
+| `/console/platform/tenants/{tenantId}/unlock` | `PATCH` | `PlatformAdmins` |
+| `/console/platform/pricing` | `GET`, `POST`, `PATCH` | `PlatformAdmins` |
+| `/console/tm/*` | `GET` | Theo quyền đọc của tenant; không có `DELETE` |
+
+Website chỉ dùng `PATCH` cho pause/resume. API key chỉ dùng thao tác `revoke`; không thêm endpoint `DELETE` cho website, Translation Memory (TM) hoặc API key.
+
+#### Token type và thứ tự xử lý lỗi
+- Mọi API dưới `/console/*` dùng **Cognito ID token**, không dùng access token, vì API phải đọc `custom:tenant_id` và `custom:role` (Platform Admin đọc `cognito:groups`).
+- Authorizer/API phải xử lý lỗi theo thứ tự: `401` -> `PERMISSION_DENIED` -> `TENANT_SUSPENDED` -> `400` -> `NOT_FOUND`.
+- Khi tenant LOCKED, API GET của console vẫn được phép đọc, nhưng mọi thao tác ghi và POST tiêu hạn mức đều bị chặn bằng `TENANT_SUSPENDED`.
+- Ngoại lệ bắt buộc của visitor proxy: mặc dù các GET của console được phép đọc khi tenant khóa, proxy visitor **vẫn phải redirect khi tenant khóa** theo quy tắc mục 3.1. Không bỏ redirect này để áp dụng chung quy tắc đọc của console.
+- `preview glossary` là thao tác POST có quyền chạy khi tenant LOCKED; mọi POST commit/import hoặc ghi quota khác đều bị chặn.
+
+#### Invalidation cache
+Mọi thay đổi lock/unlock tenant và pause/resume website phải gọi invalidation cache. Trạng thái cache hoặc redirect `302` liên quan không được giữ hơn **60 giây** (`Cache-Control: s-maxage=60` hoặc TTL tương đương).
+
+Giới hạn này phải được chứng minh bằng cùng một website cache trên CloudFront sau khi đổi trạng thái và chờ tối đa
+60 giây: resolver Lambda cache tối đa 60 giây, CloudFront response của redirect tenant/website phải dùng
+`s-maxage=60`, và invalidation wildcard theo từng slug phải hoàn tất. Nếu chưa có báo cáo/thử nghiệm xác
+nhận invalidation hoạt động trong cửa sổ 60 giây, không coi tiêu chí visitor redirect mục 3.1 là đạt.
 
 ### 4.2. Schema 2 bản ghi DynamoDB do Trigger `PostConfirmation` khởi tạo
 Khi người dùng hoàn tất xác nhận đăng ký (`PostConfirmation_ConfirmSignUp`), trigger đã ghi giao dịch `TransactWriteItems` gồm 2 bản ghi sau vào bảng `process.env.TABLE_NAME`:
@@ -215,8 +281,9 @@ const invited = await inviteMember(tenantId, email, role);
 2. **Đọc thông tin Tenant và Role sau khi đăng nhập:**
    - Lấy từ ID Token payload:
      - `payload['custom:tenant_id']` -> Mã Tenant hiện tại.
-     - `payload['custom:role']` -> `"Tenant Admin"` | `"Developer"` | `"Reviewer"`.
+     - `payload['custom:role']` -> role claim chuẩn: `"tenant_admin"` | `"developer"` | `"reviewer"`.
      - `payload['cognito:groups']` -> Nếu mảng này chứa `"PlatformAdmins"` thì điều hướng sang giao diện Quản trị nền tảng (Platform Admin).
+   - Các API `GET/POST/PATCH/...` dưới `/console/*` luôn gửi ID Token; không dùng access token để lấy tenant và role.
 3. **Xử lý đăng nhập lần đầu cho Thành viên được mời:**
    - Thành viên được mời qua `inviteMember` sẽ nhận mật khẩu tạm qua email và có trạng thái `FORCE_CHANGE_PASSWORD`.
    - Khi đăng nhập bằng mật khẩu tạm, Cognito trả về challenge **`NEW_PASSWORD_REQUIRED`** -> Console hiển thị màn hình yêu cầu nhập mật khẩu mới (tối thiểu 8 ký tự, gồm chữ hoa, chữ thường và chữ số).
