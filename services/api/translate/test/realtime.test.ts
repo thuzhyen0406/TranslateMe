@@ -32,6 +32,7 @@ function setup(options: {
   locked?: boolean;
   quotaExceeded?: boolean;
   tmWriteFails?: boolean;
+  keymapTenantId?: string;
   detected?: { language?: string; confidence?: number };
 } = {}) {
   const calls: Array<{ name: string; input: Record<string, any> }> = [];
@@ -46,6 +47,10 @@ function setup(options: {
       const input = command.input as Record<string, any>;
       calls.push({ name, input });
       if (command instanceof GetCommand) {
+        const key = input.Key as { PK?: string; SK?: string } | undefined;
+        if (key?.PK === `TENANT#PLATFORM#KEY#${KEY_ID}`) {
+          return options.keymapTenantId ? { Item: { tenantId: options.keymapTenantId } } : {};
+        }
         return {
           Item: {
             status: options.locked ? 'LOCKED' : 'ACTIVE',
@@ -169,6 +174,26 @@ function responseBody(response: { body: string }) {
 }
 
 describe('POST /translate/realtime', () => {
+  it('lấy tenant từ KEYMAP và bỏ qua tenant_id giả mạo trong body', async () => {
+    const mappedTenant = 't_aaaaaaaaaaaaaaaaaaaaaaaa';
+    const test = setup({ keymapTenantId: mappedTenant });
+    const response = await test.handler({
+      body: JSON.stringify({ text: 'Xin chào.', source_lang: 'vi', target_lang: 'en', tenant_id: 't_bbbbbbbbbbbbbbbbbbbbbbbb' }),
+      requestContext: { requestId: 'req-keymap-body', identity: { apiKeyId: KEY_ID } },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const scopedCalls = test.calls.filter((call) => ['BatchGetCommand', 'UpdateCommand'].includes(call.name));
+    assert.ok(scopedCalls.length > 0);
+    for (const call of scopedCalls) {
+      const key = call.name === 'BatchGetCommand'
+        ? call.input.RequestItems[TABLE].Keys[0]
+        : call.input.Key;
+      assert.ok(String(key.PK).startsWith(`TENANT#${mappedTenant}`));
+      assert.ok(!String(key.PK).includes('t_bbbbbbbbbbbbbbbbbbbbbbbb'));
+    }
+  });
+
   it('dịch qua cùng translateSentences cho cả vi→en, vi→ko và vi→ja', async () => {
     for (const targetLang of ['en', 'ko', 'ja']) {
       const test = setup();

@@ -9,6 +9,7 @@ import {
   COGNITO_CUSTOM_ATTRIBUTES,
   INVITABLE_ROLES,
   ROLES,
+  claimForRole,
   isInvitableRole,
 } from '../../../../libs/common/roles.js';
 import { generateTemporaryPassword, inviteMember } from '../inviteMember.js';
@@ -26,6 +27,9 @@ import {
   type CognitoPostConfirmationEvent,
   type PostConfirmationLogger,
 } from '../postConfirmation.js';
+import { contextFromIdTokenClaims } from '../context.js';
+import { db } from '../../../../libs/common/db.js';
+import { AppError } from '../../../../libs/common/types.js';
 
 // ============================================================================
 // Công cụ giả lập (Mock) DynamoDB, Cognito và Logger (không dùng mạng/AWS)
@@ -188,8 +192,9 @@ describe('PostConfirmation Trigger Handler', () => {
     assert.equal(cognitoInput.Username, 'user-sub-001');
     assert.deepEqual(cognitoInput.UserAttributes, [
       { Name: COGNITO_CUSTOM_ATTRIBUTES.TENANT_ID, Value: expectedTenantId },
-      { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: ROLES.TENANT_ADMIN },
+      { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: claimForRole(ROLES.TENANT_ADMIN) },
     ]);
+    assert.equal(claimForRole(ROLES.TENANT_ADMIN), 'tenant_admin');
   });
 
   it('[E.2] nguồn khác (PostConfirmation_ConfirmForgotPassword) -> không ghi DynamoDB, không gọi Cognito', async () => {
@@ -369,7 +374,7 @@ describe('inviteMember', () => {
       },
     };
 
-    for (const invalidRole of [ROLES.TENANT_ADMIN, ROLES.PLATFORM_ADMIN, 'SuperAdmin', '', 'admin']) {
+    for (const invalidRole of [ROLES.TENANT_ADMIN, 'PLATFORM_ADMIN', 'SuperAdmin', '', 'admin']) {
       await assert.rejects(
         () =>
           inviteMember('t_123456', 'dev@acme.io', invalidRole, {
@@ -417,7 +422,7 @@ describe('inviteMember', () => {
         { Name: 'email', Value: 'member@acme.io' },
         { Name: 'email_verified', Value: 'true' },
         { Name: COGNITO_CUSTOM_ATTRIBUTES.TENANT_ID, Value: 't_tenant_abc' },
-        { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: validRole },
+        { Name: COGNITO_CUSTOM_ATTRIBUTES.ROLE, Value: claimForRole(validRole) },
       ]);
 
       assert.equal(res.userSub, 'invited-sub-999');
@@ -441,6 +446,70 @@ describe('inviteMember', () => {
     assert.equal(isInvitableRole(ROLES.DEVELOPER), true);
     assert.equal(isInvitableRole(ROLES.REVIEWER), true);
     assert.equal(isInvitableRole(ROLES.TENANT_ADMIN), false);
-    assert.equal(isInvitableRole(ROLES.PLATFORM_ADMIN), false);
+    assert.equal(isInvitableRole('PLATFORM_ADMIN'), false);
+  });
+});
+
+describe('contextFromIdTokenClaims', () => {
+  const claims = {
+    sub: 'reviewer-sub',
+    'custom:tenant_id': 't_reviewer_tenant',
+    'custom:role': 'reviewer',
+  };
+
+  async function assertPermissionDenied(member: unknown): Promise<void> {
+    const originalGet = db.get;
+    db.get = async () => member as any;
+    try {
+      await assert.rejects(
+        contextFromIdTokenClaims(claims, 'reviewer-request'),
+        (error: unknown) =>
+          error instanceof AppError && error.code === 'PERMISSION_DENIED',
+      );
+    } finally {
+      db.get = originalGet;
+    }
+  }
+
+  for (const memberRole of [ROLES.TENANT_ADMIN, 'Tenant Admin']) {
+    it(`chấp nhận MEMBER role ${memberRole}`, async () => {
+      const originalGet = db.get;
+      db.get = async () =>
+        ({
+          status: 'ACTIVE',
+          role: memberRole,
+        } as any);
+      try {
+        const ctx = await contextFromIdTokenClaims(
+          {
+            sub: 'admin-sub',
+            'custom:tenant_id': 't_admin_tenant',
+            'custom:role': 'tenant_admin',
+          },
+          'admin-request',
+        );
+        assert.equal(ctx.role, ROLES.TENANT_ADMIN);
+      } finally {
+        db.get = originalGet;
+      }
+    });
+  }
+
+  it('từ chối MEMBER không ở trạng thái ACTIVE', async () => {
+    await assertPermissionDenied({
+      status: 'DISABLED',
+      role: ROLES.REVIEWER,
+    });
+  });
+
+  it('từ chối khi vai trò claim khác vai trò MEMBER', async () => {
+    await assertPermissionDenied({
+      status: 'ACTIVE',
+      role: ROLES.DEVELOPER,
+    });
+  });
+
+  it('từ chối khi không có MEMBER', async () => {
+    await assertPermissionDenied(null);
   });
 });
