@@ -75,7 +75,7 @@ describe('Console Lambda router (/console/{proxy+})', () => {
         put: async () => {},
         updateSiteStatus: async () => {},
       },
-      resolver: { resolve: async () => [] },
+      resolver: async () => [{ address: '93.184.216.34', family: 4 }],
       safeFetch: async () => ({ ok: true, text: async () => '' } as any),
       invalidateSites: async () => ({ status: 'SUBMITTED', invalidationIds: ['inv-1'] } as any),
       assertTenantWritable: async () => {},
@@ -149,5 +149,77 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     );
     assert.equal(routerDevRes.statusCode, 403);
     assert.equal(JSON.parse(routerDevRes.body).error?.code, 'PERMISSION_DENIED');
+  });
+
+  it('POST /console/hosts và /console/websites tạo website: trả 200 khi thành công, trả 409 DUPLICATE_SLUG khi trùng slug', async () => {
+    const adminCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'req-admin', role: 'TENANT_ADMIN', sub: 'u_admin' };
+    const validBody = {
+      homeUrl: 'https://mysite.example.com/',
+      displayName: 'My Website',
+      sourceLang: 'vi',
+      targetLangs: ['en'],
+    };
+
+    // 1. Tạo website thành công -> HTTP 200
+    const successSiteDeps = {
+      assertTenantWritable: async () => {},
+      resolver: async () => [{ address: '93.184.216.34', family: 4 }],
+      db: {
+        transact: async () => {},
+        get: async () => ({ PK: 'TENANT#t_a', SK: 'CONFIG', status: 'ACTIVE' }),
+        put: async () => {},
+        updateSiteStatus: async () => {},
+      },
+      safeFetch: async () => ({ ok: true, text: async () => '' } as any),
+      invalidateSites: async () => ({ status: 'SUBMITTED', invalidationIds: ['inv-1'] } as any),
+    };
+
+    const createSuccessRes = await handleSitesApiGatewayRoute(
+      event('/console/hosts', claims, 'POST', validBody),
+      adminCtx,
+      successSiteDeps as any,
+    );
+    assert.ok(createSuccessRes);
+    assert.equal(createSuccessRes.statusCode, 200);
+    const successBody = JSON.parse(createSuccessRes.body);
+    assert.equal(successBody.slug, 'mysite-example-com');
+    assert.equal(successBody.status, 'PENDING');
+    assert.ok(successBody.verificationCode);
+
+    // 2. Trùng slug -> createSite ném AppError('DUPLICATE_SLUG') -> HTTP 409 DUPLICATE_SLUG
+    const duplicateSiteDeps = {
+      ...successSiteDeps,
+      db: {
+        ...successSiteDeps.db,
+        transact: async () => {
+          throw Object.assign(new Error('Conditional transaction failed'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
+          });
+        },
+      },
+    };
+
+    const duplicateRes = await handleSitesApiGatewayRoute(
+      event('/console/hosts', claims, 'POST', validBody),
+      adminCtx,
+      duplicateSiteDeps as any,
+    );
+    assert.ok(duplicateRes);
+    assert.equal(duplicateRes.statusCode, 409, 'Xung đột trùng slug phải trả mã HTTP 409');
+    const duplicateBody = JSON.parse(duplicateRes.body);
+    assert.equal(duplicateBody.error?.code, 'DUPLICATE_SLUG');
+    assert.match(duplicateBody.error?.message, /Slug đã tồn tại/);
+
+    // 3. Kiểm tra qua toàn bộ router (createConsoleHandler) với alias route /console/websites
+    const siteModuleWithDeps: ConsoleRouteModule = (e, ctx) =>
+      handleSitesApiGatewayRoute(e, ctx, duplicateSiteDeps as any);
+    const handler = createConsoleHandler([siteModuleWithDeps]);
+
+    const routerDuplicateRes = await handler(
+      event('/console/websites', claims, 'POST', validBody),
+    );
+    assert.equal(routerDuplicateRes.statusCode, 409);
+    assert.equal(JSON.parse(routerDuplicateRes.body).error?.code, 'DUPLICATE_SLUG');
   });
 });

@@ -36,8 +36,21 @@ export type ConsoleRouteModule = (event: ConsoleEvent, ctx: Ctx) => Promise<Cons
 
 const HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
 
-function errorResponse(statusCode: number, code: string, message: string, requestId: string): ConsoleResponse {
-  return { statusCode, headers: HEADERS, body: JSON.stringify({ request_id: requestId, error: { code, message } }) };
+function errorResponse(
+  statusCode: number,
+  code: string,
+  message: string,
+  requestId: string,
+  details?: Record<string, unknown>,
+): ConsoleResponse {
+  return {
+    statusCode,
+    headers: HEADERS,
+    body: JSON.stringify({
+      request_id: requestId,
+      error: { code, message, ...(details ? { details } : {}) },
+    }),
+  };
 }
 
 function normalizeConsolePath(rawPath?: string): string {
@@ -59,10 +72,19 @@ function statusForConsoleError(code: string): number {
     case 'NOT_FOUND':
       return 404;
     case 'VERSION_CONFLICT':
+    case 'DUPLICATE_SLUG':
       return 409;
     case 'INVALID_REQUEST':
     case 'UNSUPPORTED_LANGUAGE':
+    case 'PLACEHOLDER_MISMATCH':
+    case 'SITE_UNREACHABLE':
+    case 'VERIFICATION_NOT_FOUND':
+    case 'VERIFICATION_CODE_MISMATCH':
+    case 'TOO_MANY_REDIRECTS':
       return 400;
+    case 'RATE_LIMITED':
+    case 'REQUEST_QUOTA_EXCEEDED':
+      return 429;
     default:
       return 500;
   }
@@ -109,10 +131,10 @@ export async function handleGlossaryApiGatewayRoute(
       headers: HEADERS,
       body: JSON.stringify(payload),
     };
-  } catch (err) {
+  } catch (err: any) {
     if (err instanceof AppError) {
       const statusCode = statusForConsoleError(err.code);
-      return errorResponse(statusCode, err.code, err.message, requestId);
+      return errorResponse(statusCode, err.code, err.message, requestId, err.details);
     }
     return errorResponse(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
   }
@@ -206,10 +228,10 @@ export async function handleSitesApiGatewayRoute(
     }
 
     return errorResponse(404, 'NOT_FOUND', 'Không tìm thấy endpoint website.', requestId);
-  } catch (err) {
+  } catch (err: any) {
     if (err instanceof AppError) {
       const statusCode = statusForConsoleError(err.code);
-      return errorResponse(statusCode, err.code, err.message, requestId);
+      return errorResponse(statusCode, err.code, err.message, requestId, err.details);
     }
     return errorResponse(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
   }
@@ -292,7 +314,7 @@ export async function handleMembersApiGatewayRoute(
   } catch (err: any) {
     if (err instanceof AppError) {
       const statusCode = statusForConsoleError(err.code);
-      return errorResponse(statusCode, err.code, err.message, requestId);
+      return errorResponse(statusCode, err.code, err.message, requestId, err.details);
     }
     if (err?.name === 'UsernameExistsException' || err?.message?.includes('tồn tại')) {
       return errorResponse(409, 'VERSION_CONFLICT', 'Thành viên đã tồn tại trên hệ thống.', requestId);
