@@ -97,6 +97,14 @@ function createMockHarness(
       }
     }
 
+    if (cond.includes('#st = :active')) {
+      if (existing?.status !== vals[':active']) {
+        throw Object.assign(new Error('Transaction cancelled: tenant not active'), {
+          name: 'TransactionCanceledException',
+        });
+      }
+    }
+
     if (cond.includes('terminologySyncedVersion < :v')) {
       const syncedVer = existing?.terminologySyncedVersion;
       if (syncedVer !== undefined && syncedVer >= vals[':v']) {
@@ -675,7 +683,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     assert.ok(elapsedMs < 100, `Expected 300x500 isStale < 100ms, got ${elapsedMs.toFixed(2)}ms`);
   });
 
-  it('handleGlossaryRoute kiểm tra chặt quyền FORBIDDEN (B.5), khớp termParam trên URL và trạng thái LOCKED', async () => {
+  it('handleGlossaryRoute kiểm tra quyền trước tài nguyên và xử lý đúng trạng thái LOCKED', async () => {
     const { deps } = createMockHarness();
 
     const reviewerCtx: Ctx = { ...adminCtx, role: 'REVIEWER' };
@@ -725,7 +733,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     assert.equal(getRes.version, 1);
     assert.equal(getRes.terms.length, 1);
 
-    // REVIEWER và DEVELOPER bị chặn 403 FORBIDDEN (theo B.5) khi gọi PUT, DELETE, POST import
+    // REVIEWER và DEVELOPER bị chặn PUT và DELETE; preview glossary được phép.
     for (const ctx of [reviewerCtx, developerCtx]) {
       await assert.rejects(
         handleGlossaryRoute(
@@ -737,7 +745,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
           },
           deps,
         ),
-        (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
+        (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
       );
 
       await assert.rejects(
@@ -746,20 +754,34 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
           { method: 'DELETE', path: '/console/glossary/terms/sông%20Hoài', termParam: 'sông Hoài' },
           deps,
         ),
-        (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
+        (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
       );
 
+      const preview = await handleGlossaryRoute(
+        ctx,
+        {
+          method: 'POST',
+          path: '/console/glossary/import/preview',
+          body: { csv: 'vi,en\nHomestay ABC,Homestay ABC', mode: 'COMMIT' },
+        },
+        deps,
+      );
+      assert.ok(preview);
+    }
+
+    // COMMIT import vẫn chỉ dành cho TENANT_ADMIN.
+    for (const ctx of [reviewerCtx, developerCtx]) {
       await assert.rejects(
         handleGlossaryRoute(
           ctx,
           {
             method: 'POST',
             path: '/console/glossary/import',
-            body: { csv: 'vi,en\nHomestay ABC,Homestay ABC', mode: 'PREVIEW' },
+            body: { csv: 'vi,en\nHomestay ABC,Homestay ABC' },
           },
           deps,
         ),
-        (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
+        (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
       );
     }
 

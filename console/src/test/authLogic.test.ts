@@ -64,7 +64,8 @@ describe('Task 2.9 – Web Console: Khung, Đăng nhập & Màn Q1', () => {
     const claims = decodeJwtClaims(session.idToken);
     assert.ok(claims);
     assert.equal(claims['custom:tenant_id'], session.tenantId);
-    assert.equal(claims['custom:role'], 'TENANT_ADMIN');
+    assert.equal(claims['custom:role'], 'tenant_admin');
+    assert.notEqual(session.accessToken, session.idToken);
   });
 
   it('cô lập danh sách thành viên (listTenantMembers & inviteTenantMember) theo từng tenantId riêng biệt', async () => {
@@ -113,8 +114,13 @@ describe('Task 2.9 – Web Console: Khung, Đăng nhập & Màn Q1', () => {
   });
 
   it('ẩn/hiện đúng danh sách menu bên trái theo từng vai trò (TENANT_ADMIN, DEVELOPER, REVIEWER)', () => {
+    assert.equal(normalizeRole('tenant_admin'), 'TENANT_ADMIN');
+    assert.equal(normalizeRole('developer'), 'DEVELOPER');
+    assert.equal(normalizeRole('reviewer'), 'REVIEWER');
     assert.equal(normalizeRole('Tenant Admin'), 'TENANT_ADMIN');
-    assert.equal(normalizeRole('TENANT_ADMIN'), 'TENANT_ADMIN');
+    assert.equal(normalizeRole('Developer'), 'DEVELOPER');
+    assert.equal(normalizeRole('Reviewer'), 'REVIEWER');
+    assert.equal(normalizeRole('TENANT_ADMIN'), null);
 
     const adminMenus = getVisibleMenuItems('TENANT_ADMIN').map((m) => m.key);
     assert.deepEqual(adminMenus, [

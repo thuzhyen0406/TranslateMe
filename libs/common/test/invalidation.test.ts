@@ -5,8 +5,11 @@ import {
   callerReferencePrefix,
   cloudFrontCdn,
   cloudFrontPath,
+  configureSiteInvalidation,
   createInvalidator,
   createMemoryCdn,
+  createSiteInvalidator,
+  invalidateForSites,
   invalidationConfigFromEnv,
   type CdnClient,
 } from '../invalidation.js';
@@ -259,5 +262,96 @@ describe('invalidationConfigFromEnv', () => {
       batchSize: 3000,
     });
     assert.equal(invalidationConfigFromEnv({ INVALIDATION_WILDCARD_THRESHOLD: 'abc' }).wildcardThreshold, 500);
+  });
+});
+
+describe('invalidateForSites (3.1/3.2 – khóa tenant, tạm dừng website)', () => {
+  const isFailed = (e: unknown) => e instanceof AppError && e.code === 'CACHE_INVALIDATION_FAILED';
+
+  it('wildcard /<slug>/* cho từng website, loại trùng, bỏ slug sai dạng, CallerReference của tenant', async () => {
+    const cdn = createMemoryCdn();
+    const metrics: unknown[][] = [];
+    const inv = createSiteInvalidator({ cdn, metric: (...a) => void metrics.push(a) });
+    const r = await inv(ctxA, { slugs: ['site-b', 'site-a', 'site-b', 'Bad_Slug', '../x'] });
+    assert.deepEqual(r.paths, ['/site-a/*', '/site-b/*']);
+    assert.equal(r.mode, 'WILDCARD');
+    assert.equal(r.status, 'SUBMITTED');
+    assert.equal(r.invalidationIds?.length, 1);
+    const item = cdn.items.get(r.invalidationIds![0])!;
+    assert.ok(item.callerReference.startsWith(callerReferencePrefix(ctxA.tenantId)));
+    assert.deepEqual(item.paths, ['/site-a/*', '/site-b/*']);
+    assert.deepEqual(metrics, [['invalidation.paths', 2, { mode: 'site' }]]);
+  });
+
+  it('chia lô tối đa 15 wildcard (giới hạn CloudFront)', async () => {
+    const cdn = createMemoryCdn();
+    const slugs = Array.from({ length: 20 }, (_, i) => `site-${String(i).padStart(2, '0')}`);
+    const r = await createSiteInvalidator({ cdn })(ctxA, { slugs });
+    assert.equal(r.invalidationIds?.length, 2);
+    assert.deepEqual([...cdn.items.values()].map((i) => i.paths.length), [15, 5]);
+  });
+
+  it('không có website -> NOTHING_TO_DO, không gọi CloudFront', async () => {
+    const cdn = createMemoryCdn({ failWith: 'ShouldNotBeCalled' });
+    const r = await createSiteInvalidator({ cdn })(ctxA, { slugs: [] });
+    assert.equal(r.status, 'NOTHING_TO_DO');
+    assert.deepEqual(r.paths, []);
+  });
+
+  it('CloudFront lỗi -> ném CACHE_INVALIDATION_FAILED; gọi lại sau khi hết lỗi thì thành công', async () => {
+    const cdn = createMemoryCdn({ failWith: 'TooManyInvalidationsInProgress' });
+    const inv = createSiteInvalidator({ cdn });
+    await assert.rejects(inv(ctxA, { slugs: ['site-a'] }), (e: unknown) => isFailed(e) && /TooManyInvalidationsInProgress/.test((e as Error).message));
+    cdn.failWith = undefined;
+    assert.equal((await inv(ctxA, { slugs: ['site-a'] })).status, 'SUBMITTED');
+  });
+
+  it('một lô lỗi trong nhiều lô vẫn ném lỗi (không báo thành công một nửa)', async () => {
+    const base = createMemoryCdn();
+    let calls = 0;
+    const cdn: CdnClient = {
+      getInvalidation: base.getInvalidation,
+      async createInvalidation(input) {
+        if (++calls === 2) throw Object.assign(new Error('x'), { name: 'Throttling' });
+        return base.createInvalidation(input);
+      },
+    };
+    const slugs = Array.from({ length: 16 }, (_, i) => `s${i}`);
+    await assert.rejects(createSiteInvalidator({ cdn })(ctxA, { slugs }), (e: unknown) => isFailed(e) && /1\/16/.test((e as Error).message));
+  });
+
+  it('createInvalidator cũng có invalidateForSites dùng chung cdn', async () => {
+    const { seg } = await scenario();
+    const cdn = createMemoryCdn();
+    const r = await createInvalidator({ seg, cdn }).invalidateForSites(ctxB, { slugs: ['site-x'] });
+    assert.ok(cdn.items.get(r.invalidationIds![0])!.callerReference.startsWith(callerReferencePrefix(ctxB.tenantId)));
+  });
+
+  it('bản mặc định: dùng cdn đã cấu hình; thiếu cdn thì NOT_CONFIGURED khi chạy local, ném lỗi khi chạy trong Lambda', async () => {
+    const lambdaName = process.env.AWS_LAMBDA_FUNCTION_NAME;
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      const cdn = createMemoryCdn();
+      configureSiteInvalidation(cdn);
+      const ok = await invalidateForSites(ctxA, { slugs: ['site-a'] });
+      assert.equal(ok.status, 'SUBMITTED');
+      assert.equal(cdn.items.size, 1);
+
+      configureSiteInvalidation(null);
+      delete process.env.AWS_LAMBDA_FUNCTION_NAME;
+      const local = await invalidateForSites(ctxA, { slugs: ['site-a'] });
+      assert.equal(local.status, 'NOT_CONFIGURED');
+      assert.deepEqual(local.paths, ['/site-a/*']);
+
+      process.env.AWS_LAMBDA_FUNCTION_NAME = 'translateme-dev-console-api';
+      await assert.rejects(invalidateForSites(ctxA, { slugs: ['site-a'] }), isFailed);
+      assert.equal((await invalidateForSites(ctxA, { slugs: [] })).status, 'NOTHING_TO_DO');
+    } finally {
+      console.warn = warn;
+      if (lambdaName === undefined) delete process.env.AWS_LAMBDA_FUNCTION_NAME;
+      else process.env.AWS_LAMBDA_FUNCTION_NAME = lambdaName;
+      configureSiteInvalidation(null);
+    }
   });
 });
