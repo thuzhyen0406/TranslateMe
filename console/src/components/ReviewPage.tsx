@@ -103,45 +103,24 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       setSelectedSiteSlug((prev) => prev || DEMO_REVIEW_SITES[0].slug);
       return;
     }
-    let cancelled = false;
-    if (api.listSites) {
-      void api
-        .listSites()
-        .then((loaded) => {
-          if (cancelled) return;
-          setSites(loaded);
-          if (loaded.length > 0) {
-            setSelectedSiteSlug((prev) =>
-              prev && loaded.some((s) => s.slug === prev) ? prev : loaded[0].slug,
-            );
-          } else {
-            setSelectedSiteSlug('');
-          }
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setSites([]);
-            setSelectedSiteSlug('');
-          }
-        });
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [api, demoMode]);
+    // Ở chế độ API thật (Cognito), backend F5 duyệt trực tiếp Translation Memory của tenant theo cặp ngôn ngữ.
+    // Bộ lọc website và trang được giới hạn ở chế độ demo cho đến khi dịch vụ C6/SEG sẵn sàng.
+    setSites([]);
+    setSelectedSiteSlug('');
+  }, [demoMode]);
 
   const currentSite = useMemo<ReviewSiteOption | null>(
-    () => sites.find((s) => s.slug === selectedSiteSlug) ?? sites[0] ?? null,
-    [sites, selectedSiteSlug],
+    () => (demoMode ? sites.find((s) => s.slug === selectedSiteSlug) ?? sites[0] ?? null : null),
+    [demoMode, sites, selectedSiteSlug],
   );
 
   const sourceLang = currentSite?.sourceLang ?? 'vi';
   const targetLangOptions = useMemo<readonly string[]>(
     () =>
-      currentSite && currentSite.targetLangs.length > 0
+      demoMode && currentSite && currentSite.targetLangs.length > 0
         ? currentSite.targetLangs
         : DEFAULT_TARGET_LANGS,
-    [currentSite],
+    [demoMode, currentSite],
   );
 
   const [targetLang, setTargetLang] = useState<string>(() => targetLangOptions[0] ?? 'en');
@@ -171,13 +150,14 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
 
   const hasAnyPageMetadata = useMemo(
     () =>
-      demoMode ||
-      Boolean(currentSite && currentSite.pages.length > 0) ||
-      items.some((it) => it.hasPageMetadata === true),
+      demoMode &&
+      (Boolean(currentSite && currentSite.pages.length > 0) ||
+        items.some((it) => it.hasPageMetadata === true)),
     [demoMode, currentSite, items],
   );
 
   const availablePages = useMemo(() => {
+    if (!demoMode) return [];
     const pageSet = new Set<string>();
     if (currentSite && currentSite.pages.length > 0) {
       const prefix = `/${currentSite.slug}/${targetLang}/`;
@@ -191,16 +171,16 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       }
     }
     return [...pageSet];
-  }, [currentSite, targetLang, items]);
+  }, [demoMode, currentSite, targetLang, items]);
 
   const loadItems = useCallback(async () => {
     setLoading(true);
     try {
       const res = await api.listTranslations({
-        slug: currentSite?.slug || undefined,
+        slug: demoMode ? currentSite?.slug || undefined : undefined,
         srcLang: sourceLang,
         tgtLang: targetLang,
-        pagePath: pageFilter || undefined,
+        pagePath: demoMode && pageFilter ? pageFilter : undefined,
         labelFilter,
         search: searchQuery,
       });
@@ -250,8 +230,27 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     return validatePlaceholders(selectedItem.srcText, draftText);
   }, [selectedItem, draftText]);
 
+  const activePollersRef = React.useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+
+  // Dọn dẹp tất cả timer polling khi component unmount
+  useEffect(() => {
+    return () => {
+      for (const timer of activePollersRef.current.values()) {
+        clearInterval(timer);
+      }
+      activePollersRef.current.clear();
+    };
+  }, []);
+
   const applyInvalidationResult = useCallback(
     (hash: string, invalidation: InvalidationOutcome) => {
+      // Hủy timer polling cũ của câu này nếu có
+      const existingTimer = activePollersRef.current.get(hash);
+      if (existingTimer) {
+        clearInterval(existingTimer);
+        activePollersRef.current.delete(hash);
+      }
+
       if (invalidation.status === 'SKIPPED_NO_PAGES') {
         setCacheStatusByHash((prev) => ({
           ...prev,
@@ -280,23 +279,48 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       }));
 
       const invId = invalidation.invalidationId ?? invalidation.invalidationIds[0];
-      if (invId) {
-        setTimeout(() => {
-          void api
-            .checkInvalidationStatus(invId)
-            .then((st) => {
-              if (st.status === 'Completed') {
-                setCacheStatusByHash((prev) => ({
-                  ...prev,
-                  [hash]: { state: 'COMPLETED', outcome: invalidation },
-                }));
-              }
-            })
-            .catch(() => {
-              // Giữ trạng thái hiện tại nếu lỗi mạng tạm thời khi hỏi tiến độ
-            });
-        }, 1200);
-      }
+      if (!invId) return;
+
+      let attempts = 0;
+      const MAX_POLL_ATTEMPTS = 20; // 20 lần * 1.5s = tối đa 30 giây
+      const POLL_INTERVAL_MS = 1500;
+
+      const timer = setInterval(() => {
+        attempts++;
+        void api
+          .checkInvalidationStatus(invId)
+          .then((st) => {
+            if (st.status === 'Completed') {
+              clearInterval(timer);
+              activePollersRef.current.delete(hash);
+              setCacheStatusByHash((prev) => ({
+                ...prev,
+                [hash]: { state: 'COMPLETED', outcome: invalidation },
+              }));
+            } else if (st.status === 'Failed') {
+              clearInterval(timer);
+              activePollersRef.current.delete(hash);
+              setCacheStatusByHash((prev) => ({
+                ...prev,
+                [hash]: {
+                  state: 'FAILED',
+                  outcome: { ...invalidation, status: 'FAILED', error: 'Làm mới bộ nhớ đệm CloudFront thất bại' },
+                },
+              }));
+            } else if (attempts >= MAX_POLL_ATTEMPTS) {
+              clearInterval(timer);
+              activePollersRef.current.delete(hash);
+            }
+          })
+          .catch(() => {
+            if (attempts >= MAX_POLL_ATTEMPTS) {
+              clearInterval(timer);
+              activePollersRef.current.delete(hash);
+            }
+          });
+      }, POLL_INTERVAL_MS);
+
+      activePollersRef.current.set(hash, timer);
     },
     [api],
   );
@@ -530,12 +554,23 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
         </div>
       </div>
 
+      {/* Thông báo phân định chế độ Demo và chế độ API thật */}
+      {!demoMode && (
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 p-3 bg-blue-50/80 border border-blue-200 rounded-xl text-xs text-blue-900">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold px-2 py-0.5 rounded bg-blue-200 text-blue-950">Chế độ API thật (F5)</span>
+            <span>Duyệt và chỉnh sửa trực tiếp bộ nhớ dịch (TM) theo cặp ngôn ngữ.</span>
+          </div>
+          <span className="text-blue-700 italic">Bộ lọc website &amp; trang được giới hạn ở chế độ demo cho đến khi dịch vụ C6/SEG sẵn sàng.</span>
+        </div>
+      )}
+
       {/* Thanh bộ lọc (Bước 1 & Bước 2 của Q4) */}
       <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           <div>
             <label className="block text-xs font-medium text-gray-700 mb-1">Website</label>
-            {sites.length > 0 ? (
+            {demoMode && sites.length > 0 ? (
               <select
                 value={currentSite?.slug ?? ''}
                 onChange={(e) => {
@@ -554,9 +589,10 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
               <select
                 value=""
                 disabled
-                className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600"
+                className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600 cursor-not-allowed"
+                title="Ở chế độ API thật, bản dịch được duyệt từ bộ nhớ dịch (TM) của tenant. Bộ lọc website khả dụng ở chế độ demo."
               >
-                <option value="">Bộ nhớ dịch dùng chung của tổ chức (TM)</option>
+                <option value="">Toàn bộ website (Bộ nhớ dịch TM)</option>
               </select>
             )}
           </div>
@@ -582,7 +618,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
 
           <div>
             <label className="block text-xs font-medium text-gray-700 mb-1">Lọc theo trang</label>
-            {hasAnyPageMetadata ? (
+            {demoMode && hasAnyPageMetadata ? (
               <select
                 value={pageFilter}
                 onChange={(e) => setPageFilter(e.target.value)}
@@ -600,9 +636,10 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
               <select
                 value=""
                 disabled
-                className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600"
+                className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-500 cursor-not-allowed"
+                title="Bộ lọc trang khả dụng ở chế độ demo. Dữ liệu thật sẽ kích hoạt khi tích hợp dịch vụ chỉ mục câu–trang SEG."
               >
-                <option value="">Tra cứu trang (SEG) khi lưu & xuất bản</option>
+                <option value="">Chỉ khả dụng ở chế độ demo (Chờ SEG)</option>
               </select>
             )}
           </div>

@@ -142,11 +142,13 @@ describe('Q4 – kiểm tra ký hiệu định dạng {n} và thông báo lỗi 
     });
     assert.equal(nothingInv.status, 'SKIPPED_NO_PAGES');
 
-    // 4. Chuẩn hóa trạng thái polling COMPLETED / Completed / IN_PROGRESS
+    // 4. Chuẩn hóa trạng thái polling COMPLETED / Completed / IN_PROGRESS / FAILED
     assert.equal(normalizeInvalidationPollStatus('COMPLETED'), 'Completed');
     assert.equal(normalizeInvalidationPollStatus('Completed'), 'Completed');
     assert.equal(normalizeInvalidationPollStatus('IN_PROGRESS'), 'InProgress');
     assert.equal(normalizeInvalidationPollStatus('InProgress'), 'InProgress');
+    assert.equal(normalizeInvalidationPollStatus('FAILED'), 'Failed');
+    assert.equal(normalizeInvalidationPollStatus('Failed'), 'Failed');
   });
 });
 
@@ -510,8 +512,11 @@ describe('createMockReviewApi – toàn bộ luồng duyệt Q4 trong chế đ�
     assert.equal(saved.invalidation.status, 'SUBMITTED');
     assert.deepEqual(saved.invalidation.paths, ['/homestay-abc/en/', '/homestay-abc/en/lien-he']);
 
-    const invStatus = await api.checkInvalidationStatus(saved.invalidation.invalidationId!);
-    assert.equal(invStatus.status, 'Completed');
+    const invStatus1 = await api.checkInvalidationStatus(saved.invalidation.invalidationId!);
+    assert.equal(invStatus1.status, 'InProgress', 'Lần poll 1 trả InProgress');
+
+    const invStatus2 = await api.checkInvalidationStatus(saved.invalidation.invalidationId!);
+    assert.equal(invStatus2.status, 'Completed', 'Lần poll 2 trả Completed');
 
     // 4. Khôi phục bản máy dịch -> MACHINE, v4, nội dung quay về machineText
     const restored = await api.restoreMachineTranslation({

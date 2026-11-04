@@ -64,8 +64,8 @@ export interface ReviewMutationResponse {
 
 export interface InvalidationStatusResponse {
   invalidationId: string;
-  /** InProgress | Completed */
-  status: 'InProgress' | 'Completed';
+  /** InProgress | Completed | Failed */
+  status: 'InProgress' | 'Completed' | 'Failed';
 }
 
 export interface ListReviewFilter {

@@ -272,9 +272,11 @@ export function invalidationFromJson(raw: Json | undefined): InvalidationOutcome
  * Chuẩn hóa trạng thái tiến độ xóa cache CloudFront không phân biệt hoa thường
  * (hỗ trợ cả 'COMPLETED' của F5 lẫn 'Completed' của CloudFront SDK).
  */
-export function normalizeInvalidationPollStatus(rawStatus: unknown): 'InProgress' | 'Completed' {
+export function normalizeInvalidationPollStatus(rawStatus: unknown): 'InProgress' | 'Completed' | 'Failed' {
   const norm = str(rawStatus).trim().toUpperCase().replace(/[\s_-]+/g, '');
-  return norm === 'COMPLETED' ? 'Completed' : 'InProgress';
+  if (norm === 'COMPLETED') return 'Completed';
+  if (norm === 'FAILED') return 'Failed';
+  return 'InProgress';
 }
 
 // ============================================================================
@@ -373,31 +375,6 @@ export function createHttpReviewApi(opts: HttpReviewApiOptions): ReviewApi {
   }
 
   return {
-    async listSites() {
-      try {
-        const data = await request('GET', '/console/websites');
-        const rawSites = Array.isArray(data.items ?? data.websites ?? data.hosts)
-          ? ((data.items ?? data.websites ?? data.hosts) as Json[])
-          : [];
-        return rawSites
-          .map((s): ReviewSiteOption => ({
-            slug: str(s.slug),
-            displayName: str(
-              s.display_name ?? s.displayName ?? s.origin_domain ?? s.originDomain ?? s.slug,
-            ),
-            sourceLang: str(s.source_lang ?? s.sourceLang) || 'vi',
-            targetLangs:
-              strs(s.target_langs ?? s.targetLangs).length > 0
-                ? strs(s.target_langs ?? s.targetLangs)
-                : ['en'],
-            pages: strs(s.pages),
-          }))
-          .filter((s) => Boolean(s.slug));
-      } catch {
-        return [];
-      }
-    },
-
     async listTranslations(filter) {
       const tabs: Array<'REVIEW' | 'MACHINE' | 'HUMAN'> =
         filter.labelFilter === 'NEEDS_REVIEW'
@@ -931,7 +908,7 @@ export function createMockReviewApi(opts: MockReviewApiOptions = {}): MockReview
       invalidationPolls.set(invalidationId, count);
       return {
         invalidationId,
-        status: count >= 1 ? 'Completed' : 'InProgress',
+        status: count >= 2 ? 'Completed' : 'InProgress',
       };
     },
 
