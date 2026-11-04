@@ -8,7 +8,7 @@ import { createSEG, segPath } from '../../../libs/common/seg.js';
 import { createTM } from '../../../libs/common/tm.js';
 import type { Ctx } from '../../../libs/common/types.js';
 import { memoryDataDb } from '../../../libs/common/test/memoryDataDb.js';
-import { createProxyHandler } from '../handler.js';
+import { createProxyHandler, s3PayloadStore } from '../handler.js';
 import {
   extractSitemapLocs,
   filterSitemapUrls,
@@ -120,7 +120,7 @@ describe('sitemap – đọc <loc> và lọc URL (hàm thuần)', () => {
 });
 
 describe('ReadSitemap', () => {
-  it('đọc sitemap của trang chủ, chia lô ghi S3 dưới prewarm/<tenant>/<job>/, JOB -> RUNNING với tổng URL × ngôn ngữ', async () => {
+  it('đọc sitemap của trang chủ, chia lô ghi S3 dưới worker/<tenant>/prewarm/<job>/, JOB -> RUNNING với tổng URL × ngôn ngữ', async () => {
     const locs = Array.from({ length: 9 }, (_, i) => `https://homestay-abc.vn/trang-${i}/`).concat(['https://evil.com/x', 'https://homestay-abc.vn/anh.jpg']);
     const s = setup({ sitemaps: { 'https://homestay-abc.vn/sitemap.xml': xml(urlset(locs)) } });
     await queued(s);
@@ -226,12 +226,12 @@ describe('PrewarmPages (C13 chế độ trang)', () => {
     assert.equal(r.pages_done + r.pages_failed, 2);
   });
 
-  it('urls_key ngoài prewarm/<tenant>/<job>/ hoặc tenant không khớp -> từ chối', async () => {
+  it('urls_key ngoài worker/<tenant>/prewarm/<job>/ hoặc tenant không khớp -> từ chối', async () => {
     const s = setup();
     const ev = await lot(s, ['']);
-    await assert.rejects(prewarmPages({ ...ev, urls_key: `prewarm/t_khac/${JOB}/lot-0000.json` }, s.deps), { name: 'INVALID_EVENT' });
+    await assert.rejects(prewarmPages({ ...ev, urls_key: `worker/t_khac/prewarm/${JOB}/lot-0000.json` }, s.deps), { name: 'INVALID_EVENT' });
     await assert.rejects(prewarmPages({ ...ev, urls_key: `${prewarmKeyPrefix(SITE.tenantId, JOB)}../x.json` }, s.deps), { name: 'INVALID_EVENT' });
-    await assert.rejects(prewarmPages({ ...ev, tenant_id: 't_khac', urls_key: `prewarm/t_khac/${JOB}/lot-0000.json` }, s.deps), { name: 'SITE_NOT_FOUND' });
+    await assert.rejects(prewarmPages({ ...ev, tenant_id: 't_khac', urls_key: `worker/t_khac/prewarm/${JOB}/lot-0000.json` }, s.deps), { name: 'SITE_NOT_FOUND' });
   });
 });
 
@@ -300,4 +300,23 @@ describe('state machine PREWARM (ASL)', () => {
     const text = JSON.stringify(asl);
     for (const sub of ['ReadSitemapFunctionArn', 'PrewarmPagesFunctionArn', 'FinishPrewarmFunctionArn', 'MarkPrewarmFailedFunctionArn']) assert.ok(text.includes(`\${${sub}}`), sub);
   });
+
+  it('khoá lô dùng được với kho S3 thật của proxy (tiền tố worker/<tenant>/ theo session policy tenant)', async () => {
+    const objects = new Map<string, string>();
+    const s3 = {
+      async send(c: { input: { Key: string; Body?: string } }) {
+        if (c.input.Body !== undefined) {
+          objects.set(c.input.Key, String(c.input.Body));
+          return {};
+        }
+        return { Body: { transformToString: async () => objects.get(c.input.Key) } };
+      },
+    };
+    const key = `${prewarmKeyPrefix(SITE.tenantId, JOB)}lot-0000.json`;
+    assert.ok(key.startsWith(`worker/${SITE.tenantId}/`));
+    const store = s3PayloadStore(s3 as never, 'payload-bucket');
+    await store.put(key, '["a/"]');
+    assert.equal(await store.get(key), '["a/"]');
+  });
 });
+
