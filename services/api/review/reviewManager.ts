@@ -21,6 +21,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { db, requireRole } from '../../../libs/common/db.js';
+import { createTenantDocumentClientRouter } from '../../../libs/common/tenantAws.js';
 import {
   cloudFrontCdn,
   createInvalidator,
@@ -155,8 +156,15 @@ export interface ReviewDependencies {
 // Phụ thuộc mặc định (kết nối CloudFront thật qua cloudFrontCdn & CLOUDFRONT_DISTRIBUTION_ID)
 // ============================================================================
 
-const defaultDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const defaultSeg = createSEG({ db: createDynamoSegDb(defaultDocClient, TABLE_NAME) });
+const rawDynamoClient = new DynamoDBClient({});
+export const defaultDocClient = createTenantDocumentClientRouter(
+  DynamoDBDocumentClient.from(rawDynamoClient),
+  {
+    roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN,
+    sessionName: 'console-review',
+  },
+);
+export const defaultSeg = createSEG({ db: createDynamoSegDb(defaultDocClient, TABLE_NAME) });
 
 let configuredCdnClient: CdnClient | null = null;
 let cachedEnvCdn: { distributionId: string; client: CdnClient } | null = null;
@@ -223,7 +231,7 @@ function getDefaultInvalidator() {
   });
 }
 
-const defaultReviewDb: ReviewDb = {
+export const defaultReviewDb: ReviewDb = {
   ...db,
   async queryGsi3(ctx: Ctx, gsi3pk: string, gsi3skPrefix?: string) {
     const allowedPrefix = `TENANT#${ctx.tenantId}#`;
@@ -237,8 +245,8 @@ const defaultReviewDb: ReviewDb = {
         new QueryCommand({
           TableName: TABLE_NAME,
           IndexName: 'GSI3',
-          KeyConditionExpression: gsi3skPrefix ? 'GSI3PK = :pk AND begins_with(GSI3SK, :sk)' : 'GSI3PK = :pk',
-          ExpressionAttributeValues: gsi3skPrefix ? { ':pk': gsi3pk, ':sk': gsi3skPrefix } : { ':pk': gsi3pk },
+          KeyConditionExpression: gsi3skPrefix ? 'GSI3PK = :gsi3pk AND begins_with(GSI3SK, :sk)' : 'GSI3PK = :gsi3pk',
+          ExpressionAttributeValues: gsi3skPrefix ? { ':gsi3pk': gsi3pk, ':sk': gsi3skPrefix } : { ':gsi3pk': gsi3pk },
           ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
         }),
       );
@@ -254,11 +262,16 @@ export function createReviewDependencies(options?: {
   cdn?: CdnClient;
   env?: Record<string, string | undefined>;
   now?: () => number;
+  docClient?: Pick<DynamoDBDocumentClient, 'send'>;
 }): ReviewDependencies {
   const cfg = invalidationConfigFromEnv(options?.env ?? process.env);
+  const activeDocClient = options?.docClient ?? defaultDocClient;
+  const activeSeg = options?.docClient
+    ? createSEG({ db: createDynamoSegDb(activeDocClient, TABLE_NAME) })
+    : defaultSeg;
   const invalidator = options?.cdn
     ? createInvalidator({
-        seg: defaultSeg,
+        seg: activeSeg,
         cdn: options.cdn,
         wildcardThreshold: cfg.wildcardThreshold,
         batchSize: cfg.batchSize,

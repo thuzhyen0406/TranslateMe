@@ -193,7 +193,9 @@ Resources:
                 Resource: '*'
               - Sid: InvalidateWebsiteCache
                 Effect: Allow
-                Action: cloudfront:CreateInvalidation
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
                 Resource: !Ref CloudFrontDistributionArn
 
   TranslateApiExecutionRole:

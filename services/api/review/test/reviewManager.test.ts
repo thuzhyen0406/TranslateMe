@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
@@ -888,5 +890,45 @@ describe('Task 3.8 – Duyệt bản dịch (F5)', () => {
     assert.equal(res.invalidation.mode, 'WILDCARD');
     assert.equal(res.invalidation.invalidationId, `inv-vi-${seeded.hash.slice(0, 6)}`);
     assert.equal(res.invalidation.status, 'SUBMITTED');
+  });
+
+  it('defaultReviewDb.queryGsi3 và defaultSeg được bọc qua tenant document router với quyền STS theo tenant', async () => {
+    // 1. Kiểm tra defaultDocClient và defaultReviewDb
+    const { defaultDocClient, defaultReviewDb, createReviewDependencies } = await import('../reviewManager.js');
+    assert.ok(defaultDocClient, 'defaultDocClient phải tồn tại');
+    assert.ok(typeof defaultReviewDb.queryGsi3 === 'function', 'defaultReviewDb phải có queryGsi3');
+
+    // 2. Chặn truy cập GSI3PK khi ctx tenant không khớp
+    await assert.rejects(
+      () => defaultReviewDb.queryGsi3!(reviewerCtx, 'TENANT#t_other#TM#REVIEW'),
+      (err: unknown) => (err as { code?: string })?.code === 'FORBIDDEN',
+    );
+
+    // 3. createReviewDependencies hỗ trợ docClient tùy biến cho SEG
+    const capturedCommands: unknown[] = [];
+    const customDocClient = {
+      send: async (cmd: unknown) => {
+        capturedCommands.push(cmd);
+        return { Items: [] };
+      },
+    };
+    const depsWithCustomDoc = createReviewDependencies({ docClient: customDocClient as any });
+    assert.ok(depsWithCustomDoc.invalidateForSentences, 'Phải tạo invalidator với custom docClient');
+  });
+
+  it('infra/modules/iam.yaml cấp quyền cloudfront:GetInvalidation cho ConsoleApiExecutionRole (sửa blocker 2)', () => {
+    const candidates = [path.resolve('infra/modules/iam.yaml'), path.resolve('../../infra/modules/iam.yaml')]; const found = candidates.find((p) => fs.existsSync(p)) || ''; const iamYaml = fs.readFileSync(found, 'utf8');
+    const consoleApiRoleSection = iamYaml.slice(iamYaml.indexOf('ConsoleApiExecutionRole:'));
+    const nextRoleIndex = consoleApiRoleSection.indexOf('TranslateApiExecutionRole:');
+    const consoleSnippet = consoleApiRoleSection.slice(0, nextRoleIndex);
+
+    assert.ok(
+      consoleSnippet.includes('cloudfront:GetInvalidation'),
+      'ConsoleApiExecutionRole phải có quyền cloudfront:GetInvalidation',
+    );
+    assert.ok(
+      consoleSnippet.includes('cloudfront:CreateInvalidation'),
+      'ConsoleApiExecutionRole phải có quyền cloudfront:CreateInvalidation',
+    );
   });
 });
