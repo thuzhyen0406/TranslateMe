@@ -5,17 +5,36 @@ import { resolve } from 'node:path';
 import { createTenantDocumentClientRouter, tenantSessionPolicy } from '../tenantAws.js';
 
 describe('tenant-scoped AWS sessions', () => {
-  it('session policy limits LeadingKeys to one tenant plus slug reservations', () => {
+  it('session policy limits LeadingKeys to one tenant without platform slug reservations', () => {
     const policy = JSON.parse(tenantSessionPolicy('t_aaaaaaaaaaaaaaaaaaaaaaaa'));
     assert.ok(policy.Statement[0].Action.includes('dynamodb:TransactWriteItems'));
     const keys = policy.Statement[0].Condition['ForAllValues:StringLike']['dynamodb:LeadingKeys'];
     assert.deepEqual(keys, [
       'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa',
       'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa#*',
-      'TENANT#PLATFORM#SLUG#*',
     ]);
     assert.ok(!keys.some((key: string) => key.includes('t_*')));
     assert.throws(() => tenantSessionPolicy('t_bad#other'), /Invalid tenant ID/);
+  });
+
+  it('only enables platform slug reservations when explicitly requested', () => {
+    const policy = JSON.parse(tenantSessionPolicy('t_aaaaaaaaaaaaaaaaaaaaaaaa', {
+      allowPlatformSlugReservation: true,
+    }));
+    assert.deepEqual(policy.Statement[1], {
+      Effect: 'Allow',
+      Action: 'dynamodb:TransactWriteItems',
+      Resource: '*',
+      Condition: {
+        'ForAllValues:StringLike': {
+          'dynamodb:LeadingKeys': [
+            'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa',
+            'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa#*',
+            'TENANT#PLATFORM#SLUG#*',
+          ],
+        },
+      },
+    });
   });
 
   it('IAM tenant role grants TransactWriteItems', () => {
@@ -29,10 +48,13 @@ describe('tenant-scoped AWS sessions', () => {
     const policy = JSON.parse(tenantSessionPolicy('t_aaaaaaaaaaaaaaaaaaaaaaaa', {
       payloadBucketArn: 'arn:aws:s3:::payloads',
       batchUploadBucketArn: 'arn:aws:s3:::uploads',
+      batchUploadKmsKeyArn: 'arn:aws:kms:ap-southeast-1:123456789012:key/batch',
     }));
-    assert.equal(policy.Statement[1].Resource, 'arn:aws:s3:::payloads/worker/t_aaaaaaaaaaaaaaaaaaaaaaaa/*');
+    assert.equal(policy.Statement[1].Resource, 'arn:aws:s3:::payloads/tenant/t_aaaaaaaaaaaaaaaaaaaaaaaa/worker/*');
     assert.equal(policy.Statement[2].Resource, 'arn:aws:s3:::uploads/batch/t_aaaaaaaaaaaaaaaaaaaaaaaa/input/*');
     assert.deepEqual(policy.Statement[2].Action, ['s3:GetObject', 's3:PutObject']);
+    assert.equal(policy.Statement[3].Resource, 'arn:aws:kms:ap-southeast-1:123456789012:key/batch');
+    assert.deepEqual(policy.Statement[3].Action, ['kms:Decrypt', 'kms:GenerateDataKey']);
   });
 
   it('routes tenant data to an STS session and platform mappings to the execution role', async () => {
@@ -58,7 +80,7 @@ describe('tenant-scoped AWS sessions', () => {
     assert.deepEqual(routed, ['tenant', 'base']);
     assert.deepEqual(assumed, ['t_aaaaaaaaaaaaaaaaaaaaaaaa']);
     assert.equal(assumeCommands[0].input.SourceIdentity, 't_aaaaaaaaaaaaaaaaaaaaaaaa');
-    assert.deepEqual(assumeCommands[0].input.Tags, [{ Key: 'tenantId', Value: 't_aaaaaaaaaaaaaaaaaaaaaaaa' }]);
+    assert.equal(assumeCommands[0].input.Tags, undefined);
     assert.ok(assumeCommands[0].input.Policy);
   });
 

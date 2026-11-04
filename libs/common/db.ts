@@ -16,6 +16,7 @@ const client = new DynamoDBClient({});
 const docClient = createTenantDocumentClientRouter(DynamoDBDocumentClient.from(client), {
   roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN,
   sessionName: 'common-db',
+  allowPlatformSlugReservation: process.env.ALLOW_PLATFORM_SLUG_RESERVATION === 'true',
 });
 const TABLE_NAME = process.env.TABLE_NAME || 'translate-data';
 

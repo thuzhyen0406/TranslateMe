@@ -8,6 +8,17 @@ type AwsCommand = { input?: Record<string, unknown> };
 type TenantCredentials = { accessKeyId: string; secretAccessKey: string; sessionToken: string; expiration?: Date };
 type TenantCredentialsProvider = () => Promise<TenantCredentials>;
 
+export class TenantAssumeRoleError extends Error {
+  constructor(
+    public readonly awsCode: string,
+    public readonly requestId: string | undefined,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'TenantAssumeRoleError';
+  }
+}
+
 function tenantFromPartitionKey(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.startsWith('TENANT#')) return undefined;
   const id = value.slice('TENANT#'.length).split('#', 1)[0];
@@ -35,7 +46,12 @@ function collectPartitionKeys(value: unknown, keys: Set<string>): void {
 /** Restricts an STS session to one tenant partition and its payload object prefixes. */
 export function tenantSessionPolicy(
   tenantId: string,
-  buckets: { payloadBucketArn?: string; batchUploadBucketArn?: string; batchUploadKmsKeyArn?: string } = {},
+  buckets: {
+    payloadBucketArn?: string;
+    batchUploadBucketArn?: string;
+    batchUploadKmsKeyArn?: string;
+    allowPlatformSlugReservation?: boolean;
+  } = {},
 ): string {
   if (!/^t_[A-Za-z0-9_-]{1,64}$/.test(tenantId)) throw new TypeError('Invalid tenant ID');
   const statements: Array<Record<string, unknown>> = [{
@@ -48,12 +64,28 @@ export function tenantSessionPolicy(
     Resource: '*',
     Condition: {
       'ForAllValues:StringLike': {
-        'dynamodb:LeadingKeys': [`TENANT#${tenantId}`, `TENANT#${tenantId}#*`, 'TENANT#PLATFORM#SLUG#*'],
+        'dynamodb:LeadingKeys': [`TENANT#${tenantId}`, `TENANT#${tenantId}#*`],
       },
     },
   }];
+  if (buckets.allowPlatformSlugReservation) {
+    statements.push({
+      Effect: 'Allow',
+      Action: 'dynamodb:TransactWriteItems',
+      Resource: '*',
+      Condition: {
+        'ForAllValues:StringLike': {
+          'dynamodb:LeadingKeys': [
+            `TENANT#${tenantId}`,
+            `TENANT#${tenantId}#*`,
+            'TENANT#PLATFORM#SLUG#*',
+          ],
+        },
+      },
+    });
+  }
   if (buckets.payloadBucketArn) {
-    statements.push({ Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject'], Resource: `${buckets.payloadBucketArn}/worker/${tenantId}/*` });
+    statements.push({ Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject'], Resource: `${buckets.payloadBucketArn}/tenant/${tenantId}/worker/*` });
   }
   if (buckets.batchUploadBucketArn) {
     statements.push({
@@ -87,21 +119,38 @@ export function createTenantCredentialsProvider(
   policy: string,
   sts: Pick<STSClient, 'send'> = new STSClient({}),
   sessionName = 'tenant',
+  logger: (message: Record<string, unknown>) => void = (message) => console.error(JSON.stringify(message)),
+  metric: (name: string) => void = () => undefined,
 ): TenantCredentialsProvider {
   let cached: TenantCredentials | undefined;
   let refreshing: Promise<TenantCredentials> | undefined;
   return async () => {
     if (cached?.expiration && cached.expiration.getTime() > Date.now() + 60_000) return cached;
     refreshing ??= (async () => {
-      const result = await sts.send(new AssumeRoleCommand({
-        RoleArn: roleArn,
-        RoleSessionName: `${sessionName}-${tenantId}`.slice(0, 64),
-        SourceIdentity: tenantId,
-        Tags: [{ Key: 'tenantId', Value: tenantId }],
-        Policy: policy,
-      })) as { Credentials?: { AccessKeyId?: string; SecretAccessKey?: string; SessionToken?: string; Expiration?: Date } };
+      let result: { Credentials?: { AccessKeyId?: string; SecretAccessKey?: string; SessionToken?: string; Expiration?: Date } };
+      try {
+        result = await sts.send(new AssumeRoleCommand({
+          RoleArn: roleArn,
+          RoleSessionName: `${sessionName}-${tenantId}`.slice(0, 64),
+          SourceIdentity: tenantId,
+          Policy: policy,
+        })) as typeof result;
+      } catch (error) {
+        const awsError = error as { name?: string; Code?: string; $metadata?: { requestId?: string } };
+        const awsCode = awsError.name ?? awsError.Code ?? 'UnknownError';
+        try {
+          metric('tenant.assume_role.failed');
+          logger({ event: 'TENANT_ASSUME_ROLE_FAILED', tenantId, roleArn, sessionName, awsCode, requestId: awsError.$metadata?.requestId });
+        } catch {
+          // Telemetry failures must not mask the security failure.
+        }
+        throw new TenantAssumeRoleError(awsCode, awsError.$metadata?.requestId, 'Không thể tạo phiên truy cập dữ liệu tenant');
+      }
       const c = result.Credentials;
-      if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken) throw new Error('STS AssumeRole returned incomplete credentials');
+      if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken) {
+        try { metric('tenant.assume_role.incomplete_credentials'); } catch {}
+        throw new TenantAssumeRoleError('IncompleteCredentials', undefined, 'STS AssumeRole returned incomplete credentials');
+      }
       cached = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration };
       return cached;
     })().finally(() => { refreshing = undefined; });
@@ -122,8 +171,12 @@ export function createTenantDocumentClientRouter(
     localFallback?: boolean;
     payloadBucketArn?: string;
     batchUploadBucketArn?: string;
+    batchUploadKmsKeyArn?: string;
+    allowPlatformSlugReservation?: boolean;
     sts?: Pick<STSClient, 'send'>;
     createClient?: (credentials: TenantCredentialsProvider) => SendClient;
+    logger?: (message: Record<string, unknown>) => void;
+    metric?: (name: string) => void;
   } = {},
 ): SendClient {
   const roleArn = options.roleArn?.trim();
@@ -142,8 +195,13 @@ export function createTenantDocumentClientRouter(
           tenantSessionPolicy(tenantId, options),
           sts,
           options.sessionName,
+          options.logger,
+          options.metric,
         );
-        return options.createClient?.(credentials) ?? DynamoDBDocumentClient.from(new DynamoDBClient({ credentials }));
+        return options.createClient?.(credentials) ?? DynamoDBDocumentClient.from(
+          new DynamoDBClient({ credentials }),
+          { marshallOptions: { removeUndefinedValues: true } },
+        );
       })();
       clients.set(tenantId, pending);
       pending.catch(() => clients.delete(tenantId));

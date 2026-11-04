@@ -571,7 +571,6 @@ function sharedFromEnv(
     ? createTenantDocumentClientRouter(DynamoDBDocumentClient.from(new DynamoDBClient({})), {
         roleArn: env.TENANT_DATA_ACCESS_ROLE_ARN,
         sessionName: 'proxy',
-        payloadBucketArn: env.TENANT_PAYLOAD_BUCKET_ARN,
       })
     : undefined;
   const tm = tableName
@@ -600,28 +599,32 @@ function sharedFromEnv(
     seg,
     getGlossaryState,
     store: bucket ? s3PayloadStore(new S3Client({}), bucket, (tenantId) => createTenantS3Client(
-      env.TENANT_DATA_ACCESS_ROLE_ARN ?? '',
+      env.TENANT_PAYLOAD_ROLE_ARN ?? '',
       tenantId,
       env.TENANT_PAYLOAD_BUCKET_ARN ?? '',
       'worker',
       'proxy-payload',
-    )) : undefined,
+    ), env.DATA_KMS_KEY_ARN) : undefined,
     quota: quotaStub((e) => logger.info(e)),
     concurrency: positive(env.TRANSLATE_CONCURRENCY, DEFAULT_CONCURRENCY),
   };
 }
 
-/** Kho S3 cho danh sách câu lớn gửi worker. Nên đặt Lifecycle xoá worker/ sau 1 ngày. */
+/** Kho S3 cho danh sách câu lớn gửi worker. Lifecycle xoá tenant/ sau 1 ngày. */
 export function s3PayloadStore(
   s3: Pick<S3Client, 'send'>,
   bucket: string,
   tenantClient?: (tenantId: string) => Pick<S3Client, 'send'>,
+  kmsKeyArn?: string,
 ): PayloadStore {
   const clients = new Map<string, Pick<S3Client, 'send'>>();
-  const clientForKey = (key: string) => {
+  const clientForKey = (key: string, expectedTenantId?: string) => {
     if (key.includes('..')) throw new Error('S3 payload key is outside a tenant prefix');
-    const match = /^worker\/(t_[A-Za-z0-9_-]{1,64})\//.exec(key);
+    const match = /^tenant\/(t_[A-Za-z0-9_-]{1,64})\/worker\//.exec(key);
     if (!match) throw new Error('S3 payload key is outside a tenant prefix');
+    if (expectedTenantId !== undefined && match[1] !== expectedTenantId) {
+      throw new Error('S3 payload key does not belong to tenant');
+    }
     if (!tenantClient) return s3;
     let client = clients.get(match[1]);
     if (!client) {
@@ -631,11 +634,17 @@ export function s3PayloadStore(
     return client;
   };
   return {
-    async put(key, body) {
-      await clientForKey(key).send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: 'application/json' }));
+    async put(key, body, tenantId) {
+      await clientForKey(key, tenantId).send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: body,
+        ContentType: 'application/json',
+        ...(kmsKeyArn ? { ServerSideEncryption: 'aws:kms' as const, SSEKMSKeyId: kmsKeyArn } : {}),
+      }));
     },
-    async get(key) {
-      const out = await clientForKey(key).send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    async get(key, tenantId) {
+      const out = await clientForKey(key, tenantId).send(new GetObjectCommand({ Bucket: bucket, Key: key }));
       return (await out.Body?.transformToString('utf-8')) ?? '[]';
     },
   };

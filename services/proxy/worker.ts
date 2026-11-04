@@ -120,7 +120,7 @@ export function createWorkerHandler(deps: WorkerDeps) {
           return reject('S3_KEY_OUTSIDE_TENANT');
         }
         if (!deps.store) return reject('NO_PAYLOAD_STORE');
-        sentences = JSON.parse(await deps.store.get(event.sentencesS3Key));
+        sentences = JSON.parse(await deps.store.get(event.sentencesS3Key, site.tenantId));
       }
       if (!validSentences(sentences)) return reject('INVALID_SENTENCES');
       res.received = sentences.length;
