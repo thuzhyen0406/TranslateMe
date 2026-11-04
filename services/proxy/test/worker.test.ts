@@ -231,6 +231,7 @@ describe('worker – kết nối AWS', () => {
 
   it('s3PayloadStore ghi và đọc đúng bucket/khoá', async () => {
     const objects = new Map<string, string>();
+    const routedTenants: string[] = [];
     const s3 = {
       async send(c: PutObjectCommand | GetObjectCommand) {
         const { Bucket, Key } = c.input;
@@ -242,10 +243,15 @@ describe('worker – kết nối AWS', () => {
         return { Body: { transformToString: async () => v } };
       },
     };
-    const store = s3PayloadStore(s3 as never, 'payload-bucket');
+    const store = s3PayloadStore(s3 as never, 'payload-bucket', (tenantId) => {
+      routedTenants.push(tenantId);
+      return s3 as never;
+    });
     await store.put('worker/t_1/a.json', '[1]');
     assert.equal(objects.get('payload-bucket/worker/t_1/a.json'), '[1]');
     assert.equal(await store.get('worker/t_1/a.json'), '[1]');
+    assert.deepEqual(routedTenants, ['t_1']);
+    await assert.rejects(store.get('worker/t_2/../secret.json'), /outside a tenant prefix/);
   });
 
   it('workerDepsFromEnv cần TABLE_NAME; đọc WORKER_BUDGET_MS', () => {
