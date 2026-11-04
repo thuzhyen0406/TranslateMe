@@ -36,6 +36,7 @@
     "../../libs/common/api-key-transaction.ts",
     "../../libs/common/tenant.ts",
     "../../libs/common/invalidation.ts",
+    "../../libs/common/cacheInvalidation.ts",
     "../../libs/common/glossary.ts",
     "../../libs/common/markers.ts",
     "../../libs/common/seg.ts",

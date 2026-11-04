@@ -22,6 +22,7 @@ import {
   type ImportTerminologyCommandOutput,
 } from '@aws-sdk/client-translate';
 import { db, requireRole } from '../../../libs/common/db.js';
+import { invalidateEdgeCache, type InvalidateCacheOptions } from '../../../libs/common/cacheInvalidation.js';
 import {
   cleanTermText,
   clearGlossaryCache,
@@ -112,6 +113,7 @@ export interface GlossaryDependencies {
   db: Pick<typeof db, 'get' | 'put' | 'query' | 'transact'> & Partial<Pick<typeof db, 'update'>>;
   translateClient: TranslateTerminologyClient;
   now: () => number;
+  invalidateCache?: (ctx: Ctx, options: InvalidateCacheOptions) => Promise<string | undefined>;
 }
 
 let defaultTranslateClient: TranslateClient | undefined;
@@ -128,7 +130,27 @@ const defaultDependencies: GlossaryDependencies = {
     send: (cmd) => getDefaultTranslateClient().send(cmd),
   },
   now: () => Date.now(),
+  invalidateCache: invalidateEdgeCache,
 };
+
+async function invalidateGlossarySites(ctx: Ctx, deps: GlossaryDependencies): Promise<void> {
+  try {
+    const hosts = await deps.db.query(ctx, `TENANT#${ctx.tenantId}`, 'HOST#');
+    await Promise.all(hosts
+      .filter((host) => host.status === 'ACTIVE' && typeof host.SK === 'string')
+      .map((host) => (deps.invalidateCache ?? invalidateEdgeCache)(ctx, {
+        slug: String(host.SK).slice('HOST#'.length),
+      })));
+  } catch (error) {
+    // A cache refresh must not undo a glossary commit.
+    console.error(JSON.stringify({
+      level: 'ERROR',
+      step: 'glossary_cache_invalidation_failed',
+      tenantId: ctx.tenantId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    }));
+  }
+}
 
 // ============================================================================
 // Đọc danh sách hiệu lực cho màn hình Quản lý Thuật ngữ (listGlossary)
@@ -645,6 +667,7 @@ export async function putTerm(
     langProfile.configuredTargetLangs,
     deps,
   );
+  await invalidateGlossarySites(ctx, deps);
 
   return { version: newVersion, terminologySynced };
 }
@@ -723,6 +746,7 @@ export async function deleteTerm(
     langProfile.configuredTargetLangs,
     deps,
   );
+  await invalidateGlossarySites(ctx, deps);
 
   return { version: newVersion, terminologySynced };
 }
@@ -1055,6 +1079,7 @@ export async function importCsv(
     langProfile.configuredTargetLangs,
     deps,
   );
+  await invalidateGlossarySites(ctx, deps);
 
   return {
     validRows: parsedEntries.length,
