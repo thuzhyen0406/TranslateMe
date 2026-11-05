@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: TranslateMe application Lambda functions, wired to the least-privilege IAM role outputs.
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+  ProxyCodeKey:
+    Type: String
+  WorkerCodeKey:
+    Type: String
+  ConsoleCodeKey:
+    Type: String
+  TranslateCodeKey:
+    Type: String
+  PlatformCodeKey:
+    Type: String
+  PostConfirmationCodeKey:
+    Type: String
+  TableName:
+    Type: String
+  PayloadBucketName:
+    Type: String
+  BatchUploadBucketName:
+    Type: String
+  PayloadBucketArn:
+    Type: String
+  BatchUploadBucketArn:
+    Type: String
+  UserPoolArn:
+    Type: String
+  CloudFrontDistributionId:
+    Type: String
+  WorkerFunctionArn:
+    Type: String
+    Description: Same ARN supplied to the IAM stack's WorkerFunctionArn parameter.
+  TenantDataAccessRoleArn:
+    Type: String
+  ProxyRoleArn:
+    Type: String
+  WorkerRoleArn:
+    Type: String
+  ConsoleRoleArn:
+    Type: String
+  TranslateRoleArn:
+    Type: String
+  PlatformRoleArn:
+    Type: String
+  PostConfirmationRoleArn:
+    Type: String
+  ProxyHandler:
+    Type: String
+    Default: services/proxy/handler.handler
+  WorkerHandler:
+    Type: String
+    Default: services/proxy/worker.handler
+  ConsoleHandler:
+    Type: String
+    Description: Handler exported by the packaged Console API adapter.
+  TranslateHandler:
+    Type: String
+    Default: services/api/translate/realtime.handler
+  PlatformHandler:
+    Type: String
+    Default: services/api/platform/handler.handler
+  PostConfirmationHandler:
+    Type: String
+    Default: services/api/auth/postConfirmation.handler
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[A-Za-z0-9_-]+'
+
+Resources:
+  ProxyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'translateme-${StageName}-proxy'
+      Runtime: nodejs22.x
+      Handler: !Ref ProxyHandler
+      Role: !Ref ProxyRoleArn
+      Timeout: 60
+      MemorySize: 1024
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref ProxyCodeKey }
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+          WORKER_PAYLOAD_BUCKET: !Ref PayloadBucketName
+          WORKER_FUNCTION_NAME: !Ref WorkerFunctionArn
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          TENANT_PAYLOAD_BUCKET_ARN: !Ref PayloadBucketArn
+
+  WorkerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'translateme-${StageName}-worker'
+      Runtime: nodejs22.x
+      Handler: !Ref WorkerHandler
+      Role: !Ref WorkerRoleArn
+      Timeout: 240
+      MemorySize: 1024
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref WorkerCodeKey }
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+          WORKER_PAYLOAD_BUCKET: !Ref PayloadBucketName
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          TENANT_PAYLOAD_BUCKET_ARN: !Ref PayloadBucketArn
+
+  ConsoleFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'translateme-${StageName}-console-api'
+      Runtime: nodejs22.x
+      Handler: !Ref ConsoleHandler
+      Role: !Ref ConsoleRoleArn
+      Timeout: 30
+      MemorySize: 512
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref ConsoleCodeKey }
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+          USER_POOL_ARN: !Ref UserPoolArn
+          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistributionId
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+
+  TranslateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'translateme-${StageName}-translate-api'
+      Runtime: nodejs22.x
+      Handler: !Ref TranslateHandler
+      Role: !Ref TranslateRoleArn
+      Timeout: 60
+      MemorySize: 1024
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref TranslateCodeKey }
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+          BATCH_UPLOAD_BUCKET: !Ref BatchUploadBucketName
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          TENANT_BATCH_UPLOAD_BUCKET_ARN: !Ref BatchUploadBucketArn
+
+  PlatformFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'translateme-${StageName}-platform-api'
+      Runtime: nodejs22.x
+      Handler: !Ref PlatformHandler
+      Role: !Ref PlatformRoleArn
+      Timeout: 60
+      MemorySize: 512
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref PlatformCodeKey }
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistributionId
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+
+  PostConfirmationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'translateme-${StageName}-post-confirmation'
+      Runtime: nodejs22.x
+      Handler: !Ref PostConfirmationHandler
+      Role: !Ref PostConfirmationRoleArn
+      Timeout: 30
+      MemorySize: 256
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref PostConfirmationCodeKey }
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+
+  CognitoInvokePostConfirmation:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PostConfirmationFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !Ref UserPoolArn
+
+Outputs:
+  ProxyFunctionArn:
+    Value: !GetAtt ProxyFunction.Arn
+  WorkerFunctionArn:
+    Value: !GetAtt WorkerFunction.Arn
+  ConsoleFunctionArn:
+    Value: !GetAtt ConsoleFunction.Arn
+  TranslateFunctionArn:
+    Value: !GetAtt TranslateFunction.Arn
+  PlatformFunctionArn:
+    Value: !GetAtt PlatformFunction.Arn
+  PostConfirmationFunctionArn:
+    Value: !GetAtt PostConfirmationFunction.Arn
+

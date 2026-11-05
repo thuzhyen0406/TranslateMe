@@ -1,11 +1,13 @@
 /**
- * sites – tra cấu hình website theo slug cho Lambda proxy (F2 bước 1 – Nhiệm vụ 1.6, TV2).
- *
- * Tuần 1 chưa có lớp truy cập DynamoDB (1.7 của TV3, 2.2 của TV1), nên proxy đọc danh sách website
- * từ biến môi trường PROXY_SITES_JSON. Khi có DynamoDB, chỉ cần viết một SiteResolver khác:
- *   GetItem (đọc nhất quán) TENANT#PLATFORM#SLUG#<slug> -> tenantId, rồi BatchGetItem HOST + CONFIG.
- * Handler không phải sửa. Kết quả được lưu đệm trong bộ nhớ Lambda 60 giây (cachedSiteResolver).
+ * Tra cứu website cho Lambda proxy bằng DynamoDB.
+ * Resolver được lưu đệm tối đa 60 giây bởi cachedSiteResolver.
  */
+import { BatchGetCommand, GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { keys } from '../../libs/common/types.js';
+
+import { MAX_PAGE_CACHE_SECONDS } from '../../libs/common/seg.js';
+
+export { MAX_PAGE_CACHE_SECONDS };
 
 export type SiteStatus = 'PENDING' | 'ACTIVE' | 'PAUSED';
 export type TenantStatus = 'ACTIVE' | 'LOCKED';
@@ -21,7 +23,11 @@ export interface SiteConfig {
   targetLangs: string[];
   /** Bộ chọn CSS vùng không dịch (Q2) */
   exclusionSelectors?: string[];
-  /** Thời gian lưu đệm trang dịch đầy đủ ở CloudFront (giây). Mặc định DEFAULT_CACHE_SECONDS */
+  /**
+   * Thời gian lưu đệm trang dịch đầy đủ ở CloudFront (giây). Mặc định DEFAULT_CACHE_SECONDS, tối đa
+   * MAX_PAGE_CACHE_SECONDS (7 ngày) để luôn ngắn hơn TTL của SEG (30 ngày) – nếu không, SEG có thể hết hạn
+   * trước cache và xóa cache chọn lọc sẽ sót trang.
+   */
   cacheSeconds?: number;
   /** Trạng thái HOST */
   status: SiteStatus;
@@ -70,6 +76,9 @@ export function validateSiteConfig(raw: unknown): SiteConfig {
     ? o.exclusionSelectors.filter((s): s is string => typeof s === 'string' && s.trim() !== '')
     : [];
   const cacheSeconds = typeof o.cacheSeconds === 'number' && o.cacheSeconds > 0 ? Math.floor(o.cacheSeconds) : DEFAULT_CACHE_SECONDS;
+  if (cacheSeconds > MAX_PAGE_CACHE_SECONDS) {
+    throw new Error(`cacheSeconds tối đa ${MAX_PAGE_CACHE_SECONDS} giây (7 ngày), ngắn hơn TTL của chỉ mục SEG (${slug})`);
+  }
   const status = (o.status ?? 'ACTIVE') as SiteStatus;
   if (!['PENDING', 'ACTIVE', 'PAUSED'].includes(status)) throw new Error(`status không hợp lệ (${slug})`);
   const tenantStatus = (o.tenantStatus ?? 'ACTIVE') as TenantStatus;
@@ -116,5 +125,107 @@ export function cachedSiteResolver(inner: SiteResolver, ttlMs = SITE_CACHE_TTL_M
     const value = await inner(slug);
     cache.set(slug, { at: now(), value });
     return value;
+  };
+}
+
+/** Lỗi tạm thời khi tra website (DynamoDB lỗi hoặc bị bóp băng thông): proxy trả 503 no-store, không cache "không tìm thấy". */
+export class SiteLookupUnavailable extends Error {
+  constructor(reason: string) {
+    super(`Không tra được website: ${reason}`);
+    this.name = 'SiteLookupUnavailable';
+  }
+}
+
+export interface DynamoSiteResolverOptions {
+  /** Số lần gửi BatchGet tối đa khi còn UnprocessedKeys (mặc định 4) */
+  maxAttempts?: number;
+  sleep?: (ms: number) => Promise<void>;
+  /** Ghi log khi bản ghi HOST/CONFIG sai dạng (website coi như không tồn tại) */
+  onInvalidConfig?: (e: { slug: string; tenantId: string; error: string }) => void;
+}
+
+const sleepMs = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Tra website từ DynamoDB: SLUG -> tenantId, rồi BatchGet HOST + CONFIG (đọc mạnh).
+ *  - UnprocessedKeys (bị bóp băng thông) được gửi lại có backoff; hết lượt vẫn còn thì ném SiteLookupUnavailable,
+ *    KHÔNG trả null (null = 404 bị lưu đệm 60 s).
+ *  - Lỗi DynamoDB được bọc thành SiteLookupUnavailable để handler trả 503 no-store.
+ *  - HOST/CONFIG sai dạng (validateSiteConfig ném lỗi) thì ghi log và trả null.
+ */
+export function dynamoSiteResolver(
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+  o: DynamoSiteResolverOptions = {},
+): SiteResolver {
+  const maxAttempts = Math.max(1, o.maxAttempts ?? 4);
+  const sleep = o.sleep ?? sleepMs;
+  const errName = (e: unknown) => (e instanceof Error ? e.name : 'UnknownError');
+
+  return async (slug: string): Promise<SiteConfig | null> => {
+    if (!SLUG_RE.test(slug)) return null;
+
+    let slugResult;
+    try {
+      slugResult = await docClient.send(new GetCommand({
+        TableName: tableName,
+        Key: keys.slug(slug),
+        ConsistentRead: true,
+      }));
+    } catch (err) {
+      throw new SiteLookupUnavailable(errName(err));
+    }
+    if (!slugResult.Item) return null;
+
+    const tenantId = slugResult.Item.tenantId;
+    if (typeof tenantId !== 'string' || !tenantId || tenantId === 'PLATFORM') return null;
+
+    const items: Record<string, unknown>[] = [];
+    let pending: Record<string, unknown>[] | undefined = [
+      { PK: `TENANT#${tenantId}`, SK: `HOST#${slug}` },
+      { PK: `TENANT#${tenantId}`, SK: 'CONFIG' },
+    ];
+    for (let attempt = 1; pending?.length; attempt++) {
+      if (attempt > maxAttempts) throw new SiteLookupUnavailable('UnprocessedKeys');
+      if (attempt > 1) await sleep(50 * 2 ** (attempt - 2));
+      let batch;
+      try {
+        batch = await docClient.send(new BatchGetCommand({
+          RequestItems: { [tableName]: { Keys: pending, ConsistentRead: true } },
+        }));
+      } catch (err) {
+        throw new SiteLookupUnavailable(errName(err));
+      }
+      items.push(...(batch.Responses?.[tableName] ?? []));
+      pending = batch.UnprocessedKeys?.[tableName]?.Keys as Record<string, unknown>[] | undefined;
+    }
+
+    const host = items.find((item) => item.SK === `HOST#${slug}`);
+    const config = items.find((item) => item.SK === 'CONFIG');
+    if (!host || !config) return null;
+
+    const tenantStatus = config.status === 'LOCKED' ? 'LOCKED' : config.status === 'ACTIVE' ? 'ACTIVE' : null;
+    if (!tenantStatus) return null;
+
+    try {
+      return validateSiteConfig({
+        slug,
+        tenantId,
+        homeUrl: host.homeUrl,
+        sourceLang: host.sourceLang,
+        targetLangs: host.targetLangs,
+        exclusionSelectors: host.noTranslateSelectors ?? host.exclusionSelectors,
+        cacheSeconds: host.cacheTtlSec ?? host.cacheSeconds,
+        status: host.status,
+        tenantStatus,
+      });
+    } catch (err) {
+      try {
+        o.onInvalidConfig?.({ slug, tenantId, error: err instanceof Error ? err.message : 'UnknownError' });
+      } catch {
+        // log không làm hỏng yêu cầu
+      }
+      return null;
+    }
   };
 }

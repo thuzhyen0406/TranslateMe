@@ -1,7 +1,7 @@
 /**
  * Lambda proxy F2 (Nhiệm vụ 1.6, 2.4, 2.5 – TV2). Thứ tự theo B.10:
  *   resolve website -> safe_fetch -> extract (tách câu {n}) -> hash -> getTM -> reserveChars
- *   -> translateSentences (B.9) -> putMachineTM -> rebuild -> settleUsage -> (worker) -> trả về.
+ *   -> translateSentences (B.9) -> putMachineTM + ghi SEG -> rebuild -> settleUsage -> (worker) -> trả về.
  * Gọi qua Lambda function URL (AWS_IAM) phía sau CloudFront + OAC; đường dẫn luôn có dạng /{slug}/{lang}/{path}.
  *
  * Phản hồi (B.10):
@@ -14,11 +14,13 @@
  * Đọc thuật ngữ (getGlossaryState) lỗi -> xử lý như lỗi tra TM: bỏ qua TM (không tra, không ghi, không gọi worker),
  * dịch không kèm terminology và cache ngắn (s-maxage=60) để sớm dịch lại khi thuật ngữ đọc được.
  * Bản HUMAN lỗi thời theo thuật ngữ vẫn dùng, và được ghi cờ "Cần xem lại" (markHumanNeedsReview).
+ * Bước 7 (3.4): ghi chỉ mục câu–trang SEG cho mọi câu của trang, <path> gồm slug (QC-5). Ghi SEG lỗi không làm
+ * hỏng trang nhưng trả cache ngắn (s-maxage=60): thiếu SEG thì xóa cache chọn lọc (F5) có thể sót trang này.
  *
  * Bản tạm (B.14): hash câu và countChars chờ thư viện 1.8; getGlossaryState chờ 2.8; db chờ batchGet/update của 2.2;
- * reserveChars/settleUsage chờ 2.7 (quotaStub). Chưa làm: ghi SEG (3.4).
+ * reserveChars/settleUsage chờ 2.7 (quotaStub); db của SEG chờ batchWrite/query GSI của 2.2.
  *
- * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), PROXY_SITES_JSON, TABLE_NAME (bật TM),
+ * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), TABLE_NAME (DynamoDB; website/TM và SEG),
  * TRANSLATE_BUDGET_MS (20000), TRANSLATE_CONCURRENCY (4), WORKER_FUNCTION_NAME (bật hoàn tất nền),
  * WORKER_PAYLOAD_BUCKET (S3 cho danh sách câu lớn), WORKER_BUDGET_MS (240000), USE_FETCH_STUB=1.
  */
@@ -27,10 +29,12 @@ import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { TranslateClient } from '@aws-sdk/client-translate';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { createTenantDocumentClientRouter, createTenantS3Client } from '../../libs/common/tenantAws.js';
 import { extract } from '../../libs/common/extract.js';
 import { DEFAULT_PUBLIC_BASE_URL, rebuildDetailed, type BaseMode } from '../../libs/common/rebuild.js';
 import { safe_fetch as realSafeFetch, type SafeFetchCompatResult } from '../../libs/common/safeFetch.js';
 import { safe_fetch as stubSafeFetch } from '../../libs/common/safeFetch.stub.js';
+import { MAX_PAGE_CACHE_SECONDS, createDynamoSegDb, createSEG, segPath } from '../../libs/common/seg.js';
 import { createDynamoTmDb, createTM, type GlossaryState, type SentenceWithHash, type TmHit } from '../../libs/common/tm.js';
 import {
   DEFAULT_TRANSLATE_CONCURRENCY,
@@ -45,9 +49,11 @@ import {
   LANG_RE,
   SLUG_RE,
   cachedSiteResolver,
+  dynamoSiteResolver,
   parseSitesJson,
-  staticSiteResolver,
+  type SiteConfig,
   type SiteResolver,
+  staticSiteResolver,
 } from './sites.js';
 import { countCharsStub, getGlossaryStateStub, hashSentenceStub } from './stubs.js';
 import { emptyReservation, isCharQuotaExceeded, quotaStub, type QuotaApi, type Reservation } from './usage.js';
@@ -94,6 +100,8 @@ export interface ProxyDeps {
   logger?: ProxyLogger;
   /** Translation Memory (2.4). Không truyền = không dùng TM (như bản tuần 1). */
   tm?: ReturnType<typeof createTM>;
+  /** Chỉ mục câu–trang SEG (3.4). Không truyền = không ghi SEG. */
+  seg?: ReturnType<typeof createSEG>;
   getGlossaryState?: (ctx: Ctx) => Promise<GlossaryState>;
   hashSentence?: (text: string) => Sha256Hex;
   countChars?: (text: string) => number;
@@ -218,8 +226,17 @@ export function createProxyHandler(deps: ProxyDeps) {
     if (!parsed) return finish(textResponse(404, 'Not Found'), { outcome: 'BAD_PATH' });
     Object.assign(log, { slug: parsed.slug, lang: parsed.lang });
 
-    // Bước 1: tra website
-    const site = await deps.resolveSite(parsed.slug);
+    // Bước 1: tra website. Lỗi tra cứu (DynamoDB lỗi, bị bóp băng thông, bug) không được thành 404 bị cache
+    // hay 502: trả 503 no-store để CloudFront không lưu và Visitor tải lại là được (QC-8).
+    let site: SiteConfig | null;
+    try {
+      site = await deps.resolveSite(parsed.slug);
+    } catch (err) {
+      logger.error({ ...log, action: 'SITE_LOOKUP_FAILED', error: err instanceof Error ? err.name : 'Unknown' });
+      const res = textResponse(503, 'Service Unavailable');
+      res.headers['retry-after'] = '5';
+      return finish(res, { outcome: 'SITE_LOOKUP_FAILED' });
+    }
     if (!site) return finish(textResponse(404, 'Not Found', 'public, max-age=0, s-maxage=60'), { outcome: 'UNKNOWN_SLUG' });
     const originUrl = buildOriginUrl(site.homeUrl, parsed.rest, event.rawQueryString ?? '');
     if (!originUrl) return finish(textResponse(404, 'Not Found'), { outcome: 'OUTSIDE_SITE' });
@@ -310,6 +327,19 @@ export function createProxyHandler(deps: ProxyDeps) {
         for (const t of tr.translated) translations[t.id] = t.tgt;
       }
 
+      // Bước 7: ghi chỉ mục câu–trang SEG cho mọi câu của trang (kể cả câu chưa dịch), song song với ghi TM.
+      // Không phụ thuộc thuật ngữ hay hạn mức: câu đã nằm trên trang thì trang phải bị xóa cache khi câu đổi.
+      const segDone = (async () => {
+        if (!deps.seg || !items.length) return;
+        try {
+          const rep = await deps.seg.writePageSegments(ctx, tgt, segPath(site.slug, parsed.rest), items.map((it) => it.hash));
+          extra.segWritten = rep.written;
+          if (rep.failed) Object.assign(extra, { segWriteFailed: rep.failed, segWriteErrors: rep.errors.slice(0, 3) });
+        } catch (err) {
+          extra.segWriteError = err instanceof Error ? err.name : 'Unknown';
+        }
+      })();
+
       // Ghi bản MACHINE mới vào TM (không đè HUMAN) và ghi cờ "Cần xem lại" cho HUMAN lỗi thời, song song
       if (deps.tm && glossary) {
         const tm = deps.tm;
@@ -351,6 +381,7 @@ export function createProxyHandler(deps: ProxyDeps) {
         };
         await Promise.all([writeMachine(), flagHuman()]);
       }
+      await segDone;
 
       // Bước 6: ráp HTML
       const rb = rebuildDetailed(ex.skeletonHtml, translations, ex.placeholders, {
@@ -418,13 +449,31 @@ export function createProxyHandler(deps: ProxyDeps) {
       }
 
       // Bước 8: trả về CloudFront
+      // Đọc lại trạng thái sau toàn bộ công việc dịch để một Lambda warm không trả
+      // trang ACTIVE cũ sau khi tenant/site vừa bị khóa hoặc pause.
+      let currentSite: SiteConfig | null;
+      try {
+        currentSite = await deps.resolveSite(parsed.slug);
+      } catch (err) {
+        logger.error({ ...log, action: 'SITE_STATUS_RECHECK_FAILED', error: err instanceof Error ? err.name : 'Unknown' });
+        const unavailable = textResponse(503, 'Service Unavailable');
+        unavailable.headers['retry-after'] = '5';
+        return finish(unavailable, { outcome: 'SITE_STATUS_RECHECK_FAILED' });
+      }
+      if (!currentSite || currentSite.tenantId !== site.tenantId || currentSite.status !== 'ACTIVE' || currentSite.tenantStatus !== 'ACTIVE') {
+        return finish(redirect(originUrl, 'public, max-age=0, s-maxage=60'), { outcome: 'SITE_BECAME_INACTIVE' });
+      }
+
       const partial = quotaExceeded ? 'quota' : rb.stats.keptSource > 0 ? '1' : null;
-      // Dịch không kèm thuật ngữ (đọc thuật ngữ lỗi): cache ngắn như trang dịch dở
+      // Cache ngắn như trang dịch dở khi: dịch không kèm thuật ngữ (đọc thuật ngữ lỗi), hoặc ghi SEG lỗi
+      // (thiếu SEG thì xóa cache chọn lọc có thể sót trang này, nên không để CloudFront giữ lâu).
+      const segIncomplete = extra.segWriteFailed !== undefined || extra.segWriteError !== undefined;
       const sMaxAge = quotaExceeded
         ? QUOTA_PARTIAL_CACHE_SECONDS
-        : partial || extra.glossaryError !== undefined
+        : partial || extra.glossaryError !== undefined || segIncomplete
           ? PARTIAL_CACHE_SECONDS
-          : site.cacheSeconds ?? DEFAULT_CACHE_SECONDS;
+          : // Chặn trên cả khi SiteResolver không qua validateSiteConfig: cache phải ngắn hơn TTL của SEG
+            Math.min(site.cacheSeconds ?? DEFAULT_CACHE_SECONDS, MAX_PAGE_CACHE_SECONDS);
       const headers: Record<string, string> = {
         'content-type': 'text/html; charset=utf-8',
         'content-language': parsed.lang,
@@ -475,36 +524,94 @@ export function createProxyHandler(deps: ProxyDeps) {
 const positive = (v: string | undefined, d: number): number => (Number(v) > 0 ? Number(v) : d);
 
 /** Phần cấu hình proxy và worker dùng chung. */
-function sharedFromEnv(env: NodeJS.ProcessEnv, logger: ProxyLogger) {
-  let sites: ReturnType<typeof parseSitesJson> = [];
-  try {
-    sites = parseSitesJson(env.PROXY_SITES_JSON);
-  } catch (err) {
-    logger.error({ action: 'INVALID_PROXY_SITES_JSON', message: String(err).slice(0, 200) });
-  }
+function sharedFromEnv(
+  env: NodeJS.ProcessEnv,
+  logger: ProxyLogger,
+  resolveSiteOverride?: SiteResolver,
+) {
   const tableName = env.TABLE_NAME?.trim();
+  const useStaticSiteConfig = Boolean(env.PROXY_SITES_JSON?.trim() && !env.AWS_LAMBDA_FUNCTION_NAME);
+  let staticResolver: SiteResolver = cachedSiteResolver(async () => null);
+  if (!resolveSiteOverride) {
+    if (useStaticSiteConfig) {
+      try {
+        staticResolver = staticSiteResolver(parseSitesJson(env.PROXY_SITES_JSON));
+      } catch (err) {
+        logger.error({
+          action: 'INVALID_PROXY_SITES_JSON',
+          error: err instanceof Error ? err.name : 'Unknown',
+        });
+      }
+    } else if (!tableName) {
+      // Chế độ DynamoDB (có TABLE_NAME) không cần PROXY_SITES_JSON nên không ghi log lỗi
+      logger.error({ action: 'NO_SITE_SOURCE', reason: 'MISSING_TABLE_NAME_AND_PROXY_SITES_JSON' });
+    }
+  }
+  const documentClient = tableName
+    ? createTenantDocumentClientRouter(DynamoDBDocumentClient.from(new DynamoDBClient({})), {
+        roleArn: env.TENANT_DATA_ACCESS_ROLE_ARN,
+        sessionName: 'proxy',
+        payloadBucketArn: env.TENANT_PAYLOAD_BUCKET_ARN,
+      })
+    : undefined;
   const tm = tableName
-    ? createTM({ db: createDynamoTmDb(DynamoDBDocumentClient.from(new DynamoDBClient({})), tableName), writer: 'proxy' })
+    ? createTM({ db: createDynamoTmDb(documentClient!, tableName), writer: 'proxy' })
+    : undefined;
+  const seg = tableName
+    ? createSEG({ db: createDynamoSegDb(documentClient!, tableName) })
     : undefined;
   if (!tm) logger.error({ action: 'TM_DISABLED', reason: 'MISSING_TABLE_NAME' });
+  if (!seg) logger.error({ action: 'SEG_DISABLED', reason: 'MISSING_TABLE_NAME' });
   const bucket = env.WORKER_PAYLOAD_BUCKET?.trim();
   return {
-    resolveSite: cachedSiteResolver(staticSiteResolver(sites)),
+    resolveSite: resolveSiteOverride ?? (
+      useStaticSiteConfig
+        ? staticResolver
+        : documentClient && tableName
+          ? dynamoSiteResolver(documentClient as DynamoDBDocumentClient, tableName, {
+                onInvalidConfig: (e) => logger.error({ action: 'INVALID_SITE_CONFIG', ...e }),
+              })
+          : staticResolver
+    ),
     tm,
-    store: bucket ? s3PayloadStore(new S3Client({}), bucket) : undefined,
+    seg,
+    store: bucket ? s3PayloadStore(new S3Client({}), bucket, (tenantId) => createTenantS3Client(
+      env.TENANT_DATA_ACCESS_ROLE_ARN ?? '',
+      tenantId,
+      env.TENANT_PAYLOAD_BUCKET_ARN ?? '',
+      'worker',
+      'proxy-payload',
+    )) : undefined,
     quota: quotaStub((e) => logger.info(e)),
     concurrency: positive(env.TRANSLATE_CONCURRENCY, DEFAULT_CONCURRENCY),
   };
 }
 
 /** Kho S3 cho danh sách câu lớn gửi worker. Nên đặt Lifecycle xoá worker/ sau 1 ngày. */
-export function s3PayloadStore(s3: Pick<S3Client, 'send'>, bucket: string): PayloadStore {
+export function s3PayloadStore(
+  s3: Pick<S3Client, 'send'>,
+  bucket: string,
+  tenantClient?: (tenantId: string) => Pick<S3Client, 'send'>,
+): PayloadStore {
+  const clients = new Map<string, Pick<S3Client, 'send'>>();
+  const clientForKey = (key: string) => {
+    if (key.includes('..')) throw new Error('S3 payload key is outside a tenant prefix');
+    const match = /^worker\/(t_[A-Za-z0-9_-]{1,64})\//.exec(key);
+    if (!match) throw new Error('S3 payload key is outside a tenant prefix');
+    if (!tenantClient) return s3;
+    let client = clients.get(match[1]);
+    if (!client) {
+      client = tenantClient(match[1]);
+      clients.set(match[1], client);
+    }
+    return client;
+  };
   return {
     async put(key, body) {
-      await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: 'application/json' }));
+      await clientForKey(key).send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: 'application/json' }));
     },
     async get(key) {
-      const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+      const out = await clientForKey(key).send(new GetObjectCommand({ Bucket: bucket, Key: key }));
       return (await out.Body?.transformToString('utf-8')) ?? '[]';
     },
   };
@@ -522,8 +629,12 @@ export function lambdaWorkerInvoker(lambda: Pick<LambdaClient, 'send'>, function
   };
 }
 
-export function depsFromEnv(env: NodeJS.ProcessEnv = process.env, logger: ProxyLogger = defaultLogger): ProxyDeps {
-  const shared = sharedFromEnv(env, logger);
+export function depsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  logger: ProxyLogger = defaultLogger,
+  resolveSiteOverride?: SiteResolver,
+): ProxyDeps {
+  const shared = sharedFromEnv(env, logger, resolveSiteOverride);
   const baseMode: BaseMode = env.BASE_MODE === 'host' ? 'host' : 'path';
   if (!env.PUBLIC_BASE_URL) logger.error({ action: 'MISSING_PUBLIC_BASE_URL', fallback: DEFAULT_PUBLIC_BASE_URL });
   const workerName = env.WORKER_FUNCTION_NAME?.trim();
@@ -538,6 +649,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env, logger: ProxyL
     concurrency: shared.concurrency,
     logger,
     tm: shared.tm,
+    seg: shared.seg,
     quota: shared.quota,
     invokeWorker: workerName ? lambdaWorkerInvoker(new LambdaClient({}), workerName) : undefined,
     workerStore: shared.store,
@@ -545,8 +657,12 @@ export function depsFromEnv(env: NodeJS.ProcessEnv = process.env, logger: ProxyL
 }
 
 /** Cấu hình worker C13 (worker.ts gọi khi khởi động). Worker bắt buộc có TM. */
-export function workerDepsFromEnv(env: NodeJS.ProcessEnv = process.env, logger: ProxyLogger = defaultLogger): WorkerDeps {
-  const shared = sharedFromEnv(env, logger);
+export function workerDepsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  logger: ProxyLogger = defaultLogger,
+  resolveSiteOverride?: SiteResolver,
+): WorkerDeps {
+  const shared = sharedFromEnv(env, logger, resolveSiteOverride);
   if (!shared.tm) throw new Error('Worker cần TABLE_NAME (Translation Memory)');
   return {
     resolveSite: shared.resolveSite,

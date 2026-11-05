@@ -1,5 +1,7 @@
 import { Ctx, AppError, keys, Lang } from '../../../libs/common/types.js';
-import { db } from '../../../libs/common/db.js';
+import { db, requireRole } from '../../../libs/common/db.js';
+import { assertTenantWritable } from '../../../libs/common/tenant.js';
+import { invalidateForSites } from '../../../libs/common/invalidation.js';
 import {
   defaultResolver,
   isBlockedIp,
@@ -20,12 +22,20 @@ export interface CreateSiteInput {
 }
 
 export interface SiteManagerDependencies {
-  db: Pick<typeof db, 'transact' | 'get' | 'put'>;
+  db: Pick<typeof db, 'transact' | 'get' | 'put' | 'updateSiteStatus'>;
   resolver: Resolver;
   safeFetch: typeof safeFetch;
+  assertTenantWritable?: typeof assertTenantWritable;
+  invalidateSites?: typeof invalidateForSites;
 }
 
-const defaultDependencies: SiteManagerDependencies = { db, resolver: defaultResolver, safeFetch };
+const defaultDependencies: SiteManagerDependencies = {
+  db,
+  resolver: defaultResolver,
+  safeFetch,
+  assertTenantWritable,
+  invalidateSites: invalidateForSites,
+};
 
 async function validatePublicUrl(urlStr: string, resolver: Resolver): Promise<URL> {
   const result = validateUrl(urlStr);
@@ -63,11 +73,41 @@ async function validatePublicUrl(urlStr: string, resolver: Resolver): Promise<UR
   return result.url;
 }
 
+async function updateSiteStatus(
+  ctx: Ctx,
+  slug: string,
+  expectedStatus: 'ACTIVE' | 'PAUSED',
+  nextStatus: 'ACTIVE' | 'PAUSED',
+  deps: SiteManagerDependencies,
+): Promise<void> {
+  try {
+    await deps.db.updateSiteStatus(ctx, slug, expectedStatus, nextStatus);
+  } catch (error: unknown) {
+    const isVersionConflict = error instanceof AppError && error.code === 'VERSION_CONFLICT';
+    const isConditionalCheckFailed =
+      typeof error === 'object' &&
+      error !== null &&
+      'name' in error &&
+      error.name === 'ConditionalCheckFailedException';
+
+    if (isVersionConflict || isConditionalCheckFailed) {
+      // Cho phép lặp lại thao tác nếu trạng thái đã đổi nhưng lần xóa cache trước thất bại.
+      const current = await deps.db.get(ctx, keys.host(ctx, slug));
+      if (!current) throw new AppError('NOT_FOUND', 'Không tìm thấy website');
+      if (current?.status === nextStatus) return;
+      throw new AppError('VERSION_CONFLICT', 'Trạng thái website đã thay đổi');
+    }
+    throw error;
+  }
+}
+
 export async function createSite(
   ctx: Ctx,
   input: CreateSiteInput,
   deps: SiteManagerDependencies = defaultDependencies,
 ) {
+  requireRole(ctx, ['TENANT_ADMIN']);
+  await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
   const url = await validatePublicUrl(input.homeUrl, deps.resolver);
   
   // Sinh slug chuẩn hóa từ hostname
@@ -106,13 +146,38 @@ export async function createSite(
         },
         ConditionExpression: 'attribute_not_exists(SK)'
       }
-    }
+    },
+    {
+      ConditionCheck: {
+        TableName: TABLE_NAME,
+        Key: keys.config(ctx),
+        ConditionExpression: 'attribute_exists(PK) AND #status = :active',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':active': 'ACTIVE' },
+      },
+    },
   ];
 
   try {
-    await deps.db.transact(ctx, transactOps);
+    await deps.db.transact(ctx, transactOps, { platformSlugReservation: true });
   } catch (err: any) {
     if (err.name === 'TransactionCanceledException') {
+      const cancellationReasons = Array.isArray(err.CancellationReasons) ? err.CancellationReasons : [];
+      const configCheckFailed = cancellationReasons[2]?.Code === 'ConditionalCheckFailed';
+      if (configCheckFailed || cancellationReasons.length === 0) {
+        // Một số runtime/clients không trả CancellationReasons. Đọc CONFIG nhất quán
+        // để phân biệt tenant vừa bị khóa với lỗi trùng slug.
+        const currentConfig = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
+        if (!currentConfig) {
+          throw new AppError('NOT_FOUND', 'Không tìm thấy cấu hình tenant');
+        }
+        if (currentConfig.status !== 'ACTIVE') {
+          throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị khóa, không thể tạo website');
+        }
+        if (configCheckFailed) {
+          throw new AppError('VERSION_CONFLICT', 'Trạng thái tenant đã thay đổi, vui lòng thử lại');
+        }
+      }
       throw new AppError('DUPLICATE_SLUG', 'Slug đã tồn tại trên hệ thống');
     }
     throw err;
@@ -127,6 +192,8 @@ export async function verifySite(
   method: 'META' | 'FILE',
   deps: SiteManagerDependencies = defaultDependencies,
 ) {
+  requireRole(ctx, ['TENANT_ADMIN']);
+  await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
   const hostKey = keys.host(ctx, slug);
   const host = await deps.db.get(ctx, hostKey);
 
@@ -175,12 +242,67 @@ export async function verifySite(
     });
   }
 
-  // Cập nhật trạng thái PENDING -> ACTIVE
-  await deps.db.put(ctx, {
-    ...host,
-    status: 'ACTIVE',
-    updatedAt: new Date().toISOString()
-  });
+  try {
+    await deps.db.transact(ctx, [
+      {
+        Put: {
+          TableName: TABLE_NAME,
+          Item: {
+            ...host,
+            status: 'ACTIVE',
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      },
+      {
+        ConditionCheck: {
+          TableName: TABLE_NAME,
+          Key: keys.config(ctx),
+          ConditionExpression: 'attribute_exists(PK) AND #status = :active',
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: { ':active': 'ACTIVE' },
+        },
+      },
+    ]);
+  } catch (error: any) {
+    if (
+      error?.name === 'TransactionCanceledException' &&
+      error.CancellationReasons?.[1]?.Code === 'ConditionalCheckFailed'
+    ) {
+      throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị khóa');
+    }
+    throw error;
+  }
 
   return { status: 'ACTIVE' as const };
+}
+
+export async function pauseSite(
+  ctx: Ctx,
+  slug: string,
+  deps: SiteManagerDependencies = defaultDependencies,
+) {
+  requireRole(ctx, ['TENANT_ADMIN']);
+  await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
+
+  await updateSiteStatus(ctx, slug, 'ACTIVE', 'PAUSED', deps);
+  const invalidation = await (deps.invalidateSites ?? invalidateForSites)(ctx, {
+    slugs: [slug],
+  });
+  return { status: 'PAUSED' as const, invalidation };
+}
+
+export async function resumeSite(
+  ctx: Ctx,
+  slug: string,
+  deps: SiteManagerDependencies = defaultDependencies,
+) {
+  requireRole(ctx, ['TENANT_ADMIN']);
+  await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
+
+  await updateSiteStatus(ctx, slug, 'PAUSED', 'ACTIVE', deps);
+  const invalidation = await (deps.invalidateSites ?? invalidateForSites)(ctx, {
+    slugs: [slug],
+  });
+  return { status: 'ACTIVE' as const, invalidation };
 }

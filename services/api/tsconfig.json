@@ -25,9 +25,12 @@
     "batch/**/*.ts",
     "keys/**/*.ts",
     "translate/**/*.ts",
+    "platform/**/*.ts",
     "../../libs/common/roles.ts",
     "../../libs/common/types.ts",
     "../../libs/common/db.ts",
+    "../../libs/common/tenant.ts",
+    "../../libs/common/invalidation.ts",
     "../../libs/common/glossary.ts",
     "../../libs/common/text-utils.ts",
     "../../libs/common/usage/usage.ts"

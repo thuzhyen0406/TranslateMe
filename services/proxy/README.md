@@ -22,7 +22,7 @@ cd ../../services/proxy && npm ci && npm test
 | Bộ nhớ | Đề xuất 1024 MB, vì phân tích HTML tới 3 MB |
 | Gói triển khai | Chạy `npm ci --omit=dev && npm run build`, rồi zip `dist/`, `node_modules/` và `package.json` (cần `"type": "module"`) |
 | Function URL | `AuthType: AWS_IAM`; chỉ CloudFront gọi được, qua OAC (SigV4) |
-| IAM | `translate:TranslateText`; `dynamodb:BatchGetItem` và `dynamodb:UpdateItem` trên bảng chính, giới hạn bằng điều kiện `dynamodb:LeadingKeys` theo tiền tố `TENANT#` (phần TM); `lambda:InvokeFunction` trên worker; `s3:PutObject` trên `worker/*` của bucket tải trọng; quyền ghi log CloudWatch |
+| IAM | `translate:TranslateText`; `dynamodb:BatchGetItem`, `dynamodb:UpdateItem` (TM) và `dynamodb:BatchWriteItem` (SEG) trên bảng chính, giới hạn bằng điều kiện `dynamodb:LeadingKeys` theo tiền tố `TENANT#`; `lambda:InvokeFunction` trên worker; `s3:PutObject` trên `worker/*` của bucket tải trọng; quyền ghi log CloudWatch |
 | CloudFront | Chỉ cho GET, HEAD; khoá cache gồm đường dẫn và query; tôn trọng `Cache-Control` của origin |
 
 ### Biến môi trường
@@ -32,7 +32,7 @@ cd ../../services/proxy && npm ci && npm test
 | `PUBLIC_BASE_URL` | Có | Ví dụ `https://d1abc.cloudfront.net`. Dùng làm URL tuyệt đối của canonical, hreflang, og:url |
 | `BASE_MODE` | Không | `path` (mặc định) cho `/{slug}/{lang}/…`; `host` cho `{slug}.<tên miền>/{lang}/…` khi có tên miền riêng |
 | `PROXY_SITES_JSON` | Tuần 1 | Danh sách website, xem ví dụ dưới. Từ tuần 2 thay bằng tra DynamoDB (SLUG → HOST + CONFIG) |
-| `TABLE_NAME` | Có (bật TM) | Tên bảng DynamoDB chính. Không có thì proxy chạy không TM và ghi log `TM_DISABLED` |
+| `TABLE_NAME` | Có (bật TM và SEG) | Tên bảng DynamoDB chính. Không có thì proxy chạy không TM, không ghi SEG và ghi log `TM_DISABLED`, `SEG_DISABLED` |
 | `TRANSLATE_BUDGET_MS` | Không | Ngân sách dịch, mặc định 20000 |
 | `TRANSLATE_CONCURRENCY` | Không | Số lời gọi TranslateText song song, mặc định 4 |
 | `WORKER_FUNCTION_NAME` | Không | Tên Lambda worker C13. Không có thì không hoàn tất nền, ghi log `WORKER_DISABLED` |
@@ -50,6 +50,7 @@ cd ../../services/proxy && npm ci && npm test
 | Tình huống | Phản hồi |
 | :--- | :--- |
 | Dịch xong | `200`, `Cache-Control: public, max-age=0, s-maxage=<cacheSeconds>` |
+| Dịch xong nhưng đọc thuật ngữ lỗi hoặc ghi SEG lỗi | `200`, `s-maxage=60` (không có `X-TranslateMe-Partial`) |
 | Còn câu chưa dịch (lỗi Translate hoặc hết 20 giây) | `200`, `s-maxage=60`, `X-TranslateMe-Partial: 1`; phần còn lại gửi worker |
 | Tenant hết hạn mức ký tự (`CHAR_QUOTA_EXCEEDED`) | `200`, `s-maxage=300`, `X-TranslateMe-Partial: quota`; câu có trong TM vẫn dịch, câu trượt giữ gốc |
 | Đường dẫn sai, slug lạ, ngôn ngữ chưa bật | `404` |
@@ -85,6 +86,23 @@ Báo cáo (F2 bước 5) ghi "bọc câu bằng `<span data-i>`". Không dùng c
 
 Sự kiện `FINISH_PAGE` gửi worker (`workerEvents.ts`): mỗi sự kiện ≤ 200 KB. Danh sách câu dài thì chia nhiều sự kiện; quá 4 sự kiện, hoặc có câu mà riêng nó đã vượt 200 KB, thì ghi danh sách câu ra S3 và sự kiện chỉ mang `sentencesS3Key`. Không cấu hình `WORKER_PAYLOAD_BUCKET` mà có câu như vậy thì bỏ câu đó và ghi log `workerDropped`. Thực tế câu gửi worker luôn ≤ 10.000 byte, vì câu lớn hơn đã bị translator đánh `SENTENCE_TOO_LARGE`.
 
+## Chỉ mục câu–trang SEG (3.4)
+
+Thư viện: `libs/common/seg.ts`. Bước 7 của F2: mỗi lần dựng trang, proxy ghi (bằng `BatchWriteItem`, lô 25, song song với ghi TM) một bản ghi SEG cho **mọi** câu của trang, kể cả câu chưa dịch:
+
+| Thuộc tính | Giá trị |
+| :--- | :--- |
+| `PK` / `SK` | `TENANT#<t>#SEG#<sha256>` / `PAGE#<lang>#<path>` |
+| `GSI2PK` / `GSI2SK` | `TENANT#<t>#PAGE#<lang>#<path>` / `HASH#<sha256>` |
+| `ttl` | 30 ngày sau lần ghi gần nhất (lớn hơn thời gian lưu đệm tối đa của website) |
+
+- `<path>` luôn gồm slug (QC-5): `segPath('homestay-abc', 'phong-nghi/')` = `/homestay-abc/phong-nghi/`, trang chủ là `/homestay-abc/`. Không có query; giữ nguyên dạng mã hóa `%`. `<lang>` là ngôn ngữ đích của trang.
+- Đọc: `sentencesOfPage(ctx, lang, path)` qua GSI2; `pagesOfSentence(ctx, hash, lang)` qua bảng chính (dùng cho xóa cache chọn lọc 3.5).
+- TTL của SEG (30 ngày) luôn dài hơn thời gian CloudFront giữ trang: `cacheSeconds` của website tối đa 7 ngày (`MAX_PAGE_CACHE_SECONDS`, kiểm tra khi xác thực cấu hình website; proxy cũng chặn trên `s-maxage` bằng giá trị này). Trang được dựng lại ít nhất mỗi 7 ngày và mỗi lần dựng đều làm mới `ttl`, nên SEG không bao giờ hết hạn trước cache.
+- Ghi lại cùng trang chỉ làm mới `ttl`. Câu đã bị gỡ khỏi trang còn bản ghi tới khi hết `ttl`, nên xóa cache có thể thừa một trang nhưng không sót.
+- Ghi SEG lỗi không làm hỏng trang, nhưng trang trả `s-maxage=60` để không bị CloudFront giữ lâu khi chỉ mục còn thiếu. Log: `segWritten`, `segWriteFailed`, `segWriteErrors`, `segWriteError`.
+- Đọc ghi DynamoDB tạm qua `createDynamoSegDb` (stub của 2.2, giống TM) cho tới khi lớp `data` có `batchWrite` và query GSI.
+
 ## Lambda worker C13 (`worker.ts`)
 
 | Mục | Giá trị |
@@ -102,5 +120,6 @@ Worker kiểm tra lại sự kiện và tenant (B.1.1): slug thuộc đúng `ten
 - Thay `quotaStub`, `countCharsStub`, `hashSentenceStub`, `getGlossaryStateStub` khi 2.7, 1.8, 2.8 xong.
 - Khai báo Lambda worker và bucket tải trọng trong IaC (TV1).
 - Đo thời gian: lần tải đầu < 30 giây, lần hai trúng TM (mốc 4).
-- Ghi SEG (3.4).
+- Xóa cache chọn lọc dựa trên SEG (3.5).
+- Worker ở chế độ trang (4.5, dịch trước) ghi SEG như proxy.
 - Tra website từ DynamoDB thay cho `PROXY_SITES_JSON`.

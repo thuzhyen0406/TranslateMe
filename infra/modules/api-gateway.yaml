@@ -17,6 +17,9 @@ Parameters:
   ConsoleFunctionArn:
     Type: String
     Description: ARN of the Lambda handling /console and /console/*.
+  PlatformFunctionArn:
+    Type: String
+    Description: ARN of the Lambda handling /platform and /platform/*.
   TranslateFunctionArn:
     Type: String
     Description: ARN of the Lambda handling /translate and /translate/*.
@@ -104,26 +107,33 @@ Resources:
       ParentId: !Ref TranslateResource
       PathPart: '{proxy+}'
 
-  BatchResource:
+  PlatformResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref RestApi
-      ParentId: !Ref TranslateResource
-      PathPart: batch
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: platform
 
-  BatchSessionResource:
+  PlatformTenantsResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref RestApi
-      ParentId: !Ref BatchResource
-      PathPart: session
+      ParentId: !Ref PlatformResource
+      PathPart: tenants
 
-  BatchSessionUploadUrlResource:
+  PlatformTenantResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref RestApi
-      ParentId: !Ref BatchSessionResource
-      PathPart: upload-url
+      ParentId: !Ref PlatformTenantsResource
+      PathPart: '{tenantId}'
+
+  PlatformTenantStatusResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref PlatformTenantResource
+      PathPart: status
 
   ConsoleMethod:
     Type: AWS::ApiGateway::Method
@@ -150,6 +160,19 @@ Resources:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
         Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConsoleFunctionArn}/invocations'
+
+  PlatformTenantStatusMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref PlatformTenantStatusResource
+      HttpMethod: PATCH
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ConsoleAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PlatformFunctionArn}/invocations'
 
   TranslateMethod:
     Type: AWS::ApiGateway::Method
@@ -221,11 +244,20 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/translate*'
 
+  PlatformInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PlatformFunctionArn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/platform*'
+
   ApiDeploymentV1:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - ConsoleMethod
       - ConsoleProxyMethod
+      - PlatformTenantStatusMethod
       - TranslateMethod
       - TranslateProxyMethod
       - BatchSessionMethod

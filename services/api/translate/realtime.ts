@@ -8,10 +8,12 @@ import { ComprehendClient, DetectDominantLanguageCommand } from '@aws-sdk/client
 import { TranslateClient } from '@aws-sdk/client-translate';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { createTenantDocumentClientRouter, createTenantS3Client } from '../../../libs/common/tenantAws.js';
+import { S3Client } from '@aws-sdk/client-s3';
 import { segmentBlock } from '../../../libs/common/segmenter.js';
 import { normalize_hash } from '../../../libs/common/text-utils.js';
 import { createDynamoTmDb, createTM, EMPTY_GLOSSARY_STATE, type SentenceWithHash } from '../../../libs/common/tm.js';
-import type { Ctx } from '../../../libs/common/types.js';
+import { AppError, type Ctx } from '../../../libs/common/types.js';
 import { CharacterQuotaExceededError, UsageService, type UsageReservation } from '../../../libs/common/usage/usage.js';
 import { createTranslator, type TranslateClientLike } from '../../../libs/common/translator.js';
 import { handler as batchIngressHandler } from '../batch/batchIngress.js';
@@ -109,8 +111,19 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
     try {
       const auth = await resolveTenant(event, deps);
       if (!auth.tenantId || !auth.keyId) return apiError(401, 'UNAUTHORIZED', 'API key không hợp lệ hoặc không được cung cấp.', requestId);
+      const ctx: Ctx = { tenantId: auth.tenantId, via: 'KEYMAP', requestId, keyId: auth.keyId };
+      await assertTenantWritable(ctx, {
+        async get(_ctx, key) {
+          const result = await deps.ddb.send(new GetCommand({
+            TableName: deps.tableName,
+            Key: key,
+            ConsistentRead: true,
+          }));
+          return result.Item ?? null;
+        },
+      });
       const config = await deps.ddb.send(new GetCommand({ TableName: deps.tableName, Key: { PK: `TENANT#${auth.tenantId}`, SK: 'CONFIG' }, ConsistentRead: true }));
-      if (!config.Item || config.Item.status === 'LOCKED') return apiError(403, 'TENANT_SUSPENDED', 'Tenant đang bị tạm khóa.', requestId);
+      if (!config.Item) return apiError(404, 'NOT_FOUND', 'Không tìm thấy tài nguyên', requestId);
       const body = typeof event.body === 'string' ? JSON.parse(event.body) : null;
       if (!body || typeof body.text !== 'string' || !body.text.trim() || typeof body.target_lang !== 'string') return apiError(400, 'INVALID_REQUEST', 'Cần cung cấp text và target_lang trong JSON hợp lệ.', requestId);
       if (body.source_lang !== undefined && typeof body.source_lang !== 'string') return apiError(400, 'INVALID_REQUEST', 'source_lang phải là chuỗi mã ngôn ngữ.', requestId);
@@ -132,7 +145,6 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
       const useTerminology = body.use_terminology !== false;
       const uniqueSentences = [...new Set(sentences)];
       const date = (deps.now ?? (() => new Date()))();
-      const ctx: Ctx = { tenantId: auth.tenantId, via: 'KEYMAP', requestId, keyId: auth.keyId };
       const tm = createTM({
         db: createDynamoTmDb(deps.ddb, deps.tableName),
         now: () => date.toISOString(),
@@ -227,6 +239,14 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
       return realtimeJson(200, { request_id: requestId, source_lang: sourceLang, source_lang_detected: detected, ...(detected ? { detection_confidence: confidence } : {}), target_lang: body.target_lang, translated_text: translatedText, characters_machine_translated: machineChars, characters_from_memory: memoryChars, terminology_version: Number(config.Item.glossaryVersion ?? 0), ...(warnings.length ? { warnings } : {}) });
     } catch (error) {
       if (error instanceof SyntaxError) return apiError(400, 'INVALID_REQUEST', 'JSON không hợp lệ.', requestId);
+      if (error instanceof AppError) {
+        const status = error.code === 'UNAUTHORIZED' ? 401
+          : error.code === 'PERMISSION_DENIED' ? 403
+          : error.code === 'TENANT_SUSPENDED' ? 403
+          : error.code === 'NOT_FOUND' ? 404
+          : 400;
+        return apiError(status, error.code, error.message, requestId);
+      }
       return apiError(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
     }
   };
@@ -242,7 +262,10 @@ export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> | Retur
   if (/(?:^|\/)translate\/batch(?:\/|$)/u.test(requestPath)) return batchIngressHandler(event);
   const tableName = process.env.TABLE_NAME;
   if (!tableName) return Promise.resolve(apiError(500, 'INTERNAL_ERROR', 'Thiếu cấu hình bảng dữ liệu.', event.requestContext?.requestId ?? 'unknown'));
-  const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
+  const ddb = createTenantDocumentClientRouter(
+    DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } }),
+    { roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN, sessionName: 'translate-api' },
+  ) as DynamoDBDocumentClient;
   const comprehend = new ComprehendClient({});
   const translate = new TranslateClient({ maxAttempts: 3 });
   return createRealtimeHandler({ tableName, ddb, usage: new UsageService(ddb, { tableName }), translate, detectLanguage: async (text) => {
