@@ -19,6 +19,8 @@ export type ErrorCode =
   | 'UNAUTHORIZED'
   | 'RATE_LIMITED'
   | 'REQUEST_QUOTA_EXCEEDED'
+  | 'CHAR_QUOTA_EXCEEDED'
+  | 'FILE_NOT_UPLOADED'
   | 'SITE_UNREACHABLE'
   | 'VERIFICATION_NOT_FOUND'
   | 'VERIFICATION_CODE_MISMATCH'
@@ -44,6 +46,8 @@ export const keys = {
   host: (ctx: Ctx, slug: string) => ({ PK: `TENANT#${ctx.tenantId}`, SK: `HOST#${slug}` }),
   gloss: (ctx: Ctx, normalized: string) => ({ PK: `TENANT#${ctx.tenantId}#GLOSS`, SK: `TERM#${normalized}` }),
   apiKey: (ctx: Ctx, keyId: string) => ({ PK: `TENANT#${ctx.tenantId}#APIKEY`, SK: `KEY#${keyId}` }),
+  job: (ctx: Ctx, jobId: string) => ({ PK: `TENANT#${ctx.tenantId}#JOB`, SK: `JOB#${jobId}` }),
+  batchUpload: (ctx: Ctx, uploadId: string) => ({ PK: `TENANT#${ctx.tenantId}#JOB`, SK: `UPLOAD#${uploadId}` }),
   // Các khóa nền tảng chỉ sử dụng bởi module quản lý website và resolver
   slug: (slug: string) => ({ PK: `TENANT#PLATFORM#SLUG#${slug}`, SK: 'META' }),
   keymap: (keyId: string) => ({ PK: `TENANT#PLATFORM#KEY#${keyId}`, SK: 'META' }),

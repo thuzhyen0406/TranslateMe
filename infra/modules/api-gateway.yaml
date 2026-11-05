@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: TranslateMe REST API — Cognito-protected console and API-key-protected translation routes.
+Description: TranslateMe REST API — Cognito-protected console/batch-session and API-key-protected translation routes.
 
 Metadata:
   AWSToolsMetrics:
@@ -104,6 +104,27 @@ Resources:
       ParentId: !Ref TranslateResource
       PathPart: '{proxy+}'
 
+  BatchResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref TranslateResource
+      PathPart: batch
+
+  BatchSessionResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref BatchResource
+      PathPart: session
+
+  BatchSessionUploadUrlResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref BatchSessionResource
+      PathPart: upload-url
+
   ConsoleMethod:
     Type: AWS::ApiGateway::Method
     Properties:
@@ -156,6 +177,34 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TranslateFunctionArn}/invocations'
 
+  BatchSessionMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref BatchSessionResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ConsoleAuthorizer
+      ApiKeyRequired: false
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TranslateFunctionArn}/invocations'
+
+  BatchSessionUploadUrlMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref BatchSessionUploadUrlResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ConsoleAuthorizer
+      ApiKeyRequired: false
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TranslateFunctionArn}/invocations'
+
   ConsoleInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -179,6 +228,8 @@ Resources:
       - ConsoleProxyMethod
       - TranslateMethod
       - TranslateProxyMethod
+      - BatchSessionMethod
+      - BatchSessionUploadUrlMethod
     Properties:
       RestApiId: !Ref RestApi
       Description: Initial API deployment snapshot.
@@ -229,7 +280,7 @@ Resources:
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
       ResponseTemplates:
-        application/json: '{"request_id":"$context.requestId","error":{"code":"UNAUTHORIZED","message":"API key không hợp lệ hoặc không được cung cấp."}}'
+        application/json: '{"request_id":"$context.requestId","error":{"code":"UNAUTHORIZED","message":"Thiếu hoặc không hợp lệ thông tin xác thực."}}'
 
   InvalidApiKeyGatewayResponse:
     Type: AWS::ApiGateway::GatewayResponse

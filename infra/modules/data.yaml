@@ -90,6 +90,36 @@ Resources:
       Tags:
         - { Key: project, Value: translateme }
 
+  BatchFilesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt DataKey.Arn
+            BucketKeyEnabled: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [PUT]
+            AllowedOrigins: ['*']
+            AllowedHeaders: [Content-Type]
+            MaxAge: 300
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireTenantBatchFilesAfterSevenDays
+            Status: Enabled
+            Filter:
+              Prefix: tenant/
+            ExpirationInDays: 7
+      Tags:
+        - { Key: project, Value: translateme }
+
 Outputs:
   TableName:
     Value: !Ref Table
@@ -105,3 +135,9 @@ Outputs:
       Name: !Sub "${AWS::StackName}-KeyArn"
   KeyAlias:
     Value: !Ref DataKeyAlias
+  BatchFilesBucketName:
+    Description: S3 bucket for tenant batch uploads/results; configure as BATCH_BUCKET on the API Lambda.
+    Value: !Ref BatchFilesBucket
+  BatchFilesBucketArn:
+    Description: Grant the API/worker roles object access only to this bucket and tenant prefixes.
+    Value: !GetAtt BatchFilesBucket.Arn

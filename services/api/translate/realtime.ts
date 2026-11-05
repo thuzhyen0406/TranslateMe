@@ -14,6 +14,7 @@ import { createDynamoTmDb, createTM, EMPTY_GLOSSARY_STATE, type SentenceWithHash
 import type { Ctx } from '../../../libs/common/types.js';
 import { CharacterQuotaExceededError, UsageService, type UsageReservation } from '../../../libs/common/usage/usage.js';
 import { createTranslator, type TranslateClientLike } from '../../../libs/common/translator.js';
+import { handler as batchIngressHandler } from '../batch/batchIngress.js';
 
 const MAX_TEXT_CHARS = 5000;
 const MAX_TRANSLATE_BYTES = 10_000;
@@ -21,6 +22,9 @@ const CONFIDENCE_THRESHOLD = 0.70;
 const SUPPORTED_LANGUAGES = new Set(['ar','de','en','es','fr','hi','id','it','ja','ko','nl','pl','pt','ru','sv','th','tr','vi','zh']);
 
 export interface RealtimeEvent {
+  httpMethod?: string;
+  path?: string;
+  rawPath?: string;
   body?: string | null;
   headers?: Record<string, string | undefined>;
   requestContext?: { requestId?: string; identity?: { apiKeyId?: string }; authorizer?: { keyId?: string; tenantId?: string } };
@@ -233,7 +237,9 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
  * @param event Sự kiện Lambda/API Gateway cần xử lý.
  * @returns Promise phản hồi HTTP JSON cho yêu cầu dịch.
  */
-export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> => {
+export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> | ReturnType<typeof batchIngressHandler> => {
+  const requestPath = event.path ?? event.rawPath ?? '';
+  if (/(?:^|\/)translate\/batch(?:\/|$)/u.test(requestPath)) return batchIngressHandler(event);
   const tableName = process.env.TABLE_NAME;
   if (!tableName) return Promise.resolve(apiError(500, 'INTERNAL_ERROR', 'Thiếu cấu hình bảng dữ liệu.', event.requestContext?.requestId ?? 'unknown'));
   const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
