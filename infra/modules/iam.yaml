@@ -38,7 +38,10 @@ Resources:
           - Effect: Allow
             Principal:
               AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
-            Action: sts:AssumeRole
+            Action:
+              - sts:AssumeRole
+              - sts:SetSourceIdentity
+              - sts:TagSession
             Condition:
               ArnLike:
                 aws:PrincipalArn:
@@ -111,7 +114,10 @@ Resources:
                     dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InvokeAsyncWorker
                 Effect: Allow
@@ -148,7 +154,10 @@ Resources:
                     dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: TranslateText
                 Effect: Allow
@@ -181,7 +190,10 @@ Resources:
                     dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InviteTenantMembers
                 Effect: Allow
@@ -224,7 +236,10 @@ Resources:
                     dynamodb:LeadingKeys: 'TENANT#PLATFORM#KEY#*'
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: TranslateText
                 Effect: Allow
@@ -254,7 +269,10 @@ Resources:
             Statement:
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InvalidateWebsiteCache
                 Effect: Allow
@@ -280,7 +298,10 @@ Resources:
             Statement:
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: SetTenantClaimsOnConfirmedUser
                 Effect: Allow

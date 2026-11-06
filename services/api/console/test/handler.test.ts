@@ -10,8 +10,10 @@ import {
   type ConsoleEvent,
   type ConsoleRouteModule,
 } from '../handler.js';
+import { handlePrewarmRoute } from '../../prewarm/prewarmManager.js';
+import { memoryDataDb } from '../../../../libs/common/test/memoryDataDb.js';
 import { db } from '../../../../libs/common/db.js';
-import { AppError, type Ctx } from '../../../../libs/common/types.js';
+import { AppError, keys, type Ctx } from '../../../../libs/common/types.js';
 
 const claims = { 'custom:tenant_id': 't_a', 'custom:role': 'tenant_admin', sub: 'u_1' };
 const event = (path: string, c: Record<string, unknown> = claims, method = 'GET', body?: unknown): ConsoleEvent => ({
@@ -86,8 +88,8 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(JSON.parse(resMismatch.body).error?.code, 'PERMISSION_DENIED');
   });
 
-  it('CONSOLE_ROUTE_MODULES mặc định đăng ký đầy đủ 4 nhóm route Console hiện có (Review, Glossary, Sites, Members)', async () => {
-    assert.equal(CONSOLE_ROUTE_MODULES.length, 4, 'Router phải đăng ký đủ 4 module Console');
+  it('CONSOLE_ROUTE_MODULES mặc định đăng ký đầy đủ 5 nhóm route Console hiện có (Review, Glossary, Sites, Prewarm/Job, Members)', async () => {
+    assert.equal(CONSOLE_ROUTE_MODULES.length, 5, 'Router phải đăng ký đủ 5 module Console');
 
     const adminCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'r1', role: 'TENANT_ADMIN', sub: 'u_1' };
 
@@ -166,6 +168,81 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(memberRes.statusCode, 200);
     const parsedMember = JSON.parse(memberRes.body);
     assert.equal(parsedMember.username, 'developer@example.com');
+
+    // 4. Đường dẫn /console/hosts/{slug}/prewarm không bị chặn bởi handleSitesApiGatewayRoute (trả null để module prewarm xử lý)
+    const sitesPrewarmBypass = await handleSitesApiGatewayRoute(
+      event('/console/hosts/test-slug/prewarm', claims, 'POST'),
+      adminCtx,
+      fakeSiteDeps as any,
+    );
+    assert.equal(sitesPrewarmBypass, null, 'handleSitesApiGatewayRoute phải trả null cho /prewarm để module sau xử lý');
+  });
+
+  it('Console router xử lý đầy đủ route dịch trước (POST/GET /console/hosts/{slug}/prewarm) và tra cứu job (GET /console/jobs/{jobId})', async () => {
+    const memDb = memoryDataDb();
+    const adminCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'r1', role: 'TENANT_ADMIN', sub: 'u_1' };
+    await memDb.put(adminCtx, { ...keys.config(adminCtx), status: 'ACTIVE', plan: 'Free' });
+    await memDb.put(adminCtx, {
+      ...keys.host(adminCtx, 'homestay-abc'),
+      homeUrl: 'https://homestay-abc.vn/',
+      sourceLang: 'vi',
+      targetLangs: ['en', 'ko'],
+      status: 'ACTIVE',
+    });
+
+    const executionStarts: Array<{ name: string; input: string }> = [];
+    const prewarmDeps = {
+      db: memDb,
+      now: () => 1730000000000,
+      uuid: () => '11111111-2222-3333-4444-555555555555',
+      startExecution: async (input: { name: string; input: string }) => {
+        executionStarts.push(input);
+        return { executionArn: `arn:aws:states:x:execution:prewarm:${input.name}` };
+      },
+    };
+
+    const handler = createConsoleHandler(undefined, {
+      prewarmDeps,
+      db: {
+        get: async (_c, key) => {
+          if (key.SK.startsWith('MEMBER#')) return { status: 'ACTIVE', role: 'TENANT_ADMIN' };
+          return memDb.get(_c as any, key);
+        },
+      },
+    });
+
+    // 1. POST /console/hosts/homestay-abc/prewarm -> 202 { job }
+    const postRes = await handler(
+      event('/console/hosts/homestay-abc/prewarm', claims, 'POST', { target_langs: ['en'] }),
+    );
+    assert.equal(postRes.statusCode, 202);
+    const postBody = JSON.parse(postRes.body);
+    assert.ok(postBody.job);
+    assert.equal(postBody.job.status, 'QUEUED');
+    assert.equal(postBody.job.type, 'PREWARM');
+    assert.equal(postBody.job.slug, 'homestay-abc');
+    assert.deepEqual(postBody.job.target_langs, ['en']);
+    assert.equal(executionStarts.length, 1);
+    assert.equal(executionStarts[0].name, postBody.job.job_id);
+
+    // 2. GET /console/hosts/homestay-abc/prewarm -> 200 { job }
+    const getRes = await handler(
+      event('/console/hosts/homestay-abc/prewarm', claims, 'GET'),
+    );
+    assert.equal(getRes.statusCode, 200);
+    const getBody = JSON.parse(getRes.body);
+    assert.ok(getBody.job);
+    assert.equal(getBody.job.job_id, postBody.job.job_id);
+
+    // 3. GET /console/jobs/{jobId} -> 200 { job }
+    const getJobRes = await handler(
+      event(`/console/jobs/${postBody.job.job_id}`, claims, 'GET'),
+    );
+    assert.equal(getJobRes.statusCode, 200);
+    const getJobBody = JSON.parse(getJobRes.body);
+    assert.ok(getJobBody.job);
+    assert.equal(getJobBody.job.job_id, postBody.job.job_id);
+    assert.equal(getJobBody.job.status, 'QUEUED');
   });
 
   it('GET /console/members chỉ cho phép TENANT_ADMIN; từ chối REVIEWER và DEVELOPER với 403 PERMISSION_DENIED', async () => {
@@ -199,7 +276,7 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(JSON.parse(routerDevRes.body).error?.code, 'PERMISSION_DENIED');
   });
 
-  it('Route /console/hosts bám sát hợp đồng Console 4.6 (snake_case, POST 201 {host}, GET list/detail {host}, verify {host})', async () => {
+  it('Route /console/hosts bám sát hợp đồng Console 4.6 (snake_case, POST 201 {host}, GET list {hosts}, detail {host}, verify {host}, strict method)', async () => {
     const adminCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'req-admin', role: 'TENANT_ADMIN', sub: 'u_admin' };
     const reviewerCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'req-rev', role: 'REVIEWER', sub: 'u_rev' };
 
@@ -241,7 +318,7 @@ describe('Console Lambda router (/console/{proxy+})', () => {
       invalidateSites: async () => ({ status: 'SUBMITTED', invalidationIds: ['inv-1'] } as any),
     };
 
-    // 1. POST /console/hosts: nhận snake_case, trả 201 kèm { host: Host }
+    // 1. POST /console/hosts: nhận snake_case, trả 201 chỉ kèm { request_id, host }, không có trường thừa ở root
     const postSnakeCaseBody = {
       home_url: 'https://site.example.com/',
       display_name: 'My Site',
@@ -265,8 +342,11 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.deepEqual(createdBody.host.target_langs, ['en', 'fr']);
     assert.equal(createdBody.host.status, 'PENDING');
     assert.ok(createdBody.host.verification_code);
+    assert.equal(createdBody.slug, undefined, 'Response không được có slug ở root');
+    assert.equal(createdBody.verificationCode, undefined, 'Response không được có verificationCode ở root');
+    assert.equal(createdBody.status, undefined, 'Response không được có status ở root');
 
-    // 2. GET /console/hosts: từ chối REVIEWER với 403; TENANT_ADMIN nhận { hosts: Host[] }
+    // 2. GET /console/hosts: từ chối REVIEWER với 403; TENANT_ADMIN nhận đúng { request_id, hosts }, không có items/websites
     const listReviewerRes = await handleSitesApiGatewayRoute(
       event('/console/hosts'),
       reviewerCtx,
@@ -286,6 +366,8 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(listBody.hosts.length, 1);
     assert.equal(listBody.hosts[0].display_name, 'My Site');
     assert.equal(listBody.hosts[0].verification_code, 'verify-12345');
+    assert.equal(listBody.items, undefined, 'Response không được có trường items');
+    assert.equal(listBody.websites, undefined, 'Response không được có trường websites');
 
     // 3. GET /console/hosts/{slug}: chi tiết website (404 khi không tồn tại, 200 khi có)
     const detail404Res = await handleSitesApiGatewayRoute(
@@ -317,7 +399,17 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(verifyBody.status, 'ACTIVE');
     assert.ok(verifyBody.host);
 
-    // 5. POST verify lỗi (ví dụ mã xác minh sai) -> 400 VERIFICATION_FAILED kèm reason
+    // 5. POST /console/hosts/{slug}/verify với method không hợp lệ -> 400 INVALID_REQUEST
+    const invalidMethodRes = await handleSitesApiGatewayRoute(
+      event('/console/hosts/site-example-com/verify', claims, 'POST', { method: 'BAD_METHOD' }),
+      adminCtx,
+      siteDeps as any,
+    );
+    assert.equal(invalidMethodRes?.statusCode, 400);
+    const invalidMethodBody = JSON.parse(invalidMethodRes!.body);
+    assert.equal(invalidMethodBody.error?.code, 'INVALID_REQUEST');
+
+    // 6. POST verify lỗi (ví dụ mã xác minh sai) -> 400 VERIFICATION_FAILED kèm reason
     const mismatchDeps = {
       ...siteDeps,
       safeFetch: async () => ({
@@ -338,7 +430,7 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(failBody.error?.code, 'VERIFICATION_FAILED');
     assert.equal(failBody.error?.reason, 'VERIFICATION_CODE_MISMATCH');
 
-    // 6. POST trùng slug -> 409 DUPLICATE_SLUG
+    // 7. POST trùng slug -> 409 DUPLICATE_SLUG
     const duplicateSiteDeps = {
       ...siteDeps,
       db: {

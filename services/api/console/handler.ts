@@ -6,7 +6,8 @@
  *  1. Duyệt bản dịch F5 (Task 3.8): `/console/translations*` và `/console/invalidations/*` qua `handleReviewApiGatewayRoute`.
  *  2. Quản lý thuật ngữ F4 (Task 2.8): `/console/glossary*` qua `handleGlossaryApiGatewayRoute`.
  *  3. Quản lý website F3 (Task 4.6): `/console/hosts*` và `/console/websites*` qua `handleSitesApiGatewayRoute`.
- *  4. Quản lý thành viên E.5 (Task 2.9): `/console/members*` qua `handleMembersApiGatewayRoute`.
+ *  4. Dịch trước F6 & Job F10 (Task 4.5): `/console/hosts/{slug}/prewarm` và `/console/jobs/{jobId}` qua `handlePrewarmRoute`.
+ *  5. Quản lý thành viên E.5 (Task 2.9): `/console/members*` qua `handleMembersApiGatewayRoute`.
  *
  * Biến môi trường: TABLE_NAME, CLOUDFRONT_DISTRIBUTION_ID, USER_POOL_ARN, TENANT_DATA_ACCESS_ROLE_ARN.
  */
@@ -24,6 +25,10 @@ import {
   type CreateSiteInput,
   type SiteManagerDependencies,
 } from '../sites/siteManager.js';
+import {
+  handlePrewarmRoute,
+  type PrewarmManagerDeps,
+} from '../prewarm/prewarmManager.js';
 import { inviteMember, type InviteMemberDeps } from '../auth/inviteMember.js';
 import { contextFromIdTokenClaims } from '../auth/context.js';
 import { db, requireRole } from '../../../libs/common/db.js';
@@ -44,6 +49,7 @@ function errorResponse(
   requestId: string,
   details?: Record<string, unknown>,
 ): ConsoleResponse {
+  const extra = details?.reason ? { reason: details.reason } : {};
   return {
     statusCode,
     headers: HEADERS,
@@ -52,21 +58,20 @@ function errorResponse(
       error: {
         code,
         message,
-        ...(typeof details?.reason === 'string' ? { reason: details.reason } : {}),
-        ...(details ? { details } : {})
+        ...extra,
+        ...(details ? { details } : {}),
       },
     }),
   };
 }
 
-function normalizeConsolePath(rawPath?: string): string {
-  const trimmed = (rawPath ?? '').trim();
-  const idx = trimmed.indexOf('/console/');
-  if (idx !== -1) return trimmed.slice(idx);
-  if (trimmed.endsWith('/console')) return '/console';
-  return trimmed;
+/** Chuẩn hóa đường dẫn bỏ qua tiền tố stage (ví dụ /dev/console -> /console). */
+function normalizeConsolePath(path: string): string {
+  const match = path.match(/^(\/[^/]+)?(\/console.*)$/);
+  return match ? match[2] : path;
 }
 
+/** Ánh xạ mã lỗi ứng dụng sang HTTP status code theo bảng hợp đồng Console. */
 function statusForConsoleError(code: string): number {
   switch (code) {
     case 'UNAUTHORIZED':
@@ -188,7 +193,7 @@ export type SiteRouteDeps = SiteManagerDependencies & {
 };
 
 /**
- * 2. Adapter HTTP cho nhóm route Quản lý Website / Hosts F3 (`/console/hosts*`, `/console/websites*`).
+ * 2. Adapter HTTP cho nhóm route Quản lý Website F3 (`/console/hosts*` và alias `/console/websites*`).
  */
 export async function handleSitesApiGatewayRoute(
   event: ConsoleEvent,
@@ -200,6 +205,11 @@ export async function handleSitesApiGatewayRoute(
   const isHosts = path === '/console/hosts' || path.startsWith('/console/hosts/');
   const isWebsites = path === '/console/websites' || path.startsWith('/console/websites/');
   if (!isHosts && !isWebsites) {
+    return null;
+  }
+
+  // Nhường quyền cho handlePrewarmRoute xử lý các endpoint dịch trước
+  if (path.endsWith('/prewarm') || path.includes('/prewarm/')) {
     return null;
   }
 
@@ -226,7 +236,7 @@ export async function handleSitesApiGatewayRoute(
       return {
         statusCode: 200,
         headers: HEADERS,
-        body: JSON.stringify({ request_id: requestId, hosts, items: hosts, websites: hosts }),
+        body: JSON.stringify({ request_id: requestId, hosts }),
       };
     }
 
@@ -264,9 +274,6 @@ export async function handleSitesApiGatewayRoute(
         body: JSON.stringify({
           request_id: requestId,
           host,
-          slug: created.slug,
-          verificationCode: created.verificationCode,
-          status: created.status,
         }),
       };
     }
@@ -276,7 +283,11 @@ export async function handleSitesApiGatewayRoute(
     if (method === 'POST' && verifyMatch) {
       requireRole(ctx, ['TENANT_ADMIN']);
       const slug = decodeURIComponent(verifyMatch[1]);
-      const verifyMethod = (body.method === 'FILE' ? 'FILE' : 'META') as 'META' | 'FILE';
+      const rawMethod = body.method;
+      if (rawMethod !== 'FILE' && rawMethod !== 'META') {
+        throw new AppError('INVALID_REQUEST', 'Phương thức xác minh phải là FILE hoặc META.');
+      }
+      const verifyMethod = rawMethod as 'META' | 'FILE';
       try {
         const verified = await verifySite(ctx, slug, verifyMethod, deps);
         const getFn = deps?.db?.get ?? db.get;
@@ -458,23 +469,42 @@ export async function handleMembersApiGatewayRoute(
   }
 }
 
-/** Danh sách các mô-đun route mặc định của Console Lambda (hợp nhất đầy đủ 4 nhóm). */
-export const CONSOLE_ROUTE_MODULES: readonly ConsoleRouteModule[] = [
-  (event, ctx) => handleReviewApiGatewayRoute(event, ctx),
-  (event, ctx) => handleGlossaryApiGatewayRoute(event, ctx),
-  (event, ctx) => handleSitesApiGatewayRoute(event, ctx),
-  (event, ctx) => handleMembersApiGatewayRoute(event, ctx),
-];
+/** Dependencies mặc định cho dịch trước theo sitemap (F6) và tra cứu job (F10). */
+export const defaultPrewarmDeps: PrewarmManagerDeps = {
+  db,
+  startExecution: async (input) => {
+    return { executionArn: `arn:aws:states:local:execution:prewarm:${input.name}` };
+  },
+};
+
+/** Xây dựng danh sách mô-đun route mặc định của Console Lambda (hợp nhất đầy đủ 5 nhóm route). */
+export function buildConsoleRouteModules(
+  prewarmDeps: PrewarmManagerDeps = defaultPrewarmDeps,
+): readonly ConsoleRouteModule[] {
+  return [
+    (event, ctx) => handleReviewApiGatewayRoute(event, ctx),
+    (event, ctx) => handleGlossaryApiGatewayRoute(event, ctx),
+    (event, ctx) => handleSitesApiGatewayRoute(event, ctx),
+    (event, ctx) => handlePrewarmRoute(event, ctx, prewarmDeps),
+    (event, ctx) => handleMembersApiGatewayRoute(event, ctx),
+  ];
+}
+
+/** Danh sách các mô-đun route mặc định của Console Lambda (hợp nhất đầy đủ 5 nhóm). */
+export const CONSOLE_ROUTE_MODULES: readonly ConsoleRouteModule[] = buildConsoleRouteModules();
 
 export interface ConsoleHandlerDeps {
   contextFromClaims?: (claims: Record<string, unknown>, requestId: string) => Promise<Ctx>;
   db?: Pick<typeof db, 'get'>;
+  prewarmDeps?: PrewarmManagerDeps;
 }
 
 export function createConsoleHandler(
-  modules: readonly ConsoleRouteModule[] = CONSOLE_ROUTE_MODULES,
+  modules?: readonly ConsoleRouteModule[],
   deps?: ConsoleHandlerDeps,
 ) {
+  const effectiveModules =
+    modules ?? (deps?.prewarmDeps ? buildConsoleRouteModules(deps.prewarmDeps) : CONSOLE_ROUTE_MODULES);
   return async (event: ConsoleEvent): Promise<ConsoleResponse> => {
     const requestId = event.requestContext?.requestId ?? 'req-unknown';
     let ctx: Ctx;
@@ -495,7 +525,7 @@ export function createConsoleHandler(
       return errorResponse(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
     }
     try {
-      for (const route of modules) {
+      for (const route of effectiveModules) {
         const response = await route(event, ctx);
         if (response) return response;
       }
