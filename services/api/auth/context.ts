@@ -41,6 +41,7 @@ export async function contextFromIdTokenClaims(
     tenantId,
     via: 'JWT',
     requestId,
+    sub,
     role,
   };
 

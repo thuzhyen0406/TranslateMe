@@ -14,6 +14,7 @@ import { segmentBlock } from '../../../libs/common/segmenter.js';
 import { normalize_hash } from '../../../libs/common/text-utils.js';
 import { createDynamoTmDb, createTM, EMPTY_GLOSSARY_STATE, type SentenceWithHash } from '../../../libs/common/tm.js';
 import { AppError, type Ctx } from '../../../libs/common/types.js';
+import { assertTenantWritable } from '../../../libs/common/tenant.js';
 import { CharacterQuotaExceededError, UsageService, type UsageReservation } from '../../../libs/common/usage/usage.js';
 import { createTranslator, type TranslateClientLike } from '../../../libs/common/translator.js';
 import { handler as batchIngressHandler } from '../batch/batchIngress.js';

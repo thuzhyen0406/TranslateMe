@@ -248,11 +248,10 @@ import { inviteMember } from './auth/inviteMember.js';
 const invited = await inviteMember(tenantId, email, role);
 // invited trả về: { username, userSub, userStatus: 'FORCE_CHANGE_PASSWORD', tenantId, email, role }
 
-// 2. TRÁCH NHIỆM CỦA TẦNG API (TV3):
-// Dùng `invited.userSub` để ghi bản ghi MEMBER vào DynamoDB với:
+// 2. inviteMember đã ghi bản ghi MEMBER vào DynamoDB bằng invited.userSub:
 //   PK = `TENANT#${tenantId}`
 //   SK = `MEMBER#${invited.userSub}`
-//   status = "PENDING_FIRST_LOGIN" (chờ đăng nhập lần đầu)
+//   status = "ACTIVE"; Cognito vẫn yêu cầu đổi mật khẩu tạm trước khi cấp token.
 ```
 
 ### 4.4. Quy ước cho Module Nhận diện ngôn ngữ, Glossary & Hậu kiểm `F4` (từ Nhiệm vụ 1.12)

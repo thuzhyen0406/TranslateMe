@@ -392,6 +392,11 @@ describe('inviteMember', () => {
   it('[E.5b] đúng role (Developer / Reviewer) -> gọi AdminCreateUser đúng tham số', async () => {
     for (const validRole of INVITABLE_ROLES) {
       const calls: AdminCreateUserCommand[] = [];
+      const memberWrites: Array<{
+        ctx: { tenantId: string; requestId: string };
+        item: Record<string, unknown>;
+        conditionExpression?: string;
+      }> = [];
       const cognito = {
         async send(cmd: AdminCreateUserCommand) {
           calls.push(cmd);
@@ -409,6 +414,17 @@ describe('inviteMember', () => {
         cognitoClient: cognito,
         userPoolId: 'ap-southeast-1_Pool',
         tempPasswordGenerator: () => 'TempPass#2026Abc',
+        requestId: 'invite-request',
+        now: () => new Date('2026-11-05T12:00:00.000Z'),
+        db: {
+          async put(ctx, item, conditionExpression) {
+            memberWrites.push({
+              ctx,
+              item,
+              conditionExpression,
+            });
+          },
+        },
       });
 
       assert.equal(calls.length, 1);
@@ -429,7 +445,71 @@ describe('inviteMember', () => {
       assert.equal(res.userStatus, 'FORCE_CHANGE_PASSWORD');
       assert.equal(res.role, validRole);
       assert.equal(res.tenantId, 't_tenant_abc');
+      assert.equal(memberWrites.length, 1);
+      assert.deepEqual(memberWrites[0], {
+        ctx: {
+          tenantId: 't_tenant_abc',
+          via: 'JWT',
+          requestId: 'invite-request',
+        },
+        item: {
+          PK: 'TENANT#t_tenant_abc',
+          SK: 'MEMBER#invited-sub-999',
+          tenantId: 't_tenant_abc',
+          userSub: 'invited-sub-999',
+          email: 'member@acme.io',
+          role: validRole,
+          status: 'ACTIVE',
+          createdAt: '2026-11-05T12:00:00.000Z',
+        },
+        conditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)',
+      });
     }
+  });
+
+  it('từ chối khi Cognito không trả sub và không ghi bản ghi MEMBER', async () => {
+    let memberWriteCount = 0;
+    await assert.rejects(
+      inviteMember('t_tenant_abc', 'member@acme.io', ROLES.DEVELOPER, {
+        cognitoClient: {
+          async send() {
+            return { User: { Username: 'member@acme.io', Attributes: [] } };
+          },
+        },
+        userPoolId: 'ap-southeast-1_Pool',
+        db: {
+          async put() {
+            memberWriteCount += 1;
+          },
+        },
+      }),
+      /không trả về sub/,
+    );
+    assert.equal(memberWriteCount, 0);
+  });
+
+  it('không báo mời thành công nếu ghi MEMBER thất bại', async () => {
+    await assert.rejects(
+      inviteMember('t_tenant_abc', 'member@acme.io', ROLES.DEVELOPER, {
+        cognitoClient: {
+          async send() {
+            return {
+              User: {
+                Username: 'member@acme.io',
+                Attributes: [{ Name: 'sub', Value: 'invited-sub-999' }],
+              },
+            };
+          },
+        },
+        userPoolId: 'ap-southeast-1_Pool',
+        db: {
+          async put() {
+            throw new Error('DynamoDB unavailable');
+          },
+        },
+      }),
+      /DynamoDB unavailable/,
+    );
   });
 
   it('generateTemporaryPassword luôn sinh mật khẩu >= 12 ký tự gồm chữ hoa, chữ thường, chữ số', () => {
@@ -489,6 +569,7 @@ describe('contextFromIdTokenClaims', () => {
           'admin-request',
         );
         assert.equal(ctx.role, ROLES.TENANT_ADMIN);
+        assert.equal(ctx.sub, 'admin-sub');
       } finally {
         db.get = originalGet;
       }
