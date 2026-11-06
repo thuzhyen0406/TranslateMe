@@ -58,6 +58,7 @@ function setup(o: { sites?: SiteConfig[]; sitemaps?: Record<string, SafeFetchOut
   const pageFetch = fakeFetch(o.page ?? ((u) => okHtml(SAMPLE_PAGE, u)));
   const sites = o.sites ?? [SITE];
   const fetched: string[] = [];
+  const prewarmLogger = fakeLogger();
   const deps: PrewarmDeps = {
     resolveSite: staticSiteResolver(sites),
     jobDb,
@@ -79,10 +80,10 @@ function setup(o: { sites?: SiteConfig[]; sitemaps?: Record<string, SafeFetchOut
       countRequests: false,
     }),
     now: o.now,
-    logger: fakeLogger(),
+    logger: prewarmLogger,
   };
   const jobs = createJobStore(jobDb);
-  return { deps, jobDb, store, tmDb, segDb, quota, translateClient, pageFetch, fetched, jobs };
+  return { deps, logger: prewarmLogger, jobDb, store, tmDb, segDb, quota, translateClient, pageFetch, fetched, jobs };
 }
 
 async function queued(s: ReturnType<typeof setup>, langs = ['en', 'ko']) {
@@ -224,6 +225,23 @@ describe('PrewarmPages (C13 chế độ trang)', () => {
     const r = await prewarmPages(await lot(s, ['', 'a/'], ['en']), s.deps);
     assert.equal(r.timed_out, true);
     assert.equal(r.pages_done + r.pages_failed, 2);
+  });
+
+  it('Step Functions chạy lại một lô đã cộng tiến độ -> không cộng lần nữa, done + failed không vượt total', async () => {
+    const s = setup();
+    const ev = await lot(s, ['', 'phong-nghi/']);
+    await prewarmPages(ev, s.deps);
+    const again = await prewarmPages(ev, s.deps); // Retry sau khi lần trước đã cộng tiến độ
+    assert.equal(again.pages_done + again.pages_failed, 4);
+    const job = (await s.jobs.get(ctx, JOB))!;
+    assert.deepEqual([job.total, job.done, job.failed, job.progress], [4, 4, 0, 100]);
+    assert.ok(s.logger.infos.some((e) => e.action === 'PREWARM_LOT_ALREADY_COUNTED' && e.lot === 'lot-0000'));
+  });
+
+  it('urls_key không phải tệp lot-NNNN.json -> INVALID_EVENT', async () => {
+    const s = setup();
+    const ev = await lot(s, ['']);
+    await assert.rejects(prewarmPages({ ...ev, urls_key: `${prewarmKeyPrefix(SITE.tenantId, JOB)}khac.json` }, s.deps), { name: 'INVALID_EVENT' });
   });
 
   it('urls_key ngoài worker/<tenant>/prewarm/<job>/ hoặc tenant không khớp -> từ chối', async () => {

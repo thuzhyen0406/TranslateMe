@@ -311,6 +311,10 @@ export async function prewarmPages(event: PrewarmPagesEvent, deps: PrewarmDeps):
   if (typeof event.urls_key !== 'string' || !event.urls_key.startsWith(prefix) || event.urls_key.includes('..')) {
     throw new PrewarmError('INVALID_EVENT', 'urls_key nằm ngoài worker/<tenantId>/prewarm/<jobId>/');
   }
+  // Mã lô = tên tệp lô (lot-0003): dùng để cộng tiến độ đúng một lần mỗi lô khi Step Functions chạy lại
+  const lotFile = /^(lot-\d{4,})\.json$/.exec(event.urls_key.slice(prefix.length));
+  if (!lotFile) throw new PrewarmError('INVALID_EVENT', 'urls_key phải là tệp lô lot-NNNN.json');
+  const lotId = lotFile[1];
   if (!deps.store || !deps.renderPage) throw new PrewarmError('MISCONFIGURED', 'Thiếu kho S3 hoặc lõi proxy');
   const site = await checkSite(deps, event.tenant_id, event.slug);
   const rests: unknown = JSON.parse(await deps.store.get(event.urls_key));
@@ -358,7 +362,14 @@ export async function prewarmPages(event: PrewarmPagesEvent, deps: PrewarmDeps):
 
   const logger = deps.logger ?? defaultPrewarmLogger;
   try {
-    await createJobStore(deps.jobDb, deps.now).addProgress(ctxOf(event.tenant_id, event.job_id, event.slug), event.job_id, res.pages_done, res.pages_failed);
+    const counted = await createJobStore(deps.jobDb, deps.now).addProgress(
+      ctxOf(event.tenant_id, event.job_id, event.slug),
+      event.job_id,
+      res.pages_done,
+      res.pages_failed,
+      lotId,
+    );
+    if (!counted) logger.info({ action: 'PREWARM_LOT_ALREADY_COUNTED', jobId: event.job_id, lot: lotId });
   } catch (err) {
     // Tiến độ chỉ để hiển thị; FinishPrewarm vẫn chốt kết quả
     logger.error({ action: 'PREWARM_PROGRESS_FAILED', jobId: event.job_id, error: err instanceof Error ? err.name : 'Unknown' });
