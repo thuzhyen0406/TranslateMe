@@ -61,6 +61,7 @@ export function tenantSessionPolicy(
     Action: [
       'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem',
       'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem', 'dynamodb:BatchWriteItem',
+      'dynamodb:TransactWriteItems',
     ],
     Resource: '*',
     Condition: {
@@ -86,7 +87,7 @@ export function tenantSessionPolicy(
     });
   }
   if (buckets.payloadBucketArn) {
-    statements.push({ Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject'], Resource: `${buckets.payloadBucketArn}/tenant/${tenantId}/worker/*` });
+    statements.push({ Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject'], Resource: `${buckets.payloadBucketArn}/worker/${tenantId}/*` });
   }
   if (buckets.batchUploadBucketArn) {
     statements.push({
@@ -230,7 +231,7 @@ export function createTenantS3Client(
   bucketArn: string,
   prefix: 'worker' | 'batch',
   sessionName = 'tenant-s3',
-  batchUploadKmsKeyArn?: string,
+  batchUploadKmsKeyArn = process.env.TENANT_BATCH_UPLOAD_KMS_KEY_ARN,
 ): S3Client {
   const buckets = prefix === 'worker'
     ? { payloadBucketArn: bucketArn }

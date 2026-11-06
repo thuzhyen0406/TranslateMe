@@ -7,7 +7,7 @@
  *  - vượt quá maxInlineEvents sự kiện và có kho S3 thì ghi danh sách câu ra S3, sự kiện chỉ mang `sentencesS3Key`;
  *  - một câu riêng lẻ đã làm sự kiện vượt maxBytes thì bắt buộc đi qua S3; không có kho S3 thì bỏ câu đó
  *    (báo trong `dropped`) để không sự kiện nào vượt giới hạn tải trọng.
- * Khoá S3 luôn nằm dưới tiền tố tenant/<tenantId>/worker/ để worker kiểm tra được tenant.
+ * Khoá S3 luôn nằm dưới tiền tố worker/<tenantId>/ để worker kiểm tra được tenant.
  */
 import type { SentenceWithHash } from '../../libs/common/tm.js';
 import type { Lang } from '../../libs/common/types.js';
@@ -38,7 +38,7 @@ export const MAX_INLINE_EVENTS = 4;
 /** Mỗi tệp S3 chứa tối đa bấy nhiêu byte JSON câu */
 export const MAX_S3_PAYLOAD_BYTES = 4_000_000;
 
-export const workerKeyPrefix = (tenantId: string): string => `tenant/${tenantId}/worker/`;
+export const workerKeyPrefix = (tenantId: string): string => `worker/${tenantId}/`;
 
 const jsonBytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), 'utf8');
 

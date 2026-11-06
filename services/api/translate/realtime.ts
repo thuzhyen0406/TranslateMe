@@ -336,9 +336,40 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
  * @param event Sự kiện Lambda/API Gateway cần xử lý.
  * @returns Promise phản hồi HTTP JSON cho yêu cầu dịch.
  */
-export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> | ReturnType<typeof batchIngressHandler> => {
+export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> => {
   const requestPath = event.path ?? event.rawPath ?? '';
-  if (/(?:^|\/)translate\/batch(?:\/|$)/u.test(requestPath)) return batchIngressHandler(event);
+  const requestId = event.requestContext?.requestId ?? 'unknown';
+
+  if (requestPath.endsWith('/translate/batch/upload-url')) {
+    const tableName = process.env.TABLE_NAME;
+    const batchBucket = process.env.BATCH_UPLOAD_BUCKET;
+    if (!tableName || !batchBucket) {
+      return Promise.resolve(apiError(500, 'INTERNAL_ERROR', 'Thiếu cấu hình upload batch.', requestId));
+    }
+    const ddb = createTenantDocumentClientRouter(
+      DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } }),
+      { roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN, sessionName: 'translate-batch-api' },
+    ) as DynamoDBDocumentClient;
+    return createBatchUploadUrlHandler({
+      tableName,
+      batchBucket,
+      ddb,
+      s3: new S3Client({}),
+      tenantS3Client: (tenantId) => createTenantS3Client(
+        process.env.TENANT_DATA_ACCESS_ROLE_ARN ?? '',
+        tenantId,
+        process.env.TENANT_BATCH_UPLOAD_BUCKET_ARN ?? '',
+        'batch',
+        'batch-upload',
+        process.env.TENANT_BATCH_UPLOAD_KMS_KEY_ARN,
+      ) as unknown as S3Client,
+    })(event) as Promise<RealtimeResponse>;
+  }
+
+  if (requestPath.includes('/translate/batch')) {
+    return batchIngressHandler(event) as Promise<RealtimeResponse>;
+  }
+
   const tableName = process.env.TABLE_NAME;
   if (!tableName) return Promise.resolve(apiError(500, 'INTERNAL_ERROR', 'Thiếu cấu hình bảng dữ liệu.', event.requestContext?.requestId ?? 'unknown'));
   const ddb = createTenantDocumentClientRouter(

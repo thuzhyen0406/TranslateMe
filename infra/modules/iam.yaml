@@ -52,6 +52,7 @@ Resources:
               - sts:AssumeRole
               - sts:SetSourceIdentity
               - sts:TagSession
+              - sts:SetSourceIdentity
             Condition:
               ArnLike:
                 aws:PrincipalArn:
@@ -85,6 +86,7 @@ Resources:
                   - dynamodb:Query
                   - dynamodb:ConditionCheckItem
                   - dynamodb:BatchWriteItem
+                  - dynamodb:TransactWriteItems
                 Resource:
                   - !Ref TableArn
                   - !Sub '${TableArn}/index/GSI2'
@@ -96,8 +98,20 @@ Resources:
                       - 'TENANT#${aws:PrincipalTag/TenantId}#*'
               - Sid: TenantBatchUploadObjects
                 Effect: Allow
-                Action: s3:PutObject
-                Resource: !Sub '${BatchUploadBucketArn}/batch/${aws:PrincipalTag/TenantId}/*'
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${BatchUploadBucketArn}/batch/${!aws:PrincipalTag/TenantId}/input/*'
+              - Sid: TenantBatchUploadKmsAccess
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref BatchUploadKmsKeyArn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 's3.${AWS::Region}.amazonaws.com'
+                    kms:EncryptionContext:aws:s3:arn: !Ref BatchUploadBucketArn
               - Sid: TenantDataKmsUse
                 Effect: Allow
                 Action:
@@ -127,6 +141,7 @@ Resources:
                         Action:
               - sts:AssumeRole
               - sts:TagSession
+              - sts:SetSourceIdentity
             Condition:
               ArnLike:
                 aws:PrincipalArn:
@@ -149,7 +164,7 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: !Sub '${PayloadBucketArn}/tenant/${!aws:PrincipalTag/TenantId}/worker/*'
+                Resource: !Sub '${PayloadBucketArn}/worker/${!aws:PrincipalTag/TenantId}/*'
               - Sid: PayloadKmsUse
                 Effect: Allow
                 Action:
@@ -174,6 +189,7 @@ Resources:
             Action:
               - sts:AssumeRole
               - sts:TagSession
+              - sts:SetSourceIdentity
             Condition:
               ArnLike:
                 aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-website-api'
@@ -191,8 +207,8 @@ Resources:
             Statement:
               - Sid: WebsiteTenantAndSlugTransaction
                 Effect: Allow
-                # TransactWriteItems is authorized by the item-level actions below.
                 Action:
+                  - dynamodb:TransactWriteItems
                   - dynamodb:PutItem
                   - dynamodb:ConditionCheckItem
                 Resource: !Ref TableArn
@@ -234,14 +250,14 @@ Resources:
                   StringLike:
                     dynamodb:LeadingKeys:
                       - 'TENANT#PLATFORM#SLUG#*'
-                      - 'TENANT#PLATFORM#KEY#*'
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
                 Action:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
-                                Resource: !GetAtt TenantDataAccessRole.Arn
+                  - sts:SetSourceIdentity
+                Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InvokeAsyncWorker
                 Effect: Allow
                 Action: lambda:InvokeFunction
@@ -257,6 +273,7 @@ Resources:
                 Action:
                   - sts:AssumeRole
                   - sts:TagSession
+                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantPayloadAccessRole.Arn
 
   WorkerExecutionRole:
@@ -289,7 +306,8 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
-                                Resource: !GetAtt TenantDataAccessRole.Arn
+                  - sts:SetSourceIdentity
+                Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: TranslateText
                 Effect: Allow
                 Action: translate:TranslateText
@@ -299,6 +317,7 @@ Resources:
                 Action:
                   - sts:AssumeRole
                   - sts:TagSession
+                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantPayloadAccessRole.Arn
 
   ConsoleApiExecutionRole:
@@ -324,6 +343,7 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
+                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InviteTenantMembers
                 Effect: Allow
@@ -381,12 +401,14 @@ Resources:
                 Action:
                   - sts:AssumeRole
                   - sts:TagSession
+                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: AssumeTenantWebsiteDataAccessRole
                 Effect: Allow
                 Action:
                   - sts:AssumeRole
                   - sts:TagSession
+                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantWebsiteDataAccessRole.Arn
               - Sid: WebsiteCacheInvalidation
                 Effect: Allow
@@ -425,6 +447,7 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
+                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: TranslateText
                 Effect: Allow
@@ -458,6 +481,7 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
+                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InvalidateWebsiteCache
                 Effect: Allow
@@ -487,6 +511,7 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
+                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: SetTenantClaimsOnConfirmedUser
                 Effect: Allow

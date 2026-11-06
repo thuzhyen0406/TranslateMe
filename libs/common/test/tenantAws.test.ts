@@ -9,7 +9,7 @@ describe('tenant-scoped AWS sessions', () => {
     const policy = JSON.parse(tenantSessionPolicy('t_aaaaaaaaaaaaaaaaaaaaaaaa'));
     assert.ok(policy.Statement[0].Action.includes('dynamodb:PutItem'));
     assert.ok(policy.Statement[0].Action.includes('dynamodb:ConditionCheckItem'));
-    assert.ok(!policy.Statement[0].Action.includes('dynamodb:TransactWriteItems'));
+    assert.ok(policy.Statement[0].Action.includes('dynamodb:TransactWriteItems'));
     const keys = policy.Statement[0].Condition['ForAllValues:StringLike']['dynamodb:LeadingKeys'];
     assert.deepEqual(keys, [
       'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa',
@@ -53,7 +53,7 @@ describe('tenant-scoped AWS sessions', () => {
   });
   });
 
-  it('session policy scopes S3 objects to the requesting tenant prefix', () => {
+    it('session policy scopes S3 objects to the requesting tenant prefix', () => {
     const policy = JSON.parse(tenantSessionPolicy('t_aaaaaaaaaaaaaaaaaaaaaaaa', {
       payloadBucketArn: 'arn:aws:s3:::payloads',
       batchUploadBucketArn: 'arn:aws:s3:::uploads',
@@ -64,12 +64,13 @@ describe('tenant-scoped AWS sessions', () => {
     assert.deepEqual(policy.Statement[2].Action, ['s3:GetObject', 's3:PutObject']);
     assert.equal(policy.Statement[3].Resource, 'arn:aws:kms:ap-southeast-1:123456789012:key/batch');
     assert.deepEqual(policy.Statement[3].Action, ['kms:Decrypt', 'kms:GenerateDataKey']);
+    assert.equal(policy.Statement[3].Condition.StringEquals['kms:EncryptionContext:aws:s3:arn'], 'arn:aws:s3:::uploads');
   });
 
-  it('routes tenant data to an STS session and platform mappings to the execution role', async () => {
+    it('routes tenant data to an STS session and platform mappings to the execution role', async () => {
     const routed: string[] = [];
     const assumed: string[] = [];
-    const assumeCommands: Array<{ input: { SourceIdentity?: string; Tags?: Array<{ Key: string; Value: string }>; Policy?: string } }> = [];
+    const assumeInputs: Array<Record<string, any>> = [];
     const router = createTenantDocumentClientRouter({
       async send(command: never) { routed.push('base'); return command; },
     }, {
@@ -77,7 +78,7 @@ describe('tenant-scoped AWS sessions', () => {
       sts: {
         async send(command: never) {
           assumed.push('t_aaaaaaaaaaaaaaaaaaaaaaaa');
-          assumeCommands.push(command as typeof assumeCommands[number]);
+          assumeInputs.push((command as any).input);
           return { Credentials: { AccessKeyId: 'a', SecretAccessKey: 's', SessionToken: 't', Expiration: new Date(Date.now() + 60_000) } } as never;
         },
       } as never,
@@ -87,10 +88,14 @@ describe('tenant-scoped AWS sessions', () => {
     await router.send({ input: { Key: { PK: 'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa', SK: 'CONFIG' } } } as never);
     await router.send({ input: { Key: { PK: 'TENANT#PLATFORM#SLUG#site-a', SK: 'META' } } } as never);
     assert.deepEqual(routed, ['tenant', 'base']);
-        assert.deepEqual(assumed, ['t_aaaaaaaaaaaaaaaaaaaaaaaa']);
-    assert.equal(assumeCommands[0].input.SourceIdentity, 't_aaaaaaaaaaaaaaaaaaaaaaaa');
-    assert.deepEqual(assumeCommands[0].input.Tags, [{ Key: 'TenantId', Value: 't_aaaaaaaaaaaaaaaaaaaaaaaa' }]);
-    assert.ok(assumeCommands[0].input.Policy);
+    assert.deepEqual(assumed, ['t_aaaaaaaaaaaaaaaaaaaaaaaa']);
+    assert.equal(assumeInputs[0].SourceIdentity, 't_aaaaaaaaaaaaaaaaaaaaaaaa');
+    assert.deepEqual(assumeInputs[0].Tags, [{ Key: 'TenantId', Value: 't_aaaaaaaaaaaaaaaaaaaaaaaa' }]);
+    assert.equal(typeof assumeInputs[0].Policy, 'string');
+    assert.deepEqual(JSON.parse(String(assumeInputs[0].Policy)).Statement[0].Condition['ForAllValues:StringLike']['dynamodb:LeadingKeys'], [
+      'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa',
+      'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa#*',
+    ]);
   });
 
   it('từ chối giao dịch có partition key của nhiều tenant', async () => {

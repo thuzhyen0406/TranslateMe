@@ -610,7 +610,7 @@ function sharedFromEnv(
   };
 }
 
-/** Kho S3 cho danh sách câu lớn gửi worker. Lifecycle xoá tenant/ sau 1 ngày. */
+/** Kho S3 cho danh sách câu lớn gửi worker. Lifecycle xoá worker/ sau 1 ngày. */
 export function s3PayloadStore(
   s3: Pick<S3Client, 'send'>,
   bucket: string,

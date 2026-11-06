@@ -1,9 +1,14 @@
-import { AppError, keys } from '../../../libs/common/types.js';
+import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
 import { db } from '../../../libs/common/db.js';
 import { contextFromIdTokenClaims } from '../auth/context.js';
-import { createSite, pauseSite, resumeSite, verifySite } from './siteManager.js';
+import {
+  createSite,
+  pauseSite,
+  resumeSite,
+  verifySite,
+} from './siteManager.js';
 
-type WebsiteEvent = {
+export type WebsiteEvent = {
   httpMethod?: string;
   path?: string;
   rawPath?: string;
@@ -18,7 +23,28 @@ type WebsiteEvent = {
   body?: string | null;
 };
 
-export async function handler(event: WebsiteEvent) {
+export interface WebsiteHandlerDependencies {
+  contextFromClaims: typeof contextFromIdTokenClaims;
+  listTenantSites: typeof db.listTenantSites;
+  getHost: (ctx: Ctx, slug: string) => Promise<Record<string, unknown> | null>;
+  create: typeof createSite;
+  pause: typeof pauseSite;
+  resume: typeof resumeSite;
+  verify: typeof verifySite;
+}
+
+const defaultDependencies: WebsiteHandlerDependencies = {
+  contextFromClaims: contextFromIdTokenClaims,
+  listTenantSites: (ctx) => db.listTenantSites(ctx),
+  getHost: (ctx, slug) => db.get(ctx, keys.host(ctx, slug)),
+  create: createSite,
+  pause: pauseSite,
+  resume: resumeSite,
+  verify: verifySite,
+};
+
+export function createWebsiteHandler(dependencies: WebsiteHandlerDependencies = defaultDependencies) {
+return async function handler(event: WebsiteEvent) {
   const requestId = event.requestContext?.requestId ?? 'unknown';
   try {
     const claims = event.requestContext?.authorizer?.claims ?? {};
@@ -26,14 +52,18 @@ export async function handler(event: WebsiteEvent) {
     if (typeof claimTenantId !== 'string' || !/^t_[A-Za-z0-9_-]{1,64}$/.test(claimTenantId)) {
       throw new AppError('UNAUTHORIZED', 'Thông tin tenant không hợp lệ');
     }
-    const ctx = await contextFromIdTokenClaims(claims, requestId);
+    const ctx = await dependencies.contextFromClaims(claims, requestId);
     if (ctx.role !== 'TENANT_ADMIN') {
       throw new AppError('PERMISSION_DENIED', 'Chỉ Tenant Admin được quản lý website');
     }
 
     const path = normalizedRequestPath(event);
     const method = event.httpMethod ?? 'GET';
-    const slug = event.pathParameters?.slug ?? event.pathParameters?.proxy?.split('/').filter(Boolean)[0] ?? path.split('/').filter(Boolean)[2];
+    if (path !== '/console/hosts' && !path.startsWith('/console/hosts/')) {
+      throw new AppError('NOT_FOUND', 'Không tìm thấy endpoint website');
+    }
+    const routeParts = path.split('/').filter(Boolean);
+    const slug = event.pathParameters?.slug ?? routeParts[2];
     let body: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(event.body ?? '{}');
@@ -59,12 +89,10 @@ export async function handler(event: WebsiteEvent) {
     }
 
     let result: unknown;
-    if (path === '/console/websites' && method === 'GET') {
-      const sites = await db.listTenantSites(ctx);
-      result = { websites: sites };
-      // `hosts` is the Console contract; retain `websites` for existing callers.
-      (result as Record<string, unknown>).hosts = sites;
-    } else if (path === '/console/websites' && method === 'POST') {
+    if (path === '/console/hosts' && method === 'GET') {
+      const sites = await dependencies.listTenantSites(ctx);
+      result = { hosts: sites };
+    } else if (path === '/console/hosts' && method === 'POST') {
       if (
         typeof body.homeUrl !== 'string' || typeof body.displayName !== 'string' ||
         typeof body.sourceLang !== 'string' || !Array.isArray(body.targetLangs) ||
@@ -75,26 +103,27 @@ export async function handler(event: WebsiteEvent) {
       ) {
         throw new AppError('INVALID_REQUEST', 'Thiếu hoặc sai kiểu thông tin website');
       }
-      result = await createSite(ctx, body as never);
-      // Preserve the original top-level fields and add the Console's `host` envelope.
-      result = { ...(result as Record<string, unknown>), host: result };
+      const created = await dependencies.create(ctx, body as never);
+      const host = await loadHost(ctx, created.slug, dependencies);
+      result = { host };
     } else if (!slug) {
       throw new AppError('NOT_FOUND', 'Không tìm thấy website');
     } else if (path.endsWith('/verify') && method === 'POST') {
       if (body.method !== 'META' && body.method !== 'FILE') throw new AppError('INVALID_REQUEST', 'method phải là META hoặc FILE');
-      result = await verifySite(ctx, slug, body.method);
-    } else if (path.endsWith('/pause') && method === 'PATCH') {
-      result = await pauseSite(ctx, slug);
-    } else if (path.endsWith('/resume') && method === 'PATCH') {
-      result = await resumeSite(ctx, slug);
+      await dependencies.verify(ctx, slug, body.method);
+      result = { host: await loadHost(ctx, slug, dependencies) };
+    } else if (path.endsWith('/pause') && method === 'POST') {
+      const paused = await dependencies.pause(ctx, slug);
+      result = { ...paused, host: await loadHost(ctx, slug, dependencies) };
+    } else if (path.endsWith('/resume') && method === 'POST') {
+      const resumed = await dependencies.resume(ctx, slug);
+      result = { ...resumed, host: await loadHost(ctx, slug, dependencies) };
     } else if (method === 'GET') {
-      const site = await db.get(ctx, keys.host(ctx, slug));
-      if (!site) throw new AppError('NOT_FOUND', 'Không tìm thấy website');
-      result = { website: site };
+      result = { host: await loadHost(ctx, slug, dependencies) };
     } else {
       throw new AppError('NOT_FOUND', 'Không tìm thấy endpoint');
     }
-    const statusCode = path === '/console/websites' && method === 'POST' ? 201 : 200;
+    const statusCode = path === '/console/hosts' && method === 'POST' ? 201 : 200;
     return response(statusCode, { request_id: requestId, ...(result as Record<string, unknown>) });
   } catch (error) {
     const appError = error instanceof AppError ? error : new AppError('INTERNAL_ERROR', 'Lỗi hệ thống');
@@ -109,6 +138,19 @@ export async function handler(event: WebsiteEvent) {
       error: { code: appError.code, message: appError.message },
     });
   }
+};
+}
+
+export const handler = createWebsiteHandler();
+
+async function loadHost(
+  ctx: Awaited<ReturnType<typeof contextFromIdTokenClaims>>,
+  slug: string,
+  dependencies: WebsiteHandlerDependencies,
+) {
+  const host = await dependencies.getHost(ctx, slug);
+  if (!host) throw new AppError('NOT_FOUND', 'Không tìm thấy website');
+  return host;
 }
 
 function response(statusCode: number, body: Record<string, unknown>) {

@@ -36,9 +36,9 @@ cd ../../services/proxy && npm ci && npm test
 | `TRANSLATE_BUDGET_MS` | Không | Ngân sách dịch, mặc định 20000 |
 | `TRANSLATE_CONCURRENCY` | Không | Số lời gọi TranslateText song song, mặc định 4 |
 | `WORKER_FUNCTION_NAME` | Không | Tên Lambda worker C13. Không có thì không hoàn tất nền, ghi log `WORKER_DISABLED` |
-| `WORKER_PAYLOAD_BUCKET` | Không | Bucket S3 chứa danh sách câu lớn gửi worker (khoá `tenant/<tenantId>/worker/…`). Nên đặt Lifecycle xoá sau 1 ngày |
+| `WORKER_PAYLOAD_BUCKET` | Không | Bucket S3 chứa danh sách câu lớn gửi worker (khoá `worker/<tenantId>/…`). Nên đặt Lifecycle xoá sau 1 ngày |
 | `TENANT_DATA_ACCESS_ROLE_ARN` | Có khi chạy Lambda | Role AssumeRole cho thao tác DynamoDB có session policy theo tenant |
-| `TENANT_PAYLOAD_ROLE_ARN` | Có khi bật payload S3 | ARN output `TenantPayloadAccessRoleArn`; session S3 chỉ truy cập `tenant/<tenantId>/worker/*` |
+| `TENANT_PAYLOAD_ROLE_ARN` | Có khi bật payload S3 | ARN output `TenantPayloadAccessRoleArn`; session S3 chỉ truy cập `worker/<tenantId>/*` |
 | `TENANT_PAYLOAD_BUCKET_ARN` | Có khi bật payload S3 | ARN payload bucket dùng khi tạo session policy |
 | `DATA_KMS_KEY_ARN` | Có khi bật payload S3 | ARN CMK mặc định của payload bucket; Proxy gửi rõ SSE-KMS key khi ghi object |
 | `USE_FETCH_STUB` | Không | `1` = dùng `safeFetch.stub` (trang mẫu cố định, không gọi mạng) để demo |
@@ -121,7 +121,7 @@ Các hàm ReadSitemap, PrewarmPages (C13 chế độ trang), FinishPrewarm, Mark
 | Biến môi trường | `TABLE_NAME` (bắt buộc), `PROXY_SITES_JSON`, `WORKER_PAYLOAD_BUCKET`, `TRANSLATE_CONCURRENCY`, `WORKER_BUDGET_MS` |
 | IAM | `translate:TranslateText`; DynamoDB qua tenant session; đọc payload qua `TenantPayloadAccessRole`; ghi log |
 
-Worker kiểm tra lại sự kiện và tenant (B.1.1): slug thuộc đúng `tenantId`, website `ACTIVE`, tenant không `LOCKED`, ngôn ngữ đã bật, khoá S3 nằm dưới `tenant/<tenantId>/worker/`. Sau đó tra lại TM, tự đặt trước hạn mức cho phần mình dịch, dịch, ghi bản `MACHINE` và `settleUsage` với `{ kind: 'WEB', slug }`. Worker không throw; kết quả (`DONE`, `NOTHING_TO_DO`, `QUOTA_EXCEEDED`, `REJECTED`, `ERROR`) nằm trong log.
+Worker kiểm tra lại sự kiện và tenant (B.1.1): slug thuộc đúng `tenantId`, website `ACTIVE`, tenant không `LOCKED`, ngôn ngữ đã bật, khoá S3 nằm dưới `worker/<tenantId>/`. Sau đó tra lại TM, tự đặt trước hạn mức cho phần mình dịch, dịch, ghi bản `MACHINE` và `settleUsage` với `{ kind: 'WEB', slug }`. Worker không throw; kết quả (`DONE`, `NOTHING_TO_DO`, `QUOTA_EXCEEDED`, `REJECTED`, `ERROR`) nằm trong log.
 
 ## Việc còn lại
 

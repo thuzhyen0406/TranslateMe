@@ -22,16 +22,17 @@ invocation permissions remain in `api-gateway.yaml`.
 | `PlatformApiExecutionRoleArn` | Platform Admin Lambda | Read site rows, update tenant CONFIG, cache invalidation |
 | `PostConfirmationExecutionRoleArn` | Cognito PostConfirmation trigger | Create tenant/mapping records and set Cognito claims |
 | `TenantDataAccessRoleArn` | Assumed per request by tenant-facing functions | DynamoDB access constrained by the STS session policy to one tenant partition |
-| `TenantWebsiteDataAccessRoleArn` | Assumed only by Website Lambda during website creation | Transaction item-level `PutItem`/`ConditionCheckItem` permissions for tenant records and the platform slug reservation |
+| `TenantWebsiteDataAccessRoleArn` | Assumed only by Website Lambda during website creation | `TransactWriteItems` plus `PutItem`/`ConditionCheckItem` limited to tenant records and the platform slug reservation |
 
 ## Deployment and wiring
 
 1. Deploy data and identity stacks.
-2. Deploy `iam.yaml`, supplying the exact worker function ARN and data-stack KMS key ARN.
+2. Deploy `iam.yaml`, supplying the exact worker function ARN, data-stack KMS key ARN,
+   and batch bucket KMS key ARN (the data key ARN when the bucket uses the data key).
 3. Deploy `lambdas.yaml` with the code artifacts and matching role ARN
    outputs, including `TenantDataAccessRoleArn`,
    `TenantWebsiteDataAccessRoleArn`, and `TenantPayloadAccessRoleArn`. Set `PayloadBucketArn`, `PayloadBucketName`,
-   and `KmsKeyArn` from the data stack outputs.
+   `BatchUploadBucketArn`, `BatchUploadBucketName`, `BatchUploadKmsKeyArn`, and `KmsKeyArn` from the data stack outputs.
 4. Pass `WebsiteFunctionArn` as well as the other function ARNs to
    `api-gateway.yaml`; `/console/hosts*` management routes are directed to the
    dedicated Lambda, except prewarm routes which remain on the Console API.
