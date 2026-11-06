@@ -3,7 +3,7 @@ import { AppError, keys, type Ctx } from './types.js';
 /** Kiểm tra giao dịch APIKEY/KEYMAP trước khi ghi; input là Ctx và đúng hai thao tác, output void hoặc AppError. */
 export function validateApiKeyTransaction(ctx: Ctx, ops: unknown[]): void {
   if (ctx.via !== 'JWT' || !ctx.tenantId) {
-    throw new AppError('FORBIDDEN', 'Chỉ phiên console đã xác thực mới được thay đổi API key.');
+    throw new AppError('PERMISSION_DENIED', 'Chỉ phiên console đã xác thực mới được thay đổi API key.');
   }
   if (!Array.isArray(ops) || ops.length !== 2) {
     throw new AppError('INVALID_REQUEST', 'Giao dịch API key phải gồm đúng hai thao tác.');
@@ -28,7 +28,7 @@ export function validateApiKeyTransaction(ctx: Ctx, ops: unknown[]): void {
   if (!localOperation || !mappingOperation || localOperation === mappingOperation ||
       local.PK !== `TENANT#${ctx.tenantId}#APIKEY` || !expectedMapping ||
       mapping.PK !== expectedMapping.PK || mapping.SK !== expectedMapping.SK) {
-    throw new AppError('FORBIDDEN', 'Cặp APIKEY/KEYMAP không hợp lệ hoặc không thuộc tenant hiện tại.');
+    throw new AppError('PERMISSION_DENIED', 'Cặp APIKEY/KEYMAP không hợp lệ hoặc không thuộc tenant hiện tại.');
   }
 
   for (const op of records) {
@@ -43,6 +43,6 @@ export function validateApiKeyTransaction(ctx: Ctx, ops: unknown[]): void {
     throw new AppError('INVALID_REQUEST', 'Kiểu giao dịch APIKEY/KEYMAP không được hỗ trợ.');
   }
   if (isCreate && (mappingOperation.Put.Item.tenantId !== ctx.tenantId || localOperation.Put.Item.keyId !== keyId)) {
-    throw new AppError('FORBIDDEN', 'APIKEY và KEYMAP phải cùng thuộc tenant/ngữ cảnh đã xác thực.');
+    throw new AppError('PERMISSION_DENIED', 'APIKEY và KEYMAP phải cùng thuộc tenant/ngữ cảnh đã xác thực.');
   }
 }

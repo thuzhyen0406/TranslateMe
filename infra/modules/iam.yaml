@@ -3,6 +3,10 @@ Description: >-
   TranslateMe Lambda execution roles. Deploy after the data and identity stacks,
   then pass the role ARN outputs to the Lambda function stack.
 
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
 Parameters:
   TableArn:
     Type: String
@@ -16,6 +20,9 @@ Parameters:
   BatchUploadBucketArn:
     Type: String
     Description: S3 bucket ARN used for tenant batch upload objects.
+  BatchUploadKmsKeyArn:
+    Type: String
+    Description: KMS key ARN used by the encrypted tenant batch bucket.
   WorkerFunctionArn:
     Type: String
     Description: Worker Lambda ARN invoked asynchronously by the proxy.
@@ -82,8 +89,20 @@ Resources:
                 Resource: !Sub '${PayloadBucketArn}/worker/*'
               - Sid: TenantBatchUploadObjects
                 Effect: Allow
-                Action: s3:PutObject
-                Resource: !Sub '${BatchUploadBucketArn}/batch/*'
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${BatchUploadBucketArn}/batch/*/input/*'
+              - Sid: TenantBatchUploadKmsAccess
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref BatchUploadKmsKeyArn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 's3.${AWS::Region}.amazonaws.com'
+                    kms:EncryptionContext:aws:s3:arn: !Ref BatchUploadBucketArn
 
   ProxyExecutionRole:
     Type: AWS::IAM::Role
@@ -185,8 +204,21 @@ Resources:
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InviteTenantMembers
                 Effect: Allow
-                Action: cognito-idp:AdminCreateUser
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminDeleteUser
                 Resource: !Ref UserPoolArn
+              - Sid: ManageTenantApiKeys
+                Effect: Allow
+                Action:
+                  - apigateway:POST
+                  - apigateway:PATCH
+                  - apigateway:DELETE
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys'
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys/*'
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys'
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys/*'
               - Sid: ImportGlossaryTerminology
                 Effect: Allow
                 Action: translate:ImportTerminology

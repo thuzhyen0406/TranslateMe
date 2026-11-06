@@ -12,6 +12,7 @@
 import { randomInt } from 'node:crypto';
 import {
   AdminCreateUserCommand,
+  AdminDeleteUserCommand,
   CognitoIdentityProviderClient,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { db } from '../../../libs/common/db.js';
@@ -22,7 +23,7 @@ import {
   isInvitableRole,
   type InvitableRole,
 } from '../../../libs/common/roles.js';
-import { keys, type Ctx } from '../../../libs/common/types.js';
+import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
 
 export interface CognitoAdminCreateClient {
   send(command: AdminCreateUserCommand): Promise<{
@@ -37,6 +38,7 @@ export interface CognitoAdminCreateClient {
 export interface InviteMemberDeps {
   cognitoClient?: CognitoAdminCreateClient;
   db?: Pick<typeof db, 'put'>;
+  deleteUser?: (userPoolId: string, username: string) => Promise<void>;
   userPoolId?: string;
   tempPasswordGenerator?: () => string;
   now?: () => Date;
@@ -50,6 +52,34 @@ export interface InviteMemberResult {
   tenantId: string;
   email: string;
   role: InvitableRole;
+}
+
+/** Xóa Cognito user vừa tạo nếu không hoàn tất được MEMBER; log metadata an toàn khi thao tác bù thất bại. */
+async function compensateCognitoUser(
+  tenantId: string,
+  userPoolId: string,
+  username: string,
+  requestId: string,
+  deps: InviteMemberDeps,
+  cause: unknown,
+): Promise<void> {
+  try {
+    if (deps.deleteUser) {
+      await deps.deleteUser(userPoolId, username);
+      return;
+    }
+    if (deps.cognitoClient) throw new Error('Injected Cognito client has no AdminDeleteUser adapter');
+    await getDefaultCognitoClient().send(new AdminDeleteUserCommand({ UserPoolId: userPoolId, Username: username }));
+  } catch (cleanupError) {
+    console.error(JSON.stringify({
+      level: 'ERROR',
+      event: 'INVITE_MEMBER_COMPENSATION_FAILED',
+      tenantId,
+      request_id: requestId,
+      causeName: cause instanceof Error ? cause.name : 'UnknownError',
+      cleanupErrorName: cleanupError instanceof Error ? cleanupError.name : 'UnknownError',
+    }));
+  }
 }
 
 const UPPER = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -147,7 +177,9 @@ export async function inviteMember(
 
   const userSub = output.User?.Attributes?.find((a) => a.Name === 'sub')?.Value?.trim();
   if (!userSub) {
-    throw new Error('Cognito không trả về sub; không thể tạo bản ghi MEMBER');
+    const missingSub = new AppError('INTERNAL_ERROR', 'Cognito khÃ´ng tráº£ vá» sub; khÃ´ng thá»ƒ táº¡o báº£n ghi MEMBER.');
+    await compensateCognitoUser(cleanTenantId, userPoolId, output.User?.Username ?? cleanEmail, deps.requestId ?? 'invite-member', deps, missingSub);
+    throw missingSub;
   }
 
   const memberCtx: Ctx = {
@@ -155,19 +187,24 @@ export async function inviteMember(
     via: 'JWT',
     requestId: deps.requestId ?? 'invite-member',
   };
-  await (deps.db ?? db).put(
-    memberCtx,
-    {
-      ...keys.member(memberCtx, userSub),
-      tenantId: cleanTenantId,
-      userSub,
-      email: cleanEmail,
-      role,
-      status: 'ACTIVE',
-      createdAt: (deps.now ?? (() => new Date()))().toISOString(),
-    },
-    'attribute_not_exists(PK) AND attribute_not_exists(SK)',
-  );
+  try {
+    await (deps.db ?? db).put(
+      memberCtx,
+      {
+        ...keys.member(memberCtx, userSub),
+        tenantId: cleanTenantId,
+        userSub,
+        email: cleanEmail,
+        role,
+        status: 'ACTIVE',
+        createdAt: (deps.now ?? (() => new Date()))().toISOString(),
+      },
+      'attribute_not_exists(PK) AND attribute_not_exists(SK)',
+    );
+  } catch (error) {
+    await compensateCognitoUser(cleanTenantId, userPoolId, output.User?.Username ?? cleanEmail, deps.requestId ?? 'invite-member', deps, error);
+    throw error;
+  }
 
   return {
     username: output.User?.Username ?? cleanEmail,

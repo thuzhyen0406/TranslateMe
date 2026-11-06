@@ -4,6 +4,8 @@ import { ROLES, roleFromClaim } from '../../../libs/common/roles.js';
 
 type Claims = Record<string, unknown>;
 
+type MemberReader = Pick<typeof db, 'get'>;
+
 function memberRole(value: unknown): Role | null {
   if (
     value === ROLES.TENANT_ADMIN ||
@@ -45,16 +47,31 @@ export async function contextFromIdTokenClaims(
     role,
   };
 
-  const member = await db.get(
+  await requireActiveMember(ctx);
+
+  return ctx;
+}
+
+/** Đọc MEMBER hiện hành theo tenant/sub; input là Ctx JWT và DB tùy chọn, output void hoặc PERMISSION_DENIED. */
+export async function requireActiveMember(
+  ctx: Ctx,
+  memberDb: MemberReader = db,
+): Promise<void> {
+  if (!ctx.sub || !ctx.role) {
+    throw new AppError('PERMISSION_DENIED', 'Không xác định được thành viên hiện tại.');
+  }
+  const member = await memberDb.get(
     ctx,
-    keys.member(ctx, sub),
+    keys.member(ctx, ctx.sub),
     { consistent: true },
   );
 
   if (
     !member ||
     member.status !== 'ACTIVE' ||
-    memberRole(member.role) !== role
+    member.tenantId !== ctx.tenantId ||
+    member.userSub !== ctx.sub ||
+    memberRole(member.role) !== ctx.role
   ) {
     throw new AppError(
       'PERMISSION_DENIED',
@@ -62,5 +79,4 @@ export async function contextFromIdTokenClaims(
     );
   }
 
-  return ctx;
 }

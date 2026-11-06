@@ -98,6 +98,11 @@ export interface FormatParser {
 
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
+/** Đếm code point sau NFC, bỏ marker nội bộ và gộp khoảng trắng như quy ước tính quota. */
+export function countChars(text: string): number {
+  return Array.from(stripMarkers(text).normalize('NFC').replace(/\s+/gu, ' ').trim()).length;
+}
+
 /** Định dạng không hỗ trợ (hoặc chưa cắm vào) */
 export class UnsupportedFormat extends Error {
   override name = 'UnsupportedFormat';

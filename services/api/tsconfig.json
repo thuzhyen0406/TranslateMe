@@ -20,6 +20,7 @@
   },
   "include": [
     "auth/**/*.ts",
+    "console/**/*.ts",
     "sites/**/*.ts",
     "glossary/**/*.ts",
     "batch/**/*.ts",
@@ -33,6 +34,12 @@
     "../../libs/common/invalidation.ts",
     "../../libs/common/glossary.ts",
     "../../libs/common/text-utils.ts",
+    "../../libs/common/parsers.ts",
+    "../../libs/common/markers.ts",
+    "../../libs/common/extract.ts",
+    "../../libs/common/rebuild.ts",
+    "../../libs/common/htmlDom.ts",
+    "../../libs/common/tenantAws.ts",
     "../../libs/common/usage/usage.ts"
   ],
   "exclude": ["dist", "node_modules"]

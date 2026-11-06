@@ -14,6 +14,7 @@ import {
 } from '@aws-sdk/client-api-gateway';
 import { db, requireRole } from '../../../libs/common/db.js';
 import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
+import { requireActiveMember } from '../auth/context.js';
 
 export type ApiKeyPlan = 'Basic' | 'Standard';
 export type ApiKeyStatus = 'PENDING' | 'ACTIVE' | 'REVOKED';
@@ -141,21 +142,6 @@ function requireApiKeyManagerRole(ctx: Ctx): void {
     requireRole(ctx, ['TENANT_ADMIN', 'DEVELOPER']);
   } catch {
     throw new AppError('PERMISSION_DENIED', 'Vai trò hiện tại không được phép quản lý API key.');
-  }
-}
-
-/** Đọc MEMBER theo Cognito sub và xác nhận còn hiệu lực/đúng role; input là Ctx và DB deps, output void hoặc PERMISSION_DENIED. */
-async function requireActiveMember(ctx: Ctx, deps: ApiKeyManagerDependencies): Promise<void> {
-  if (!ctx.sub) throw new AppError('PERMISSION_DENIED', 'Không xác định được thành viên hiện tại.');
-  const member = await deps.db.get(ctx, keys.member(ctx, ctx.sub), { consistent: true });
-  const persistedRoles: Record<NonNullable<Ctx['role']>, string[]> = {
-    TENANT_ADMIN: ['Tenant Admin', 'TENANT_ADMIN'],
-    DEVELOPER: ['Developer', 'DEVELOPER'],
-    REVIEWER: ['Reviewer', 'REVIEWER'],
-  };
-  if (!member || member.status !== 'ACTIVE' || member.tenantId !== ctx.tenantId ||
-      member.userSub !== ctx.sub || !ctx.role || !persistedRoles[ctx.role]?.includes(member.role)) {
-    throw new AppError('PERMISSION_DENIED', 'MEMBER không còn hiệu lực hoặc vai trò đã thay đổi.');
   }
 }
 
@@ -335,7 +321,7 @@ export async function createApiKey(
 ): Promise<{ key: ApiKeySummary; value: string }> {
   requireApiKeyManagerRole(ctx);
   const config = await requireActiveTenant(ctx, deps);
-  await requireActiveMember(ctx, deps);
+  await requireActiveMember(ctx, deps.db);
   const name = typeof input?.name === 'string' ? input.name.trim() : '';
   if (!name || name.length > 128) throw new AppError('INVALID_REQUEST', 'Tên API key phải dài từ 1 đến 128 ký tự.');
   validatePlan(input?.plan, config.plan);
@@ -348,6 +334,8 @@ export async function listApiKeys(
   deps: ApiKeyManagerDependencies = makeDefaultDependencies(),
 ): Promise<ApiKeySummary[]> {
   requireApiKeyManagerRole(ctx);
+  await requireActiveTenant(ctx, deps);
+  await requireActiveMember(ctx, deps.db);
   const rows = await deps.db.query(ctx, `TENANT#${ctx.tenantId}#APIKEY`, 'KEY#');
   return rows.map((row) => ({
     key_id: String(row.keyId ?? String(row.SK).slice(4)),
@@ -368,7 +356,7 @@ export async function rotateApiKey(
 ): Promise<{ key: ApiKeySummary; value: string }> {
   requireApiKeyManagerRole(ctx);
   const config = await requireActiveTenant(ctx, deps);
-  await requireActiveMember(ctx, deps);
+  await requireActiveMember(ctx, deps.db);
   const current = await getTenantApiKey(ctx, validateKeyId(keyId), deps);
   if (current.status !== 'ACTIVE') throw new AppError('INVALID_REQUEST', 'Chỉ có thể xoay API key đang hoạt động.');
   validatePlan(current.plan, config.plan);
@@ -383,6 +371,7 @@ export async function revokeApiKey(
 ): Promise<ApiKeySummary> {
   requireApiKeyManagerRole(ctx);
   await requireActiveTenant(ctx, deps);
+  await requireActiveMember(ctx, deps.db);
   const cleanKeyId = validateKeyId(keyId);
   const current = await getTenantApiKey(ctx, cleanKeyId, deps);
   if (current.status === 'REVOKED') return toSummary(current);
@@ -438,6 +427,7 @@ export async function changeApiKeyPlan(
 ): Promise<ApiKeySummary> {
   requireApiKeyManagerRole(ctx);
   const config = await requireActiveTenant(ctx, deps);
+  await requireActiveMember(ctx, deps.db);
   const cleanKeyId = validateKeyId(keyId);
   const current = await getTenantApiKey(ctx, cleanKeyId, deps);
   if (current.status !== 'ACTIVE') throw new AppError('INVALID_REQUEST', 'Chỉ có thể đổi gói API key đang hoạt động.');
@@ -523,7 +513,12 @@ export async function handleApiKeyRoute(
   deps: ApiKeyManagerDependencies = makeDefaultDependencies(),
 ): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
   const requestId = event.requestContext?.requestId ?? ctx.requestId;
-  const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
+  const headers = {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'access-control-allow-origin': '*',
+    'access-control-allow-headers': 'Authorization,Content-Type',
+  };
   const respond = (statusCode: number, payload: Record<string, unknown>) => ({ statusCode, headers, body: JSON.stringify({ request_id: requestId, ...payload }) });
 
   try {

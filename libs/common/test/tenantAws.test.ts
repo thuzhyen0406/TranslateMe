@@ -29,7 +29,8 @@ describe('tenant-scoped AWS sessions', () => {
       batchUploadBucketArn: 'arn:aws:s3:::uploads',
     }));
     assert.equal(policy.Statement[1].Resource, 'arn:aws:s3:::payloads/worker/t_aaaaaaaaaaaaaaaaaaaaaaaa/*');
-    assert.equal(policy.Statement[2].Resource, 'arn:aws:s3:::uploads/batch/t_aaaaaaaaaaaaaaaaaaaaaaaa/*');
+    assert.equal(policy.Statement[2].Resource, 'arn:aws:s3:::uploads/batch/t_aaaaaaaaaaaaaaaaaaaaaaaa/input/*');
+    assert.deepEqual(policy.Statement[2].Action, ['s3:GetObject', 's3:PutObject']);
   });
 
   it('routes tenant data to an STS session and platform mappings to the execution role', async () => {
