@@ -12,6 +12,7 @@ import {
   validateUpsertTermInput,
   type GlossaryApi,
 } from '../services/glossaryApi.js';
+import { canConsoleRequest } from '../services/tenantPolicy.js';
 import type { AuthenticatedSession } from '../types/auth.js';
 import type {
   CsvImportPreviewOrCommitResult,
@@ -50,6 +51,13 @@ const DEMO_FAULTY_CSV = [
 export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
   const api = useMemo(() => glossaryApiFor(session), [session]);
   const isTenantAdmin = session.role === 'TENANT_ADMIN';
+  // Tenant LOCKED: chặn thao tác ghi ngay trên giao diện (cùng chính sách với tenantPolicy phía máy chủ)
+  const tenantLocked = !canConsoleRequest({
+    method: 'PUT',
+    path: '/console/glossary/terms',
+    tenantStatus: session.tenantStatus ?? 'ACTIVE',
+  });
+  const canWrite = isTenantAdmin && !tenantLocked;
 
   const [version, setVersion] = useState<number>(0);
   const [terminologyName, setTerminologyName] = useState<string | undefined>(undefined);
@@ -144,7 +152,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
 
   const handleSaveTerm = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isTenantAdmin) return;
+    if (!canWrite) return;
     setErrorMessage(null);
     setSuccessMessage(null);
 
@@ -187,7 +195,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
   };
 
   const handleDeleteTerm = async (entry: GlossaryTermEntry) => {
-    if (!isTenantAdmin) return;
+    if (!canWrite) return;
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
@@ -228,7 +236,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
   };
 
   const handlePreviewCsv = async () => {
-    if (!isTenantAdmin) return;
+    if (!canWrite) return;
     setCsvBusy(true);
     setErrorMessage(null);
     try {
@@ -243,7 +251,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
   };
 
   const handleCommitCsv = async () => {
-    if (!isTenantAdmin) return;
+    if (!canWrite) return;
     setCsvBusy(true);
     setErrorMessage(null);
     try {
@@ -291,7 +299,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
             Tải tệp mẫu (.csv)
           </button>
 
-          {isTenantAdmin ? (
+          {canWrite ? (
             <>
               <button
                 type="button"
@@ -315,7 +323,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
             </>
           ) : (
             <span className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
-              Chế độ chỉ xem ({session.role})
+              {tenantLocked ? 'Tài khoản đang bị tạm khóa – chỉ xem' : `Chế độ chỉ xem (${session.role})`}
             </span>
           )}
         </div>
@@ -339,7 +347,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
       )}
 
       {/* Khung Thêm / Sửa thuật ngữ đơn lẻ (Bước 2 của Q3) */}
-      {showTermForm && isTenantAdmin && (
+      {showTermForm && canWrite && (
         <form
           onSubmit={handleSaveTerm}
           className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm space-y-4"
@@ -461,7 +469,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
       )}
 
       {/* Khung Nhập CSV UTF-8 & Xem trước (Bước 3 & 4 của Q3 — Hình 1.9) */}
-      {showCsvModal && isTenantAdmin && (
+      {showCsvModal && canWrite && (
         <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm space-y-4">
           <div className="flex items-center justify-between border-b border-gray-100 pb-3">
             <div>
@@ -681,7 +689,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
                   <th className="py-3 px-4">Tiếng Hàn (ko)</th>
                   <th className="py-3 px-4">Tiếng Nhật (ja)</th>
                   <th className="py-3 px-4">Phiên bản</th>
-                  {isTenantAdmin && <th className="py-3 px-4 text-right">Thao tác</th>}
+                  {canWrite && <th className="py-3 px-4 text-right">Thao tác</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200 text-sm">
@@ -710,7 +718,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
                     <td className="py-3 px-4 text-xs font-mono text-gray-500">
                       v{entry.updatedInVersion}
                     </td>
-                    {isTenantAdmin && (
+                    {canWrite && (
                       <td className="py-3 px-4 text-right space-x-2">
                         <button
                           type="button"

@@ -482,7 +482,7 @@ const num = (v: unknown, fallback = 0): number =>
 export function glossaryTermFromJson(raw: Json): GlossaryTermEntry {
   const sourceTerm = str(raw.source_term ?? raw.sourceTerm);
   const normalizedTerm =
-    str(raw.normalized_term ?? raw.normalizedTerm) || normalizeGlossaryTerm(sourceTerm);
+    str(raw.normalized_term ?? raw.normalizedTerm ?? raw.normalized) || normalizeGlossaryTerm(sourceTerm);
   const type: GlossaryTermType = str(raw.type) === 'KEEP' ? 'KEEP' : 'FIXED';
   const rawTranslations =
     raw.translations && typeof raw.translations === 'object' ? (raw.translations as Json) : {};
@@ -497,7 +497,7 @@ export function glossaryTermFromJson(raw: Json): GlossaryTermEntry {
     sourceLang: str(raw.source_lang ?? raw.sourceLang) || 'vi',
     type,
     translations,
-    updatedInVersion: num(raw.updated_in_version ?? raw.updatedInVersion, 1),
+    updatedInVersion: num(raw.updated_in_version ?? raw.updatedInVersion ?? raw.sinceVersion, 1),
     updatedAt: str(raw.updated_at ?? raw.updatedAt) || new Date().toISOString(),
   };
 }
@@ -613,16 +613,21 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
       const encoded = encodeURIComponent(input.sourceTerm);
       const data = await request('PUT', `/console/glossary/terms/${encoded}`, {
         sourceTerm: input.sourceTerm,
-        source_term: input.sourceTerm,
         sourceLang: input.sourceLang,
-        source_lang: input.sourceLang,
         type: input.type,
         translations: input.translations,
         targetLangs: input.targetLangs,
-        target_langs: input.targetLangs,
       });
       return {
-        term: glossaryTermFromJson((data.term ?? data) as Json),
+        term: glossaryTermFromJson(
+          (data.term as Json | undefined) ?? {
+            sourceTerm: input.sourceTerm,
+            sourceLang: input.sourceLang,
+            type: input.type,
+            translations: input.translations ?? {},
+            sinceVersion: data.version,
+          },
+        ),
         version: num(data.version, 1),
         ...(data.terminology_synced !== undefined || data.terminologySynced !== undefined
           ? { terminologySynced: Boolean(data.terminology_synced ?? data.terminologySynced) }
@@ -647,7 +652,6 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
         csv: csvText,
         mode: 'PREVIEW',
         onDuplicate,
-        on_duplicate: onDuplicate,
       });
       return csvImportResultFromJson(data);
     },
@@ -657,7 +661,6 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
         csv: csvText,
         mode: 'COMMIT',
         onDuplicate,
-        on_duplicate: onDuplicate,
       });
       return csvImportResultFromJson(data);
     },

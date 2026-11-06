@@ -139,14 +139,15 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
         return new Response(
           JSON.stringify({
             version: 3,
-            terminology_name: 'tm-t_123-v3',
+            terminologyName: 'tm-t_123-v3',
             terms: [
               {
-                source_term: 'Homestay ABC',
-                source_lang: 'vi',
+                normalized: 'homestay abc',
+                sourceTerm: 'Homestay ABC',
+                sourceLang: 'vi',
                 type: 'KEEP',
                 translations: { en: 'Homestay ABC' },
-                updated_in_version: 3,
+                sinceVersion: 3,
               },
             ],
           }),
@@ -158,14 +159,7 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
         return new Response(
           JSON.stringify({
             version: 4,
-            terminology_synced: true,
-            term: {
-              source_term: 'cao lầu',
-              source_lang: 'vi',
-              type: 'FIXED',
-              translations: { en: 'cao lau noodles' },
-              updated_in_version: 4,
-            },
+            terminologySynced: true,
           }),
           { status: 200 },
         );
@@ -174,12 +168,12 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
       if (url.endsWith('/console/glossary/import/preview') && method === 'POST') {
         return new Response(
           JSON.stringify({
-            valid_rows: 4,
+            validRows: 4,
             errors: [],
             duplicates: [{ term: 'Homestay ABC' }],
-            added_count: 3,
-            overwritten_count: 1,
-            skipped_count: 0,
+            addedCount: 3,
+            overwrittenCount: 1,
+            skippedCount: 0,
             version: 4,
           }),
           { status: 200 },
@@ -204,6 +198,8 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
     assert.equal(state.version, 3);
     assert.equal(state.terminologyName, 'tm-t_123-v3');
     assert.equal(state.terms.length, 1);
+    assert.equal(state.terms[0].normalizedTerm, 'homestay abc');
+    assert.equal(state.terms[0].updatedInVersion, 3);
     assert.equal(calls[0].auth, 'Bearer jwt-admin-token');
 
     const upserted = await api.upsertTerm({
@@ -214,11 +210,23 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
       targetLangs: ['en'],
     });
     assert.equal(upserted.version, 4);
+    assert.equal(upserted.terminologySynced, true);
+    // F4 không trả term -> console dựng lại từ dữ liệu đã gửi
     assert.equal(upserted.term.sourceTerm, 'cao lầu');
+    assert.equal(upserted.term.type, 'FIXED');
+    // Body chỉ dùng camelCase như handleGlossaryRoute
+    const putBody = calls[1].body as Record<string, unknown>;
+    assert.equal(putBody.sourceTerm, 'cao lầu');
+    assert.equal('source_term' in putBody, false);
+    assert.equal('source_lang' in putBody, false);
+    assert.equal('target_langs' in putBody, false);
 
     const preview = await api.previewImportCsv(buildSampleGlossaryCsv(), 'OVERWRITE');
     assert.equal(preview.validRows, 4);
     assert.equal(preview.overwrittenCount, 1);
+    const previewBody = calls[2].body as Record<string, unknown>;
+    assert.equal(previewBody.onDuplicate, 'OVERWRITE');
+    assert.equal('on_duplicate' in previewBody, false);
 
     await assert.rejects(
       () => api.deleteTerm('Homestay ABC'),

@@ -51,10 +51,18 @@ Tài liệu mô tả màn **Thuật ngữ** (Q3) trên web console cho **Tenant 
 
 ## 4. Hợp đồng API kết nối dịch vụ F4 (`services/api/glossary/glossaryManager.ts`)
 
-| Route | Phương thức | Phản hồi |
-| :--- | :--- | :--- |
-| `/console/glossary/terms` | `GET` | `{ terms: GlossaryTerm[], glossary_version: number }` |
-| `/console/glossary/terms/{term}` | `PUT` | `{ term: GlossaryTerm, glossary_version: number }` |
-| `/console/glossary/terms/{term}` | `DELETE` | `{ deleted: true, glossary_version: number }` |
-| `/console/glossary/import/preview` | `POST` | `{ mode: 'PREVIEW', valid_count, skipped_count, duplicate_count, duplicates, errors }` |
-| `/console/glossary/import` | `POST` | `{ mode: 'COMMIT', valid_count, imported_count, skipped_count, duplicate_count, duplicates, errors, glossary_version }` |
+Body gửi lên dùng **camelCase** đúng như `handleGlossaryRoute` đọc (không gửi kèm snake_case). Phản hồi lấy từ `listGlossary` / `putTerm` / `deleteTerm` / `importCsv`:
+
+| Route | Phương thức | Body | Phản hồi |
+| :--- | :--- | :--- | :--- |
+| `/console/glossary/terms` | `GET` | – | `{ version, terminologyName, terms: [{ normalized, sourceTerm, sourceLang, type, translations, sinceVersion }] }` |
+| `/console/glossary/terms/{term}` | `PUT` | `{ sourceTerm, sourceLang, type, translations, targetLangs }` | `{ version, terminologySynced }` (không kèm `term`; console dựng lại mục từ dữ liệu đã gửi) |
+| `/console/glossary/terms/{term}` | `DELETE` | – | `{ version, terminologySynced }` |
+| `/console/glossary/import/preview` | `POST` | `{ csv, mode: 'PREVIEW', onDuplicate }` | `{ validRows, errors: [{ row, reason }], duplicates: [{ term }], addedCount, overwrittenCount, skippedCount, version }` |
+| `/console/glossary/import` | `POST` | `{ csv, mode: 'COMMIT', onDuplicate }` | `{ validRows, errors, duplicates, addedCount, overwrittenCount, skippedCount, version, terminologySynced }` |
+
+`onDuplicate`: `OVERWRITE` (mặc định) hoặc `KEEP_EXISTING`.
+
+## 5. Tenant bị khóa (LOCKED)
+
+Khi phiên có `tenantStatus = 'LOCKED'`, `GlossaryPage` dùng `canConsoleRequest` (`console/src/services/tenantPolicy.ts`) để ẩn **Thêm / Sửa / Xóa / Nhập CSV** và hiện nhãn "Tài khoản đang bị tạm khóa – chỉ xem"; danh sách và CSV mẫu vẫn xem được. Nếu phiên chưa có trạng thái tenant, máy chủ vẫn chặn bằng `TENANT_SUSPENDED`.
