@@ -37,7 +37,7 @@ const out = rebuild(skeleton, translations, { targetLang: 'en' }); // translatio
 ## DOCX (Task 4.9 – TV4)
 
 - **Mở an toàn (chống ZIP bomb & XXE):**
-  - Đọc ZIP thuần bằng `node:zlib` trong bộ nhớ; kiểm tra số mục `<= 2.000` (`DOCX_MAX_ZIP_ENTRIES`), tổng kích thước sau giải nén `<= 50 MB` (`DOCX_MAX_UNCOMPRESSED_BYTES`) và tỷ lệ nén `<= 100:1` (`DOCX_MAX_COMPRESSION_RATIO`) cả trên Central Directory lẫn trong lúc giải nén (`maxOutputLength`).
+  - Đọc ZIP thuần bằng `node:zlib` trong bộ nhớ; kiểm tra số mục `<= 2.000` (`DOCX_MAX_ZIP_ENTRIES`), tổng kích thước sau giải nén `<= 50 MB` (`DOCX_MAX_UNCOMPRESSED_BYTES`) và tỷ lệ nén `<= 200:1` (`DOCX_MAX_COMPRESSION_RATIO`) cả trên Central Directory lẫn trong lúc giải nén (`maxOutputLength`); kiểm tra toàn vẹn CRC32 của từng mục sau giải nén.
   - Từ chối mọi khai báo `<!DOCTYPE` hoặc `<!ENTITY` trong các phần XML/`.rels` (`CorruptFile('XXE_DETECTED')`).
 - **Duyệt thân tài liệu, gộp run & tạo ký hiệu `{n}`:**
   - Duyệt đệ quy `w:body` qua các đoạn `w:p` và bảng `w:tbl -> w:tr -> w:tc -> w:p` (kể cả bảng lồng nhau).
@@ -47,3 +47,7 @@ const out = rebuild(skeleton, translations, { targetLang: 'en' }); // translatio
   - Tạo các `w:r` mới với `xml:space="preserve"`, sao chép nguyên vẹn từng byte mọi phần khác của gói ZIP (kiểu, ảnh, đầu trang, chân trang…).
   - Khi `targetLang` là `ko`, `ja` hoặc `zh` (`zh-TW`), tự động bổ sung `w:eastAsia` vào `w:rFonts` và `w:lang` nếu run chưa có.
   - Kiểm tra số lượng `w:p` và `w:tc` sau khi dựng bằng hệt tệp gốc và tệp mới mở lại được bằng `parse('DOCX', ...)`.
+
+- **Phạm vi dịch và giới hạn (Bảng 2.17):**
+  - Chỉ dịch nội dung thân tài liệu chính (`w:body`).
+  - Đầu trang (`header`), chân trang (`footer`), chú thích (`footnotes`, `endnotes`), bình luận (`comments`), mục lục (`TOC`), hộp văn bản (`w:txbxContent`) và hình vẽ (`w:drawing`, `w:pict`) chỉ ghi nhận cảnh báo (`UNSUPPORTED_PART` / `UNSUPPORTED_ELEMENT`) và giữ nguyên vẹn trong tệp kết quả (không gửi dịch).

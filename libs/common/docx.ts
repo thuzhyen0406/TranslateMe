@@ -29,6 +29,7 @@ import {
   tokenizeMarkers,
   validateMarkers,
 } from './markers.js';
+import { CorruptFile, MAX_FILE_BYTES } from './parserErrors.js';
 import type {
   FormatParser,
   ParseOptions,
@@ -41,19 +42,6 @@ import type {
 } from './parsers.js';
 import { isTranslatable, segmentBlock } from './segmenter.js';
 
-export const MAX_FILE_BYTES = 10 * 1024 * 1024;
-
-/** Tệp hỏng hoặc vi phạm giới hạn; reason dùng làm lý do FAILED của JOB */
-export class CorruptFile extends Error {
-  override name = 'CorruptFile';
-  constructor(
-    public reason: 'NOT_UTF8' | 'TOO_LARGE' | 'INVALID_SKELETON' | string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
 // ============================================================================
 // Ngưỡng an toàn chống ZIP bomb và XXE (Mục 2.6.6 & 2.9.1 T10)
 // ============================================================================
@@ -63,7 +51,7 @@ export const DOCX_MAX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024;
 /** Số mục (file/entry) tối đa trong gói ZIP DOCX (2.000 mục) */
 export const DOCX_MAX_ZIP_ENTRIES = 2000;
 /** Tỷ lệ nén tối đa cho phép (100:1) */
-export const DOCX_MAX_COMPRESSION_RATIO = 100;
+export const DOCX_MAX_COMPRESSION_RATIO = 200;
 
 export interface DocxParseLimits {
   maxUncompressedBytes?: number;
@@ -407,6 +395,16 @@ function readZipArchive(bytes: Uint8Array, limits: Required<DocxParseLimits> = {
         `Tỷ lệ nén thực tế của mục ${entry.name} (${out.byteLength}/${entry.compressedData.byteLength}) vượt ngưỡng ${limits.maxCompressionRatio}:1`,
       );
     }
+
+    // Kiểm tra tính toàn vẹn CRC32 so với thông tin đọc từ Central Directory
+    const actualCrc = computeCrc32(out);
+    if (actualCrc !== entry.crc32) {
+      throw new CorruptFile(
+        'INVALID_DOCX',
+        `CRC32 của mục ${entry.name} không khớp (khai báo 0x${entry.crc32.toString(16)}, thực tế 0x${actualCrc.toString(16)})`,
+      );
+    }
+
     return out;
   };
 

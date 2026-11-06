@@ -20,45 +20,14 @@
  * HTML: dùng lại extract (bước 2 của F2) và rebuildDocument: không viết lại liên kết, không canonical/hreflang/nút
  *      chọn ngôn ngữ; chỉ đặt <html lang> theo ngôn ngữ đích. Tệp phải là UTF-8.
  */
-import {
-  CorruptFile,
-  DOCX_MAX_COMPRESSION_RATIO,
-  DOCX_MAX_UNCOMPRESSED_BYTES,
-  DOCX_MAX_ZIP_ENTRIES,
-  MAX_FILE_BYTES,
-  applyEastAsianFont,
-  computeCrc32,
-  countDocxStructure,
-  createDocxPackage,
-  docxParser,
-  type DocxParagraphSegment,
-  type DocxParagraphSlot,
-  type DocxSkeleton,
-  type DocxSpanSpec,
-  type DocxZipEntrySkeleton,
-} from './docx.js';
+import { docxParser, type DocxSkeleton } from './docx.js';
 import { extract } from './extract.js';
 import { escapeMarkerText, stripMarkers } from './markers.js';
+import { CorruptFile, MAX_FILE_BYTES, UnsupportedFormat } from './parserErrors.js';
 import { rebuildDocument } from './rebuild.js';
 import { isTranslatable, segmentBlock } from './segmenter.js';
 
-export {
-  CorruptFile,
-  DOCX_MAX_COMPRESSION_RATIO,
-  DOCX_MAX_UNCOMPRESSED_BYTES,
-  DOCX_MAX_ZIP_ENTRIES,
-  MAX_FILE_BYTES,
-  applyEastAsianFont,
-  computeCrc32,
-  countDocxStructure,
-  createDocxPackage,
-  docxParser,
-  type DocxParagraphSegment,
-  type DocxParagraphSlot,
-  type DocxSkeleton,
-  type DocxSpanSpec,
-  type DocxZipEntrySkeleton,
-};
+export { docxParser, type DocxSkeleton, CorruptFile, UnsupportedFormat, MAX_FILE_BYTES };
 
 export type DocFormat = 'TXT' | 'HTML' | 'DOCX';
 
@@ -130,14 +99,6 @@ export interface RebuildOptions {
 export interface FormatParser {
   parse(bytes: Uint8Array, opts: Required<ParseOptions>): ParsedDocument;
   rebuild(skeleton: Skeleton, translations: readonly (string | null | undefined)[], opts: RebuildOptions): { bytes: Uint8Array; stats: RebuildStats };
-}
-
-/** Định dạng không hỗ trợ (hoặc chưa cắm vào) */
-export class UnsupportedFormat extends Error {
-  override name = 'UnsupportedFormat';
-  constructor(public format: string) {
-    super(`Định dạng không hỗ trợ: ${format}`);
-  }
 }
 
 const UTF8_BOM = '﻿';

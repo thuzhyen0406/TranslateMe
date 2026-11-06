@@ -2,18 +2,20 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { deflateRawSync } from 'node:zlib';
 import { parse as parseHtml, serialize } from 'parse5';
-import { computeCrc32 } from '../docx.js';
+import {
+  computeCrc32,
+  countDocxStructure,
+  createDocxPackage,
+  type DocxSkeleton,
+} from '../docx.js';
 import {
   CorruptFile,
   UnsupportedFormat,
-  countDocxStructure,
-  createDocxPackage,
   formatFromFileName,
   parse,
   rebuild,
   rebuildDetailed,
   translatedFileName,
-  type DocxSkeleton,
   type HtmlSkeleton,
   type TxtSkeleton,
 } from '../parsers.js';
@@ -579,5 +581,54 @@ describe('parse / rebuild – giao diện chung', () => {
     assert.equal(translatedFileName('gioi-thieu-homestay.docx', 'en'), 'gioi-thieu-homestay.en.docx');
     assert.equal(translatedFileName('ban.v2.txt', 'ko'), 'ban.v2.ko.txt');
     assert.equal(translatedFileName('khong-duoi', 'ja'), 'khong-duoi.ja');
+  });
+
+  it('phát hiện CRC32 không khớp sau khi giải nén -> CorruptFile(INVALID_DOCX)', () => {
+    const pkg = createDocxPackage({ 'word/document.xml': SAMPLE_DOCX_XML });
+    const corrupted = new Uint8Array(pkg);
+    // Tìm Central Directory File Header (0x02014b50)
+    for (let i = 0; i <= corrupted.byteLength - 46; i++) {
+      if (
+        corrupted[i] === 0x50 &&
+        corrupted[i + 1] === 0x4b &&
+        corrupted[i + 2] === 0x01 &&
+        corrupted[i + 3] === 0x02
+      ) {
+        // CDFH found: CRC32 nằm ở offset i + 16
+        corrupted[i + 16] ^= 0xff;
+        break;
+      }
+    }
+    assert.throws(
+      () => parse('DOCX', corrupted),
+      (e: unknown) => e instanceof CorruptFile && e.reason === 'INVALID_DOCX',
+    );
+  });
+
+  it('cho phép DOCX thật chứa bảng lớn nhiều ô trống (tỷ lệ nén cao) phân tích và dựng lại thành công', () => {
+    let rowsXml = '';
+    for (let r = 0; r < 60; r++) {
+      rowsXml += '<w:tr>';
+      for (let c = 0; c < 4; c++) {
+        rowsXml += '<w:tc><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>';
+      }
+      rowsXml += '</w:tr>';
+    }
+    const tableXml =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+      '<w:body><w:p><w:r><w:t>Bảng mẫu nhiều ô</w:t></w:r></w:p>' +
+      `<w:tbl>${rowsXml}</w:tbl>` +
+      '</w:body></w:document>';
+
+    const tableDocx = createDocxPackage({ 'word/document.xml': tableXml });
+    const parsed = parse('DOCX', tableDocx);
+    assert.equal(parsed.blocks.length, 1);
+    assert.equal(parsed.blocks[0].text, 'Bảng mẫu nhiều ô');
+
+    const rebuilt = rebuild(parsed.skeleton, ['Sample table']);
+    assert.ok(rebuilt.byteLength > 0);
+    const reparsed = parse('DOCX', rebuilt);
+    assert.equal(reparsed.blocks[0].text, 'Sample table');
   });
 });
