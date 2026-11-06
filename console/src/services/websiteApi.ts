@@ -244,6 +244,19 @@ export function prewarmJobFromJson(j: Json | null | undefined): PrewarmJob | nul
 }
 
 // ============================================================================
+// Cờ bật màn Website ở chế độ Cognito
+// ============================================================================
+
+/**
+ * Màn Website chỉ gọi API thật khi các route /console/hosts phía C6 đã được nối vào router (TV1, xem
+ * docs/console-website.md). Chế độ demo luôn bật (dùng createMockWebsiteApi). Chế độ Cognito chỉ bật khi
+ * VITE_WEBSITE_API_ENABLED=true; nếu không, màn Website hiện thông báo "chưa sẵn sàng" và không gửi request nào.
+ */
+export function isWebsiteApiEnabled(opts: { demoMode: boolean; flag?: string | undefined }): boolean {
+  return opts.demoMode || opts.flag?.trim().toLowerCase() === 'true';
+}
+
+// ============================================================================
 // Bản gọi API thật
 // ============================================================================
 

@@ -16,6 +16,10 @@ Mã nguồn: `console/src/components/WebsitePage.tsx` (giao diện), `console/sr
 | `mock` (mặc định) | `createMockWebsiteApi`: giả lập trong trình duyệt, có sẵn website "Homestay ABC Hội An". Xác minh demo luôn thành công, trừ địa chỉ chứa `sai-ma` (mã không khớp) hoặc `khong-truy-cap` (không truy cập được). Dịch trước demo tăng 25% mỗi lần hỏi. |
 | `cognito` | `createHttpWebsiteApi`: gọi `VITE_API_BASE_URL` kèm `Authorization: Bearer <idToken>`. |
 
+## Cờ bật ở chế độ Cognito
+
+Các route `/console/hosts` phía C6 chưa được nối vào router, nên màn Website ở chế độ `cognito` **mặc định tắt**: chỉ hiện thông báo "Tính năng quản lý website chưa được bật trên môi trường này" và không gửi request nào. Khi C6 đã nối đủ các route trong bảng dưới, đặt `VITE_WEBSITE_API_ENABLED=true` khi build console để bật (`isWebsiteApiEnabled` trong `websiteApi.ts`). Chế độ `mock` luôn bật.
+
 ## Hợp đồng API cần ở C6 (TV1 – F1)
 
 `services/api/sites/siteManager.ts` hiện có `createSite` và `verifySite`, chưa có route. Console gọi theo Bảng 2.9, JSON snake_case (QC-1):

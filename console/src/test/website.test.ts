@@ -14,6 +14,7 @@ import {
   verificationMetaTag,
   websiteErrorMessage,
   websiteFromJson,
+  isWebsiteApiEnabled,
 } from '../services/websiteApi.js';
 import type { CreateWebsiteInput } from '../types/website.js';
 
@@ -72,6 +73,16 @@ describe('websiteFromJson / prewarmJobFromJson', () => {
     assert.deepEqual([j.progress, j.reason], [100, 'X']);
     assert.equal(isPrewarmActive(j), true);
     assert.equal(isPrewarmActive({ ...j, status: 'SUCCEEDED' }), false);
+  });
+});
+
+describe('isWebsiteApiEnabled (cờ bật màn Website ở chế độ Cognito)', () => {
+  it('demo luôn bật; Cognito chỉ bật khi VITE_WEBSITE_API_ENABLED=true', () => {
+    assert.equal(isWebsiteApiEnabled({ demoMode: true }), true);
+    assert.equal(isWebsiteApiEnabled({ demoMode: true, flag: 'false' }), true);
+    assert.equal(isWebsiteApiEnabled({ demoMode: false }), false);
+    for (const flag of ['', 'false', '0', 'yes', '1']) assert.equal(isWebsiteApiEnabled({ demoMode: false, flag }), false, flag);
+    for (const flag of ['true', ' TRUE ', 'True']) assert.equal(isWebsiteApiEnabled({ demoMode: false, flag }), true, flag);
   });
 });
 

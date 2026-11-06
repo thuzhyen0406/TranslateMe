@@ -9,6 +9,7 @@ import {
   createHttpWebsiteApi,
   createMockWebsiteApi,
   isPrewarmActive,
+  isWebsiteApiEnabled,
   languageLabel,
   parseSelectors,
   translationUrl,
@@ -50,8 +51,10 @@ function getDemoApi() {
   return demoApi;
 }
 
-export function websiteApiFor(session: AuthenticatedSession): WebsiteApi {
+/** null = chế độ Cognito nhưng route /console/hosts chưa sẵn sàng (VITE_WEBSITE_API_ENABLED chưa bật) */
+export function websiteApiFor(session: AuthenticatedSession): WebsiteApi | null {
   if (IS_DEMO_AUTH_MODE) return getDemoApi();
+  if (!isWebsiteApiEnabled({ demoMode: false, flag: env.VITE_WEBSITE_API_ENABLED })) return null;
   return createHttpWebsiteApi({ baseUrl: env.VITE_API_BASE_URL ?? '', getToken: () => session.idToken });
 }
 
@@ -565,9 +568,27 @@ const WebsiteDetail: React.FC<{ api: WebsiteApi; slug: string; onBack: () => voi
 
 // ----------------------------------------------------------------------------
 
+/** Chế độ Cognito khi API quản lý website chưa được nối: không gửi request nào, chỉ báo tính năng chưa sẵn sàng */
+const WebsiteUnavailable: React.FC = () => (
+  <div className="max-w-3xl">
+    <h1 className="text-xl font-bold text-gray-900">Website</h1>
+    <section className={`${card} mt-4 p-6`}>
+      <p className="text-sm font-semibold text-gray-800">Tính năng quản lý website chưa được bật trên môi trường này.</p>
+      <p className="mt-2 text-sm text-gray-600">
+        Thêm website, xác minh quyền sở hữu và dịch trước sẽ dùng được khi máy chủ mở các API quản lý website. Vui lòng
+        quay lại sau hoặc liên hệ quản trị hệ thống.
+      </p>
+    </section>
+  </div>
+);
+
+// ----------------------------------------------------------------------------
+
 export const WebsitePage: React.FC<{ session: AuthenticatedSession; api?: WebsiteApi }> = ({ session, api: injected }) => {
   const api = useMemo(() => injected ?? websiteApiFor(session), [injected, session]);
   const [view, setView] = useState<View>({ kind: 'list' });
+
+  if (!api) return <WebsiteUnavailable />;
 
   if (view.kind === 'create') {
     return <CreateWebsite api={api} onCancel={() => setView({ kind: 'list' })} onCreated={(slug) => setView({ kind: 'detail', slug })} />;
