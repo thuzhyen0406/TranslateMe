@@ -19,7 +19,7 @@ Mã nguồn: `console/src/components/ReviewPage.tsx` (giao diện), `console/src
      - **Khôi phục bản máy dịch** (`POST /console/translations/restore` – F5.3): quay về `machineText`, chuyển `MACHINE`, tăng `version` và xóa cache các trang chứa câu đó.
 4. **Xử lý trạng thái làm mới bộ nhớ đệm CloudFront**:
    - Khi lưu bản sửa hoặc khôi phục, hệ thống trả về kết quả invalidation ban đầu (`SUBMITTED`, `PARTIAL`, `FAILED` hoặc `SKIPPED_NO_PAGES`).
-   - Nếu ở trạng thái `IN_PROGRESS` (`SUBMITTED`), giao diện kích hoạt polling định kỳ (`setInterval` mỗi 1.5 giây, tối đa 20 lần = 30 giây) gọi `GET /console/invalidations/{id}` cho đến khi CloudFront hoàn tất (`Completed`) hoặc thất bại (`Failed`).
+   - Nếu ở trạng thái `IN_PROGRESS` (`SUBMITTED`), giao diện kích hoạt polling định kỳ thưa dần (3s → 5s → 10s, tối đa 25 lần ≈ 3.5 phút) gọi `GET /console/invalidations/{id}` cho đến khi CloudFront hoàn tất (`Completed`) hoặc thất bại (`Failed`). Nếu hết thời gian polling, huy hiệu chuyển sang "Vẫn đang làm mới · Kiểm tra lại", cho phép người dùng bấm kiểm tra trạng thái tức thời và tiếp tục theo dõi.
    - Toàn bộ timer polling được quản lý trong `useRef` và dọn dẹp sạch sẽ khi component unmount hoặc khi trạng thái chuyển sang hoàn tất.
 5. **Xử lý lỗi đặc thù (Bảng 2.10)**:
    - `400 PLACEHOLDER_MISMATCH`: chỉ rõ các ký hiệu bị thiếu (`missing`) và bị thừa (`extra`).

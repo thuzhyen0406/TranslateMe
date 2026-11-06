@@ -10,7 +10,14 @@ export type TranslationStatus = 'MACHINE' | 'HUMAN';
 export type ReviewLabelFilter = 'ALL' | 'MACHINE' | 'HUMAN' | 'NEEDS_REVIEW';
 
 /** Trạng thái làm mới bộ nhớ đệm CloudFront sau khi sửa bản dịch (Mục 1.3.4 bước 6) */
-export type CacheRefreshState = 'IDLE' | 'NOT_USED' | 'IN_PROGRESS' | 'COMPLETED' | 'PARTIAL' | 'FAILED';
+export type CacheRefreshState =
+  | 'IDLE'
+  | 'NOT_USED'
+  | 'IN_PROGRESS'
+  | 'COMPLETED'
+  | 'PARTIAL'
+  | 'FAILED'
+  | 'TIMED_OUT';
 
 export interface GlossaryWarningItem {
   sourceTerm: string;

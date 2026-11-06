@@ -8,6 +8,8 @@ import {
   createHttpReviewApi,
   createMockReviewApi,
   reviewErrorMessage,
+  MAX_INVALIDATION_POLL_ATTEMPTS,
+  getInvalidationPollIntervalMs,
   validatePlaceholders,
   type MockReviewApi,
   type ReviewApi,
@@ -230,24 +232,94 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     return validatePlaceholders(selectedItem.srcText, draftText);
   }, [selectedItem, draftText]);
 
-  const activePollersRef = React.useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+  const activePollersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   // Dọn dẹp tất cả timer polling khi component unmount
   useEffect(() => {
     return () => {
       for (const timer of activePollersRef.current.values()) {
-        clearInterval(timer);
+        clearTimeout(timer);
       }
       activePollersRef.current.clear();
     };
   }, []);
 
-  const applyInvalidationResult = useCallback(
+  const startPolling = useCallback(
     (hash: string, invalidation: InvalidationOutcome) => {
-      // Hủy timer polling cũ của câu này nếu có
+      const invId = invalidation.invalidationId ?? invalidation.invalidationIds[0];
+      if (!invId) return;
+
       const existingTimer = activePollersRef.current.get(hash);
       if (existingTimer) {
-        clearInterval(existingTimer);
+        clearTimeout(existingTimer);
+        activePollersRef.current.delete(hash);
+      }
+
+      setCacheStatusByHash((prev) => ({
+        ...prev,
+        [hash]: { state: 'IN_PROGRESS', outcome: invalidation },
+      }));
+
+      let attempts = 0;
+
+      const runPoll = () => {
+        attempts++;
+        void api
+          .checkInvalidationStatus(invId)
+          .then((st) => {
+            if (st.status === 'Completed') {
+              activePollersRef.current.delete(hash);
+              setCacheStatusByHash((prev) => ({
+                ...prev,
+                [hash]: { state: 'COMPLETED', outcome: invalidation },
+              }));
+            } else if (st.status === 'Failed') {
+              activePollersRef.current.delete(hash);
+              setCacheStatusByHash((prev) => ({
+                ...prev,
+                [hash]: {
+                  state: 'FAILED',
+                  outcome: { ...invalidation, status: 'FAILED', error: 'Làm mới bộ nhớ đệm CloudFront thất bại' },
+                },
+              }));
+            } else if (attempts >= MAX_INVALIDATION_POLL_ATTEMPTS) {
+              activePollersRef.current.delete(hash);
+              setCacheStatusByHash((prev) => ({
+                ...prev,
+                [hash]: { state: 'TIMED_OUT', outcome: invalidation },
+              }));
+            } else {
+              const nextDelay = getInvalidationPollIntervalMs(attempts + 1);
+              const nextTimer = setTimeout(runPoll, nextDelay);
+              activePollersRef.current.set(hash, nextTimer);
+            }
+          })
+          .catch(() => {
+            if (attempts >= MAX_INVALIDATION_POLL_ATTEMPTS) {
+              activePollersRef.current.delete(hash);
+              setCacheStatusByHash((prev) => ({
+                ...prev,
+                [hash]: { state: 'TIMED_OUT', outcome: invalidation },
+              }));
+            } else {
+              const nextDelay = getInvalidationPollIntervalMs(attempts + 1);
+              const nextTimer = setTimeout(runPoll, nextDelay);
+              activePollersRef.current.set(hash, nextTimer);
+            }
+          });
+      };
+
+      const firstTimer = setTimeout(runPoll, getInvalidationPollIntervalMs(1));
+      activePollersRef.current.set(hash, firstTimer);
+    },
+    [api],
+  );
+
+  const applyInvalidationResult = useCallback(
+    (hash: string, invalidation: InvalidationOutcome) => {
+      const existingTimer = activePollersRef.current.get(hash);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
         activePollersRef.current.delete(hash);
       }
 
@@ -273,57 +345,45 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
         return;
       }
 
-      setCacheStatusByHash((prev) => ({
-        ...prev,
-        [hash]: { state: 'IN_PROGRESS', outcome: invalidation },
-      }));
-
-      const invId = invalidation.invalidationId ?? invalidation.invalidationIds[0];
-      if (!invId) return;
-
-      let attempts = 0;
-      const MAX_POLL_ATTEMPTS = 20; // 20 lần * 1.5s = tối đa 30 giây
-      const POLL_INTERVAL_MS = 1500;
-
-      const timer = setInterval(() => {
-        attempts++;
-        void api
-          .checkInvalidationStatus(invId)
-          .then((st) => {
-            if (st.status === 'Completed') {
-              clearInterval(timer);
-              activePollersRef.current.delete(hash);
-              setCacheStatusByHash((prev) => ({
-                ...prev,
-                [hash]: { state: 'COMPLETED', outcome: invalidation },
-              }));
-            } else if (st.status === 'Failed') {
-              clearInterval(timer);
-              activePollersRef.current.delete(hash);
-              setCacheStatusByHash((prev) => ({
-                ...prev,
-                [hash]: {
-                  state: 'FAILED',
-                  outcome: { ...invalidation, status: 'FAILED', error: 'Làm mới bộ nhớ đệm CloudFront thất bại' },
-                },
-              }));
-            } else if (attempts >= MAX_POLL_ATTEMPTS) {
-              clearInterval(timer);
-              activePollersRef.current.delete(hash);
-            }
-          })
-          .catch(() => {
-            if (attempts >= MAX_POLL_ATTEMPTS) {
-              clearInterval(timer);
-              activePollersRef.current.delete(hash);
-            }
-          });
-      }, POLL_INTERVAL_MS);
-
-      activePollersRef.current.set(hash, timer);
+      startPolling(hash, invalidation);
     },
-    [api],
+    [startPolling],
   );
+
+  const handleCheckInvalidationAgain = async (item: ReviewSentenceItem, outcome?: InvalidationOutcome) => {
+    if (!outcome) return;
+    const invId = outcome.invalidationId ?? outcome.invalidationIds[0];
+    if (!invId) return;
+
+    setErrorMessage(null);
+    setCacheStatusByHash((prev) => ({
+      ...prev,
+      [item.hash]: { state: 'IN_PROGRESS', outcome },
+    }));
+
+    try {
+      const st = await api.checkInvalidationStatus(invId);
+      if (st.status === 'Completed') {
+        setCacheStatusByHash((prev) => ({
+          ...prev,
+          [item.hash]: { state: 'COMPLETED', outcome },
+        }));
+        setSuccessMessage('Làm mới bộ nhớ đệm CloudFront đã hoàn tất.');
+      } else if (st.status === 'Failed') {
+        setCacheStatusByHash((prev) => ({
+          ...prev,
+          [item.hash]: {
+            state: 'FAILED',
+            outcome: { ...outcome, status: 'FAILED', error: 'Làm mới bộ nhớ đệm CloudFront thất bại' },
+          },
+        }));
+      } else {
+        startPolling(item.hash, outcome);
+      }
+    } catch {
+      startPolling(item.hash, outcome);
+    }
+  };
 
   const updateItemInState = (updated: ReviewSentenceItem, invalidation?: InvalidationOutcome) => {
     const enriched: ReviewSentenceItem = invalidation
@@ -508,6 +568,24 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
             className="underline font-semibold hover:text-amber-950"
           >
             Thử lại
+          </button>
+        </span>
+      );
+    }
+    if (st.state === 'TIMED_OUT') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-800 border border-amber-300">
+          <span>Vẫn đang làm mới</span>
+          <span className="text-amber-400">•</span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              void handleCheckInvalidationAgain(item, st.outcome);
+            }}
+            className="underline font-semibold hover:text-amber-950"
+          >
+            Kiểm tra lại
           </button>
         </span>
       );

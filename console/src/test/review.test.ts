@@ -6,6 +6,8 @@ import {
   createMockReviewApi,
   extractPlaceholderTokens,
   invalidationFromJson,
+  MAX_INVALIDATION_POLL_ATTEMPTS,
+  getInvalidationPollIntervalMs,
   normalizeInvalidationPollStatus,
   reviewErrorMessage,
   reviewItemFromJson,
@@ -149,6 +151,15 @@ describe('Q4 – kiểm tra ký hiệu định dạng {n} và thông báo lỗi 
     assert.equal(normalizeInvalidationPollStatus('InProgress'), 'InProgress');
     assert.equal(normalizeInvalidationPollStatus('FAILED'), 'Failed');
     assert.equal(normalizeInvalidationPollStatus('Failed'), 'Failed');
+
+    // 5. Polling thưa dần (3s -> 5s -> 10s) và ngưỡng tối đa 25 lần (~3.5 phút)
+    assert.equal(MAX_INVALIDATION_POLL_ATTEMPTS, 25);
+    assert.equal(getInvalidationPollIntervalMs(1), 3000);
+    assert.equal(getInvalidationPollIntervalMs(3), 3000);
+    assert.equal(getInvalidationPollIntervalMs(4), 5000);
+    assert.equal(getInvalidationPollIntervalMs(8), 5000);
+    assert.equal(getInvalidationPollIntervalMs(9), 10000);
+    assert.equal(getInvalidationPollIntervalMs(25), 10000);
   });
 });
 

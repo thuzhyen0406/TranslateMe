@@ -11,7 +11,7 @@ interface ConsoleLayoutProps {
 export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session }) => {
   const visibleMenus = useMemo(() => getVisibleMenuItems(session.role), [session.role]);
   const [activeMenu, setActiveMenu] = useState<ConsoleMenuKey>(() =>
-    session.role === 'REVIEWER' ? 'review' : 'members',
+    session.role === 'REVIEWER' ? 'review' : (visibleMenus[0]?.key ?? 'members'),
   );
 
   useEffect(() => {

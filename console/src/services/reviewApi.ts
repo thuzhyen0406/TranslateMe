@@ -279,6 +279,23 @@ export function normalizeInvalidationPollStatus(rawStatus: unknown): 'InProgress
   return 'InProgress';
 }
 
+/**
+ * Số lần polling tối đa cho một yêu cầu xóa cache CloudFront (~3.5 phút với khoảng cách thưa dần).
+ */
+export const MAX_INVALIDATION_POLL_ATTEMPTS = 25;
+
+/**
+ * Khoảng thời gian (ms) giữa các lần kiểm tra trạng thái xóa cache CloudFront:
+ * - Lần 1..3: 3.000 ms (3 giây)
+ * - Lần 4..8: 5.000 ms (5 giây)
+ * - Lần 9..25: 10.000 ms (10 giây)
+ */
+export function getInvalidationPollIntervalMs(attempt: number): number {
+  if (attempt <= 3) return 3000;
+  if (attempt <= 8) return 5000;
+  return 10000;
+}
+
 // ============================================================================
 // Giao diện ReviewApi
 // ============================================================================
