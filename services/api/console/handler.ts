@@ -11,7 +11,6 @@
  * Biến môi trường: TABLE_NAME, CLOUDFRONT_DISTRIBUTION_ID, USER_POOL_ARN, TENANT_DATA_ACCESS_ROLE_ARN.
  */
 import {
-  extractReviewCtxFromEvent,
   handleReviewApiGatewayRoute,
   type ReviewApiGatewayEvent,
   type ReviewApiGatewayResponse,
@@ -22,11 +21,13 @@ import {
   verifySite,
   pauseSite,
   resumeSite,
+  type CreateSiteInput,
   type SiteManagerDependencies,
 } from '../sites/siteManager.js';
 import { inviteMember, type InviteMemberDeps } from '../auth/inviteMember.js';
+import { contextFromIdTokenClaims } from '../auth/context.js';
 import { db, requireRole } from '../../../libs/common/db.js';
-import { AppError, type Ctx } from '../../../libs/common/types.js';
+import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
 
 export type ConsoleEvent = ReviewApiGatewayEvent;
 export type ConsoleResponse = ReviewApiGatewayResponse;
@@ -48,7 +49,12 @@ function errorResponse(
     headers: HEADERS,
     body: JSON.stringify({
       request_id: requestId,
-      error: { code, message, ...(details ? { details } : {}) },
+      error: {
+        code,
+        message,
+        ...(typeof details?.reason === 'string' ? { reason: details.reason } : {}),
+        ...(details ? { details } : {})
+      },
     }),
   };
 }
@@ -85,9 +91,43 @@ function statusForConsoleError(code: string): number {
     case 'RATE_LIMITED':
     case 'REQUEST_QUOTA_EXCEEDED':
       return 429;
+    case 'CACHE_INVALIDATION_FAILED':
+      return 503;
     default:
       return 500;
   }
+}
+
+/** Chuẩn hóa thực thể Website / Host theo hợp đồng Console 4.6 (docs/console-website.md, snake_case). */
+export interface HostResponse {
+  slug: string;
+  display_name: string;
+  home_url: string;
+  source_lang: string;
+  target_langs: string[];
+  status: 'PENDING' | 'ACTIVE' | 'PAUSED';
+  verification_code: string;
+  no_translate_selectors: string[];
+  created_at: string;
+}
+
+export function toHostResponse(item: Record<string, any>): HostResponse {
+  const status = item.status === 'ACTIVE' || item.status === 'PAUSED' ? item.status : 'PENDING';
+  return {
+    slug: String(item.slug ?? ''),
+    display_name: String(item.displayName ?? item.display_name ?? item.slug ?? ''),
+    home_url: String(item.homeUrl ?? item.home_url ?? ''),
+    source_lang: String(item.sourceLang ?? item.source_lang ?? ''),
+    target_langs: Array.isArray(item.targetLangs ?? item.target_langs)
+      ? (item.targetLangs ?? item.target_langs).map(String)
+      : [],
+    status,
+    verification_code: String(item.verificationCode ?? item.verification_code ?? ''),
+    no_translate_selectors: Array.isArray(item.noTranslateSelectors ?? item.no_translate_selectors)
+      ? (item.noTranslateSelectors ?? item.no_translate_selectors).map(String)
+      : [],
+    created_at: String(item.createdAt ?? item.created_at ?? ''),
+  };
 }
 
 /**
@@ -140,13 +180,20 @@ export async function handleGlossaryApiGatewayRoute(
   }
 }
 
+export type SiteRouteDeps = SiteManagerDependencies & {
+  db?: SiteManagerDependencies['db'] & {
+    listTenantSites?: (ctx: Ctx) => Promise<Array<Record<string, any>>>;
+    query?: (ctx: Ctx, pk: string, skPrefix?: string, opts?: any) => Promise<Array<Record<string, any>>>;
+  };
+};
+
 /**
  * 2. Adapter HTTP cho nhóm route Quản lý Website / Hosts F3 (`/console/hosts*`, `/console/websites*`).
  */
 export async function handleSitesApiGatewayRoute(
   event: ConsoleEvent,
   ctx: Ctx,
-  deps?: SiteManagerDependencies,
+  deps?: SiteRouteDeps,
 ): Promise<ConsoleResponse | null> {
   const rawPath = event.path ?? (event as { rawPath?: string }).rawPath ?? '';
   const path = normalizeConsolePath(rawPath);
@@ -170,60 +217,143 @@ export async function handleSitesApiGatewayRoute(
   }
 
   try {
-    // GET /console/hosts hoặc /console/websites -> danh sách website
+    // GET /console/hosts hoặc /console/websites -> danh sách website (chỉ dành cho TENANT_ADMIN)
     if (method === 'GET' && (subPath === '' || subPath === '/')) {
-      const items = await db.listTenantSites(ctx);
+      requireRole(ctx, ['TENANT_ADMIN']);
+      const queryFn = deps?.db?.listTenantSites ?? db.listTenantSites;
+      const rawItems = await queryFn(ctx);
+      const hosts = (rawItems ?? []).map(toHostResponse);
       return {
         statusCode: 200,
         headers: HEADERS,
-        body: JSON.stringify({ request_id: requestId, items, hosts: items, websites: items }),
+        body: JSON.stringify({ request_id: requestId, hosts, items: hosts, websites: hosts }),
       };
     }
 
-    // POST /console/hosts hoặc /console/websites -> tạo website mới
+    // POST /console/hosts hoặc /console/websites -> tạo website mới (trả 201 { host })
     if (method === 'POST' && (subPath === '' || subPath === '/')) {
-      const created = await createSite(ctx, body as any, deps);
+      requireRole(ctx, ['TENANT_ADMIN']);
+      const createInput: CreateSiteInput = {
+        homeUrl: String(body.home_url ?? body.homeUrl ?? ''),
+        displayName: String(body.display_name ?? body.displayName ?? ''),
+        sourceLang: String(body.source_lang ?? body.sourceLang ?? ''),
+        targetLangs: Array.isArray(body.target_langs ?? body.targetLangs)
+          ? (body.target_langs ?? body.targetLangs).map(String)
+          : [],
+        noTranslateSelectors: Array.isArray(body.no_translate_selectors ?? body.noTranslateSelectors)
+          ? (body.no_translate_selectors ?? body.noTranslateSelectors).map(String)
+          : [],
+      };
+
+      const created = await createSite(ctx, createInput, deps);
+      const host: HostResponse = {
+        slug: created.slug,
+        display_name: createInput.displayName,
+        home_url: createInput.homeUrl,
+        source_lang: createInput.sourceLang,
+        target_langs: createInput.targetLangs,
+        status: created.status,
+        verification_code: created.verificationCode,
+        no_translate_selectors: createInput.noTranslateSelectors ?? [],
+        created_at: new Date().toISOString(),
+      };
+
       return {
-        statusCode: 200,
+        statusCode: 201,
         headers: HEADERS,
-        body: JSON.stringify({ request_id: requestId, ...created }),
+        body: JSON.stringify({
+          request_id: requestId,
+          host,
+          slug: created.slug,
+          verificationCode: created.verificationCode,
+          status: created.status,
+        }),
       };
     }
 
-    // POST /console/hosts/{slug}/verify
+    // POST /console/hosts/{slug}/verify hoặc /console/websites/{slug}/verify
     const verifyMatch = subPath.match(/^\/([^/]+)\/verify\/?$/);
     if (method === 'POST' && verifyMatch) {
+      requireRole(ctx, ['TENANT_ADMIN']);
       const slug = decodeURIComponent(verifyMatch[1]);
       const verifyMethod = (body.method === 'FILE' ? 'FILE' : 'META') as 'META' | 'FILE';
-      const verified = await verifySite(ctx, slug, verifyMethod, deps);
-      return {
-        statusCode: 200,
-        headers: HEADERS,
-        body: JSON.stringify({ request_id: requestId, ...verified }),
-      };
+      try {
+        const verified = await verifySite(ctx, slug, verifyMethod, deps);
+        const getFn = deps?.db?.get ?? db.get;
+        const rawHost = await getFn(ctx, keys.host(ctx, slug));
+        const host = rawHost ? toHostResponse(rawHost) : { slug, status: 'ACTIVE' as const };
+        return {
+          statusCode: 200,
+          headers: HEADERS,
+          body: JSON.stringify({ request_id: requestId, ...verified, host }),
+        };
+      } catch (err: any) {
+        if (err instanceof AppError) {
+          const isVerificationError =
+            err.code === 'SITE_UNREACHABLE' ||
+            err.code === 'VERIFICATION_CODE_MISMATCH' ||
+            err.code === 'VERIFICATION_NOT_FOUND';
+          if (isVerificationError) {
+            const reason = (err.details?.reason as string) ?? err.code;
+            return errorResponse(400, 'VERIFICATION_FAILED', err.message, requestId, {
+              reason,
+              code: err.code,
+              ...(err.details ?? {}),
+            });
+          }
+          const statusCode = statusForConsoleError(err.code);
+          return errorResponse(statusCode, err.code, err.message, requestId, err.details);
+        }
+        return errorResponse(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
+      }
     }
 
-    // POST /console/hosts/{slug}/pause
+    // POST /console/hosts/{slug}/pause hoặc /console/websites/{slug}/pause
     const pauseMatch = subPath.match(/^\/([^/]+)\/pause\/?$/);
     if (method === 'POST' && pauseMatch) {
+      requireRole(ctx, ['TENANT_ADMIN']);
       const slug = decodeURIComponent(pauseMatch[1]);
       const paused = await pauseSite(ctx, slug, deps);
+      const getFn = deps?.db?.get ?? db.get;
+      const rawHost = await getFn(ctx, keys.host(ctx, slug));
+      const host = rawHost ? toHostResponse(rawHost) : { slug, status: 'PAUSED' as const };
       return {
         statusCode: 200,
         headers: HEADERS,
-        body: JSON.stringify({ request_id: requestId, ...paused }),
+        body: JSON.stringify({ request_id: requestId, ...paused, host }),
       };
     }
 
-    // POST /console/hosts/{slug}/resume
+    // POST /console/hosts/{slug}/resume hoặc /console/websites/{slug}/resume
     const resumeMatch = subPath.match(/^\/([^/]+)\/resume\/?$/);
     if (method === 'POST' && resumeMatch) {
+      requireRole(ctx, ['TENANT_ADMIN']);
       const slug = decodeURIComponent(resumeMatch[1]);
       const resumed = await resumeSite(ctx, slug, deps);
+      const getFn = deps?.db?.get ?? db.get;
+      const rawHost = await getFn(ctx, keys.host(ctx, slug));
+      const host = rawHost ? toHostResponse(rawHost) : { slug, status: 'ACTIVE' as const };
       return {
         statusCode: 200,
         headers: HEADERS,
-        body: JSON.stringify({ request_id: requestId, ...resumed }),
+        body: JSON.stringify({ request_id: requestId, ...resumed, host }),
+      };
+    }
+
+    // GET /console/hosts/{slug} hoặc /console/websites/{slug} -> chi tiết website
+    const getHostMatch = subPath.match(/^\/([^/]+)\/?$/);
+    if (method === 'GET' && getHostMatch && getHostMatch[1]) {
+      requireRole(ctx, ['TENANT_ADMIN']);
+      const slug = decodeURIComponent(getHostMatch[1]);
+      const getFn = deps?.db?.get ?? db.get;
+      const rawHost = await getFn(ctx, keys.host(ctx, slug));
+      if (!rawHost) {
+        return errorResponse(404, 'NOT_FOUND', 'Không tìm thấy website.', requestId);
+      }
+      return {
+        statusCode: 200,
+        headers: HEADERS,
+        body: JSON.stringify({ request_id: requestId, host: toHostResponse(rawHost) }),
       };
     }
 
@@ -288,7 +418,7 @@ export async function handleMembersApiGatewayRoute(
       };
     }
 
-    // POST /console/members hoặc POST /console/members/invite -> mời thành viên mới
+    // POST /console/members hoặc POST /console/members/invite -> mời thành viên mới (chỉ dành cho TENANT_ADMIN)
     if (method === 'POST' && (subPath === '' || subPath === '/' || subPath === '/invite' || subPath === '/invite/')) {
       requireRole(ctx, ['TENANT_ADMIN']);
       const email = typeof body.email === 'string' ? body.email : '';
@@ -316,10 +446,15 @@ export async function handleMembersApiGatewayRoute(
       const statusCode = statusForConsoleError(err.code);
       return errorResponse(statusCode, err.code, err.message, requestId, err.details);
     }
-    if (err?.name === 'UsernameExistsException' || err?.message?.includes('tồn tại')) {
+    if (
+      err?.name === 'UsernameExistsException' ||
+      err?.name === 'ConditionalCheckFailedException' ||
+      err?.Code === 'UsernameExistsException' ||
+      err?.Code === 'ConditionalCheckFailedException'
+    ) {
       return errorResponse(409, 'VERSION_CONFLICT', 'Thành viên đã tồn tại trên hệ thống.', requestId);
     }
-    return errorResponse(400, 'INVALID_REQUEST', err?.message ?? 'Yêu cầu không hợp lệ', requestId);
+    return errorResponse(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
   }
 }
 
@@ -331,14 +466,32 @@ export const CONSOLE_ROUTE_MODULES: readonly ConsoleRouteModule[] = [
   (event, ctx) => handleMembersApiGatewayRoute(event, ctx),
 ];
 
-export function createConsoleHandler(modules: readonly ConsoleRouteModule[] = CONSOLE_ROUTE_MODULES) {
+export interface ConsoleHandlerDeps {
+  contextFromClaims?: (claims: Record<string, unknown>, requestId: string) => Promise<Ctx>;
+  db?: Pick<typeof db, 'get'>;
+}
+
+export function createConsoleHandler(
+  modules: readonly ConsoleRouteModule[] = CONSOLE_ROUTE_MODULES,
+  deps?: ConsoleHandlerDeps,
+) {
   return async (event: ConsoleEvent): Promise<ConsoleResponse> => {
     const requestId = event.requestContext?.requestId ?? 'req-unknown';
     let ctx: Ctx;
     try {
-      ctx = extractReviewCtxFromEvent(event);
-    } catch (err) {
-      if (err instanceof AppError) return errorResponse(401, err.code, err.message, requestId);
+      const claims =
+        event.requestContext?.authorizer?.claims ??
+        event.requestContext?.authorizer?.jwt?.claims ??
+        {};
+      const resolveContext =
+        deps?.contextFromClaims ??
+        ((c, r) => contextFromIdTokenClaims(c, r, deps?.db ? { db: deps.db } : undefined));
+      ctx = await resolveContext(claims as Record<string, unknown>, requestId);
+    } catch (err: any) {
+      if (err instanceof AppError) {
+        const statusCode = statusForConsoleError(err.code);
+        return errorResponse(statusCode, err.code, err.message, requestId);
+      }
       return errorResponse(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
     }
     try {

@@ -18,10 +18,12 @@ function memberRole(value: unknown): Role | null {
 export async function contextFromIdTokenClaims(
   claims: Claims,
   requestId: string,
+  deps?: { db?: Pick<typeof db, 'get'> },
 ): Promise<Ctx> {
   const sub = claims.sub;
-  const tenantId = claims['custom:tenant_id'];
-  const role = roleFromClaim(claims['custom:role']);
+  const tenantId = claims['custom:tenant_id'] ?? claims.tenant_id;
+  const rawRole = claims['custom:role'] ?? claims.role;
+  const role = memberRole(rawRole);
 
   if (
     typeof sub !== 'string' ||
@@ -38,13 +40,15 @@ export async function contextFromIdTokenClaims(
   }
 
   const ctx: Ctx = {
-    tenantId,
+    tenantId: String(tenantId),
     via: 'JWT',
     requestId,
     role,
+    sub,
   };
 
-  const member = await db.get(
+  const dbClient = deps?.db ?? db;
+  const member = await dbClient.get(
     ctx,
     keys.member(ctx, sub),
     { consistent: true },

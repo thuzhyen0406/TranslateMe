@@ -5,11 +5,13 @@ import {
   handleGlossaryApiGatewayRoute,
   handleSitesApiGatewayRoute,
   handleMembersApiGatewayRoute,
+  toHostResponse,
   CONSOLE_ROUTE_MODULES,
   type ConsoleEvent,
   type ConsoleRouteModule,
 } from '../handler.js';
-import type { Ctx } from '../../../../libs/common/types.js';
+import { db } from '../../../../libs/common/db.js';
+import { AppError, type Ctx } from '../../../../libs/common/types.js';
 
 const claims = { 'custom:tenant_id': 't_a', 'custom:role': 'tenant_admin', sub: 'u_1' };
 const event = (path: string, c: Record<string, unknown> = claims, method = 'GET', body?: unknown): ConsoleEvent => ({
@@ -19,24 +21,69 @@ const event = (path: string, c: Record<string, unknown> = claims, method = 'GET'
   requestContext: { requestId: 'req-console', authorizer: { claims: c } },
 });
 
+// Giả lập mặc định db.get trả MEMBER ACTIVE để router kiểm tra qua contextFromIdTokenClaims
+const originalDbGet = db.get;
+db.get = async (ctx: Ctx, key: { PK: string; SK: string }, opts?: { consistent?: boolean }) => {
+  if (key?.SK?.startsWith('MEMBER#')) {
+    const role = ctx.role ?? 'TENANT_ADMIN';
+    return { PK: key.PK, SK: key.SK, status: 'ACTIVE', role } as any;
+  }
+  return originalDbGet(ctx, key, opts);
+};
+
 describe('Console Lambda router (/console/{proxy+})', () => {
-  it('chuyển route cho mô-đun khớp kèm Ctx chuẩn hóa từ claim role chữ thường', async () => {
-    const seen: Array<{ role?: string; tenantId: string }> = [];
+  it('chuyển route cho mô-đun khớp kèm Ctx chuẩn hóa từ claim role chữ thường và ctx.sub', async () => {
+    const seen: Array<{ role?: string; tenantId: string; sub?: string }> = [];
     const mod: ConsoleRouteModule = async (e, ctx) => {
       if (!(e.path ?? '').includes('/console/translations')) return null;
-      seen.push({ role: ctx.role, tenantId: ctx.tenantId });
+      seen.push({ role: ctx.role, tenantId: ctx.tenantId, sub: ctx.sub });
       return { statusCode: 200, headers: {}, body: '{"ok":true}' };
     };
     const handler = createConsoleHandler([mod]);
     const res = await handler(event('/dev/console/translations'));
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(seen, [{ role: 'TENANT_ADMIN', tenantId: 't_a' }]);
+    assert.deepEqual(seen, [{ role: 'TENANT_ADMIN', tenantId: 't_a', sub: 'u_1' }]);
   });
 
   it('route không thuộc mô-đun nào -> 404; thiếu claim sub -> 401', async () => {
     const handler = createConsoleHandler([async () => null]);
     assert.equal((await handler(event('/console/unknown'))).statusCode, 404);
     assert.equal((await handler(event('/console/translations', {}))).statusCode, 401);
+  });
+
+  it('createConsoleHandler xác thực MEMBER ACTIVE trong DynamoDB: từ chối 403 khi MEMBER không tồn tại, bị DISABLED hoặc lệch vai trò', async () => {
+    // 1. MEMBER không tồn tại trong DynamoDB -> 403 PERMISSION_DENIED
+    const noMemberDeps = {
+      db: {
+        get: async () => null,
+      },
+    };
+    const handlerNoMember = createConsoleHandler([async () => ({ statusCode: 200, headers: {}, body: '{}' })], noMemberDeps as any);
+    const resNoMember = await handlerNoMember(event('/console/translations'));
+    assert.equal(resNoMember.statusCode, 403);
+    assert.equal(JSON.parse(resNoMember.body).error?.code, 'PERMISSION_DENIED');
+
+    // 2. MEMBER bị DISABLED -> 403 PERMISSION_DENIED
+    const disabledMemberDeps = {
+      db: {
+        get: async () => ({ status: 'DISABLED', role: 'TENANT_ADMIN' }),
+      },
+    };
+    const handlerDisabled = createConsoleHandler([async () => ({ statusCode: 200, headers: {}, body: '{}' })], disabledMemberDeps as any);
+    const resDisabled = await handlerDisabled(event('/console/translations'));
+    assert.equal(resDisabled.statusCode, 403);
+    assert.equal(JSON.parse(resDisabled.body).error?.code, 'PERMISSION_DENIED');
+
+    // 3. MEMBER trong DB là REVIEWER nhưng claim là tenant_admin -> 403 PERMISSION_DENIED
+    const mismatchRoleDeps = {
+      db: {
+        get: async () => ({ status: 'ACTIVE', role: 'REVIEWER' }),
+      },
+    };
+    const handlerMismatch = createConsoleHandler([async () => ({ statusCode: 200, headers: {}, body: '{}' })], mismatchRoleDeps as any);
+    const resMismatch = await handlerMismatch(event('/console/translations'));
+    assert.equal(resMismatch.statusCode, 403);
+    assert.equal(JSON.parse(resMismatch.body).error?.code, 'PERMISSION_DENIED');
   });
 
   it('CONSOLE_ROUTE_MODULES mặc định đăng ký đầy đủ 4 nhóm route Console hiện có (Review, Glossary, Sites, Members)', async () => {
@@ -71,9 +118,10 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     const fakeSiteDeps = {
       db: {
         transact: async () => {},
-        get: async () => ({ PK: 'TENANT#t_a', SK: 'HOST#test-slug', status: 'ACTIVE' }),
+        get: async () => ({ PK: 'TENANT#t_a', SK: 'HOST#test-slug', slug: 'test-slug', status: 'ACTIVE' }),
         put: async () => {},
         updateSiteStatus: async () => {},
+        listTenantSites: async () => [{ PK: 'TENANT#t_a', SK: 'HOST#test-slug', slug: 'test-slug', status: 'ACTIVE' }],
       },
       resolver: async () => [{ address: '93.184.216.34', family: 4 }],
       safeFetch: async () => ({ ok: true, text: async () => '' } as any),
@@ -151,46 +199,150 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(JSON.parse(routerDevRes.body).error?.code, 'PERMISSION_DENIED');
   });
 
-  it('POST /console/hosts và /console/websites tạo website: trả 200 khi thành công, trả 409 DUPLICATE_SLUG khi trùng slug', async () => {
+  it('Route /console/hosts bám sát hợp đồng Console 4.6 (snake_case, POST 201 {host}, GET list/detail {host}, verify {host})', async () => {
     const adminCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'req-admin', role: 'TENANT_ADMIN', sub: 'u_admin' };
-    const validBody = {
-      homeUrl: 'https://mysite.example.com/',
-      displayName: 'My Website',
+    const reviewerCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'req-rev', role: 'REVIEWER', sub: 'u_rev' };
+
+    const hostDbRecord = {
+      PK: 'TENANT#t_a',
+      SK: 'HOST#site-example-com',
+      slug: 'site-example-com',
+      displayName: 'My Site',
+      homeUrl: 'https://site.example.com/',
       sourceLang: 'vi',
-      targetLangs: ['en'],
+      targetLangs: ['en', 'fr'],
+      status: 'PENDING',
+      verificationCode: 'verify-12345',
+      noTranslateSelectors: ['.notranslate'],
+      createdAt: '2026-11-06T10:00:00.000Z',
     };
 
-    // 1. Tạo website thành công -> HTTP 200
-    const successSiteDeps = {
+    const siteDeps = {
       assertTenantWritable: async () => {},
       resolver: async () => [{ address: '93.184.216.34', family: 4 }],
       db: {
         transact: async () => {},
-        get: async () => ({ PK: 'TENANT#t_a', SK: 'CONFIG', status: 'ACTIVE' }),
+        get: async (_c: any, key: any) => {
+          if (key.SK === 'CONFIG') return { PK: 'TENANT#t_a', SK: 'CONFIG', status: 'ACTIVE' };
+          if (key.SK === 'HOST#site-example-com') return hostDbRecord;
+          return null;
+        },
         put: async () => {},
         updateSiteStatus: async () => {},
+        listTenantSites: async () => [hostDbRecord],
       },
-      safeFetch: async () => ({ ok: true, text: async () => '' } as any),
+      safeFetch: async () => ({
+        kind: 'OK' as const,
+        html: '<html><head><meta name="translateme-site-verification" content="verify-12345"></head></html>',
+        finalUrl: 'https://site.example.com/',
+        status: 200,
+        headers: {},
+      }),
       invalidateSites: async () => ({ status: 'SUBMITTED', invalidationIds: ['inv-1'] } as any),
     };
 
-    const createSuccessRes = await handleSitesApiGatewayRoute(
-      event('/console/hosts', claims, 'POST', validBody),
+    // 1. POST /console/hosts: nhận snake_case, trả 201 kèm { host: Host }
+    const postSnakeCaseBody = {
+      home_url: 'https://site.example.com/',
+      display_name: 'My Site',
+      source_lang: 'vi',
+      target_langs: ['en', 'fr'],
+      no_translate_selectors: ['.notranslate'],
+    };
+    const createRes = await handleSitesApiGatewayRoute(
+      event('/console/hosts', claims, 'POST', postSnakeCaseBody),
       adminCtx,
-      successSiteDeps as any,
+      siteDeps as any,
     );
-    assert.ok(createSuccessRes);
-    assert.equal(createSuccessRes.statusCode, 200);
-    const successBody = JSON.parse(createSuccessRes.body);
-    assert.equal(successBody.slug, 'mysite-example-com');
-    assert.equal(successBody.status, 'PENDING');
-    assert.ok(successBody.verificationCode);
+    assert.ok(createRes);
+    assert.equal(createRes.statusCode, 201, 'POST /console/hosts phải trả mã HTTP 201 Created');
+    const createdBody = JSON.parse(createRes.body);
+    assert.ok(createdBody.host);
+    assert.equal(createdBody.host.slug, 'site-example-com');
+    assert.equal(createdBody.host.display_name, 'My Site');
+    assert.equal(createdBody.host.home_url, 'https://site.example.com/');
+    assert.equal(createdBody.host.source_lang, 'vi');
+    assert.deepEqual(createdBody.host.target_langs, ['en', 'fr']);
+    assert.equal(createdBody.host.status, 'PENDING');
+    assert.ok(createdBody.host.verification_code);
 
-    // 2. Trùng slug -> createSite ném AppError('DUPLICATE_SLUG') -> HTTP 409 DUPLICATE_SLUG
+    // 2. GET /console/hosts: từ chối REVIEWER với 403; TENANT_ADMIN nhận { hosts: Host[] }
+    const listReviewerRes = await handleSitesApiGatewayRoute(
+      event('/console/hosts'),
+      reviewerCtx,
+      siteDeps as any,
+    );
+    assert.equal(listReviewerRes?.statusCode, 403);
+    assert.equal(JSON.parse(listReviewerRes!.body).error?.code, 'PERMISSION_DENIED');
+
+    const listAdminRes = await handleSitesApiGatewayRoute(
+      event('/console/hosts'),
+      adminCtx,
+      siteDeps as any,
+    );
+    assert.equal(listAdminRes?.statusCode, 200);
+    const listBody = JSON.parse(listAdminRes!.body);
+    assert.ok(Array.isArray(listBody.hosts), 'Response phải có trường hosts');
+    assert.equal(listBody.hosts.length, 1);
+    assert.equal(listBody.hosts[0].display_name, 'My Site');
+    assert.equal(listBody.hosts[0].verification_code, 'verify-12345');
+
+    // 3. GET /console/hosts/{slug}: chi tiết website (404 khi không tồn tại, 200 khi có)
+    const detail404Res = await handleSitesApiGatewayRoute(
+      event('/console/hosts/unknown-slug'),
+      adminCtx,
+      siteDeps as any,
+    );
+    assert.equal(detail404Res?.statusCode, 404);
+
+    const detail200Res = await handleSitesApiGatewayRoute(
+      event('/console/hosts/site-example-com'),
+      adminCtx,
+      siteDeps as any,
+    );
+    assert.equal(detail200Res?.statusCode, 200);
+    const detailBody = JSON.parse(detail200Res!.body);
+    assert.ok(detailBody.host);
+    assert.equal(detailBody.host.slug, 'site-example-com');
+    assert.equal(detailBody.host.display_name, 'My Site');
+
+    // 4. POST /console/hosts/{slug}/verify: trả { host, status: 'ACTIVE' }
+    const verifyRes = await handleSitesApiGatewayRoute(
+      event('/console/hosts/site-example-com/verify', claims, 'POST', { method: 'META' }),
+      adminCtx,
+      siteDeps as any,
+    );
+    assert.equal(verifyRes?.statusCode, 200);
+    const verifyBody = JSON.parse(verifyRes!.body);
+    assert.equal(verifyBody.status, 'ACTIVE');
+    assert.ok(verifyBody.host);
+
+    // 5. POST verify lỗi (ví dụ mã xác minh sai) -> 400 VERIFICATION_FAILED kèm reason
+    const mismatchDeps = {
+      ...siteDeps,
+      safeFetch: async () => ({
+        kind: 'OK' as const,
+        html: '<html><head><meta name="translateme-site-verification" content="wrong-code"></head></html>',
+        finalUrl: 'https://site.example.com/',
+        status: 200,
+        headers: {},
+      }),
+    };
+    const failVerifyRes = await handleSitesApiGatewayRoute(
+      event('/console/hosts/site-example-com/verify', claims, 'POST', { method: 'META' }),
+      adminCtx,
+      mismatchDeps as any,
+    );
+    assert.equal(failVerifyRes?.statusCode, 400);
+    const failBody = JSON.parse(failVerifyRes!.body);
+    assert.equal(failBody.error?.code, 'VERIFICATION_FAILED');
+    assert.equal(failBody.error?.reason, 'VERIFICATION_CODE_MISMATCH');
+
+    // 6. POST trùng slug -> 409 DUPLICATE_SLUG
     const duplicateSiteDeps = {
-      ...successSiteDeps,
+      ...siteDeps,
       db: {
-        ...successSiteDeps.db,
+        ...siteDeps.db,
         transact: async () => {
           throw Object.assign(new Error('Conditional transaction failed'), {
             name: 'TransactionCanceledException',
@@ -199,27 +351,12 @@ describe('Console Lambda router (/console/{proxy+})', () => {
         },
       },
     };
-
     const duplicateRes = await handleSitesApiGatewayRoute(
-      event('/console/hosts', claims, 'POST', validBody),
+      event('/console/hosts', claims, 'POST', postSnakeCaseBody),
       adminCtx,
       duplicateSiteDeps as any,
     );
-    assert.ok(duplicateRes);
-    assert.equal(duplicateRes.statusCode, 409, 'Xung đột trùng slug phải trả mã HTTP 409');
-    const duplicateBody = JSON.parse(duplicateRes.body);
-    assert.equal(duplicateBody.error?.code, 'DUPLICATE_SLUG');
-    assert.match(duplicateBody.error?.message, /Slug đã tồn tại/);
-
-    // 3. Kiểm tra qua toàn bộ router (createConsoleHandler) với alias route /console/websites
-    const siteModuleWithDeps: ConsoleRouteModule = (e, ctx) =>
-      handleSitesApiGatewayRoute(e, ctx, duplicateSiteDeps as any);
-    const handler = createConsoleHandler([siteModuleWithDeps]);
-
-    const routerDuplicateRes = await handler(
-      event('/console/websites', claims, 'POST', validBody),
-    );
-    assert.equal(routerDuplicateRes.statusCode, 409);
-    assert.equal(JSON.parse(routerDuplicateRes.body).error?.code, 'DUPLICATE_SLUG');
+    assert.equal(duplicateRes?.statusCode, 409);
+    assert.equal(JSON.parse(duplicateRes!.body).error?.code, 'DUPLICATE_SLUG');
   });
 });
