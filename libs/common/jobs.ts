@@ -15,6 +15,8 @@ export type JobType = 'FILE' | 'PREWARM';
 export type JobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
 export const JOB_TTL_DAYS = 7;
 export const JOB_ID_RE = /^job-\d{8}-[0-9a-f]{12}$/;
+/** Mã lô dịch trước (tên tệp lô không có đuôi, ví dụ lot-0003) */
+export const LOT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** Mục 2.6.6: {code, where, count, message} */
 export interface JobWarning {
@@ -111,6 +113,8 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
         done: 0,
         failed: 0,
         warnings: [],
+        // Lô đã cộng tiến độ (addProgress theo lotId): Map của Step Functions retry một lô thì không cộng lần nữa
+        lots: {},
         createdAt: at,
         updatedAt: at,
         ttl: Math.floor(now() / 1000) + JOB_TTL_DAYS * 86_400,
@@ -143,15 +147,37 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
     });
   }
 
-  /** Cập nhật tiến độ sau mỗi lô (ADD nguyên tử, các lô của Map chạy song song). */
-  async function addProgress(ctx: Ctx, jobId: string, done: number, failed: number): Promise<void> {
-    await db.update(ctx, {
-      Key: jobKey(ctx, jobId),
-      UpdateExpression: 'ADD #done :done, #failed :failed SET #updatedAt = :at',
-      ConditionExpression: '#status = :running',
-      ExpressionAttributeNames: { '#done': 'done', '#failed': 'failed', '#updatedAt': 'updatedAt', '#status': 'status' },
-      ExpressionAttributeValues: { ':done': done, ':failed': failed, ':at': iso(), ':running': 'RUNNING' },
-    });
+  /**
+   * Cập nhật tiến độ sau mỗi lô (ADD nguyên tử, các lô của Map chạy song song).
+   * Có `lotId` thì cộng đúng một lần cho mỗi lô: cùng một UpdateItem vừa ADD done/failed vừa đánh dấu `lots.<lotId>`,
+   * điều kiện lô chưa được đánh dấu. Step Functions chạy lại lô (Retry sau khi đã cộng) thì trả false, không cộng thêm,
+   * nên done + failed không vượt total. Trả true nếu đã cộng.
+   * Job không ở RUNNING thì vẫn ném ConditionalCheckFailedException như trước.
+   */
+  async function addProgress(ctx: Ctx, jobId: string, done: number, failed: number, lotId?: string): Promise<boolean> {
+    if (lotId !== undefined && !LOT_ID_RE.test(lotId)) throw Object.assign(new Error('lotId không hợp lệ'), { name: 'InvalidLotId' });
+    try {
+      await db.update(ctx, {
+        Key: jobKey(ctx, jobId),
+        UpdateExpression: 'ADD #done :done, #failed :failed SET #updatedAt = :at' + (lotId ? ', #lots.#lot = :true' : ''),
+        ConditionExpression: '#status = :running' + (lotId ? ' AND attribute_not_exists(#lots.#lot)' : ''),
+        ExpressionAttributeNames: {
+          '#done': 'done',
+          '#failed': 'failed',
+          '#updatedAt': 'updatedAt',
+          '#status': 'status',
+          ...(lotId ? { '#lots': 'lots', '#lot': lotId } : {}),
+        },
+        ExpressionAttributeValues: { ':done': done, ':failed': failed, ':at': iso(), ':running': 'RUNNING', ...(lotId ? { ':true': true } : {}) },
+      });
+      return true;
+    } catch (err) {
+      if (!lotId || (err as { name?: string })?.name !== 'ConditionalCheckFailedException') throw err;
+      const item = await db.get(ctx, jobKey(ctx, jobId), { consistent: true });
+      const lots = item?.lots && typeof item.lots === 'object' ? (item.lots as Record<string, unknown>) : {};
+      if (item?.status === 'RUNNING' && lots[lotId] === true) return false; // lô này đã được cộng
+      throw err;
+    }
   }
 
   /** Kết thúc công việc. Chỉ đổi được từ QUEUED/RUNNING (không ghi đè kết quả đã chốt). */

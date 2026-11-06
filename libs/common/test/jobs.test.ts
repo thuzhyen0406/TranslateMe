@@ -56,6 +56,23 @@ describe('jobs – bản ghi JOB (QC-5, Hình 2.9)', () => {
     assert.equal(s.reason, 'SITEMAP_NOT_FOUND');
   });
 
+  it('addProgress theo lotId cộng đúng một lần mỗi lô (Retry của Step Functions); lô khác vẫn cộng', async () => {
+    const db = memoryDataDb();
+    const jobs = createJobStore(db, () => T0);
+    const id = 'job-20261101-eeeeeeeeeeee';
+    await jobs.create(ctxA, { jobId: id, type: 'PREWARM', targetLangs: ['en'] });
+    await jobs.markRunning(ctxA, id, 6);
+    assert.equal(await jobs.addProgress(ctxA, id, 2, 1, 'lot-0000'), true);
+    assert.equal(await jobs.addProgress(ctxA, id, 2, 1, 'lot-0000'), false, 'chạy lại lô 0');
+    assert.equal(await jobs.addProgress(ctxA, id, 3, 0, 'lot-0001'), true);
+    const s = (await jobs.get(ctxA, id))!;
+    assert.deepEqual([s.done, s.failed, s.progress], [5, 1, 100]);
+    assert.ok(!('lots' in s), 'không lộ danh sách lô ra API');
+    await jobs.finish(ctxA, id, { status: 'SUCCEEDED' });
+    await assert.rejects(jobs.addProgress(ctxA, id, 1, 0, 'lot-0002'), { name: 'ConditionalCheckFailedException' }, 'job đã chốt');
+    await assert.rejects(jobs.addProgress(ctxA, id, 1, 0, 'a.b'), { name: 'InvalidLotId' });
+  });
+
   it('tạo trùng mã job bị từ chối; tenant khác không thấy job; mã sai dạng trả null', async () => {
     const db = memoryDataDb();
     const jobs = createJobStore(db, () => T0);

@@ -10,6 +10,9 @@
  *  - Mỗi website chỉ có một lần dịch trước đang chạy: HOST.prewarm giữ job gần nhất; nếu job đó còn QUEUED/RUNNING
  *    (chưa quá PREWARM_STALE_MS) thì trả lại chính job đó (bấm nhiều lần không tạo nhiều lần chạy, không tốn ký tự trùng).
  *  - M2 chỉ mang định danh: { job_id, tenant_id, slug, target_langs }. Địa chỉ sitemap lấy từ HOST ở ReadSitemap (QC-6).
+ *  - Thứ tự ghi: tạo JOB (QUEUED) trước, rồi mới trỏ HOST.prewarm sang job đó (cập nhật có điều kiện). Nhờ vậy HOST.prewarm
+ *    không bao giờ trỏ tới job chưa tồn tại. Cập nhật HOST thất bại thì job vừa tạo chuyển FAILED (SUPERSEDED nếu một
+ *    yêu cầu đồng thời đã thắng, HOST_UPDATE_FAILED nếu lỗi khác); JobDb không có xoá, bản ghi tự hết hạn theo TTL 7 ngày.
  *  - StartExecution lỗi: JOB -> FAILED (START_FAILED), trả 500 INTERNAL_ERROR.
  *
  * Step Functions được truyền vào qua cổng `startExecution` (bản thật: stepFunctionsStarter), nên services/api không
@@ -87,7 +90,11 @@ export async function startPrewarm(
     }
   }
 
+  // 1. Tạo JOB trước: HOST.prewarm chỉ được trỏ tới job đã tồn tại
   const jobId = newJobId(now(), deps.uuid);
+  await jobs.create(ctx, { jobId, type: 'PREWARM', slug, targetLangs: langs });
+
+  // 2. Trỏ HOST.prewarm sang job mới, có điều kiện HOST vẫn trỏ job cũ (chống hai lần bấm đồng thời)
   try {
     await deps.db.update(ctx, {
       Key: keys.host(ctx, slug),
@@ -97,15 +104,18 @@ export async function startPrewarm(
       ExpressionAttributeValues: { ':p': { jobId, startedAt: now() }, ...(prev.jobId ? { ':prev': prev.jobId } : {}) },
     });
   } catch (err) {
-    // Hai lần bấm đồng thời: lần kia đã ghi job mới, trả lại job đó
-    if ((err as { name?: string })?.name !== 'ConditionalCheckFailedException') throw err;
+    const superseded = (err as { name?: string })?.name === 'ConditionalCheckFailedException';
+    // Dọn job vừa tạo: không website nào trỏ tới nó và nó sẽ không bao giờ chạy
+    await jobs.finish(ctx, jobId, { status: 'FAILED', reason: superseded ? 'SUPERSEDED' : 'HOST_UPDATE_FAILED' }).catch(() => {});
+    if (!superseded) throw err;
+    // Hai lần bấm đồng thời: lần kia đã trỏ HOST sang job của nó (job đó đã được tạo trước), trả lại job đó
     const again = prewarmOf(await getHost(ctx, slug, deps.db));
     const job = again.jobId ? await jobs.get(ctx, again.jobId) : null;
     if (job) return { job, existing: true };
     throw new AppError('INTERNAL_ERROR', 'Không bắt đầu được dịch trước, vui lòng thử lại.');
   }
 
-  await jobs.create(ctx, { jobId, type: 'PREWARM', slug, targetLangs: langs });
+  // 3. Khởi động state machine
   const m2 = { job_id: jobId, tenant_id: ctx.tenantId, slug, target_langs: langs };
   try {
     await deps.startExecution({ name: jobId, input: JSON.stringify(m2) });
