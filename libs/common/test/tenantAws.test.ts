@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { createTenantDocumentClientRouter, tenantSessionPolicy } from '../tenantAws.js';
 
 describe('tenant-scoped AWS sessions', () => {
@@ -21,6 +22,8 @@ describe('tenant-scoped AWS sessions', () => {
   it('IAM tenant role grants TransactWriteItems', () => {
     const iamTemplate = readFileSync(resolve(process.cwd(), '../../infra/modules/iam.yaml'), 'utf8');
     assert.match(iamTemplate, /dynamodb:TransactWriteItems/);
+    assert.match(iamTemplate, /sts:SetSourceIdentity/);
+    assert.match(iamTemplate, /sts:TagSession/);
   });
 
   it('session policy scopes S3 objects to the requesting tenant prefix', () => {
@@ -36,6 +39,7 @@ describe('tenant-scoped AWS sessions', () => {
   it('routes tenant data to an STS session and platform mappings to the execution role', async () => {
     const routed: string[] = [];
     const assumed: string[] = [];
+    const assumeCommands: AssumeRoleCommand[] = [];
     const router = createTenantDocumentClientRouter({
       async send(command: never) { routed.push('base'); return command; },
     }, {
@@ -43,6 +47,8 @@ describe('tenant-scoped AWS sessions', () => {
       sts: {
         async send(command: never) {
           assumed.push('t_aaaaaaaaaaaaaaaaaaaaaaaa');
+          assert.ok(command instanceof AssumeRoleCommand);
+          assumeCommands.push(command);
           return { Credentials: { AccessKeyId: 'a', SecretAccessKey: 's', SessionToken: 't', Expiration: new Date(Date.now() + 60_000) } } as never;
         },
       } as never,
@@ -53,6 +59,9 @@ describe('tenant-scoped AWS sessions', () => {
     await router.send({ input: { Key: { PK: 'TENANT#PLATFORM#SLUG#site-a', SK: 'META' } } } as never);
     assert.deepEqual(routed, ['tenant', 'base']);
     assert.deepEqual(assumed, ['t_aaaaaaaaaaaaaaaaaaaaaaaa']);
+    assert.equal(assumeCommands[0].input.SourceIdentity, 't_aaaaaaaaaaaaaaaaaaaaaaaa');
+    assert.deepEqual(assumeCommands[0].input.Tags, [{ Key: 'tenantId', Value: 't_aaaaaaaaaaaaaaaaaaaaaaaa' }]);
+    assert.ok(assumeCommands[0].input.Policy);
   });
 
   it('từ chối giao dịch có partition key của nhiều tenant', async () => {

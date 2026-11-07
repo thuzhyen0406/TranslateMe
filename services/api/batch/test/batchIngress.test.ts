@@ -1,52 +1,148 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { keys, type Ctx } from '../../../../libs/common/types.js';
+import { AppError, keys, type Ctx } from '../../../../libs/common/types.js';
+import { CharacterQuotaExceededError } from '../../../../libs/common/usage/usage.js';
 import { createBatchIngressHandler, type BatchIngressDependencies, type BatchObjectStore } from '../batchIngress.js';
 
 const ctx: Ctx = { tenantId: 'tenant-a', via: 'KEYMAP', keyId: 'key-a', requestId: 'req-batch' };
 const NOW = new Date('2026-11-02T10:00:00.000Z');
 
 /** Tạo API giả với S3 và DynamoDB giả để test không gọi dịch vụ AWS thật. */
-function setup(options: { actualSize?: number; contentType?: string; missing?: boolean; charLimit?: number; text?: string } = {}) {
+function setup(options: {
+  actualSize?: number;
+  contentType?: string;
+  omitHeadSize?: boolean;
+  missing?: boolean;
+  charLimit?: number;
+  text?: string;
+  objectBytes?: Uint8Array;
+  failJobWrite?: boolean;
+  failUploadWrite?: boolean;
+  failSignPut?: boolean;
+  headError?: Error;
+  getError?: Error;
+  reserveError?: Error;
+  failRefund?: boolean;
+  status?: string;
+  missingConfig?: boolean;
+  tenant?: Ctx | null;
+  resolveTenantError?: Error;
+} = {}) {
   const records = new Map<string, Record<string, any>>();
   const s3Calls: Array<{ operation: string; input: Record<string, unknown> }> = [];
-  const objectText = options.text ?? 'Xin chào. Đây là tệp thử nghiệm.';
-  const bytes = new TextEncoder().encode(objectText);
+  const reservations: Array<Parameters<BatchIngressDependencies['usage']['reserve']>[0]> = [];
+  const refunds: unknown[] = [];
+  const charLimit = options.charLimit ?? 1000;
+  let reservedCharacters = 0;
+  const bytes = new TextEncoder().encode(options.text ?? 'Xin chào. Đây là tệp thử nghiệm.');
+  const downloadedBytes = options.objectBytes ?? bytes;
   const configKey = keys.config(ctx);
-  records.set(`${configKey.PK}|${configKey.SK}`, { ...configKey, status: 'ACTIVE', charLimit: options.charLimit ?? 1000 });
+  if (!options.missingConfig) {
+    records.set(`${configKey.PK}|${configKey.SK}`, { ...configKey, status: options.status ?? 'ACTIVE', charLimit: options.charLimit ?? 1000 });
+  }
   const s3: BatchObjectStore = {
     async signPut(input) {
       s3Calls.push({ operation: 'signPut', input });
+      if (options.failSignPut) throw new Error('S3 signing unavailable');
       return 'https://s3.example/presigned';
     },
     async head(input) {
       s3Calls.push({ operation: 'head', input });
+      if (options.headError) throw options.headError;
       if (options.missing) throw Object.assign(new Error('missing'), { name: 'NotFound' });
-      return { contentLength: options.actualSize ?? bytes.length, contentType: options.contentType ?? 'text/plain' };
+      return {
+        ...(options.omitHeadSize ? {} : { contentLength: options.actualSize ?? bytes.length }),
+        contentType: options.contentType ?? 'text/plain',
+      };
     },
     async get(input) {
       s3Calls.push({ operation: 'get', input });
-      return bytes;
+      if (options.getError) throw options.getError;
+      return downloadedBytes;
     },
   };
   const db: BatchIngressDependencies['db'] = {
     async get(_ctx, key) { return records.get(`${key.PK}|${key.SK}`) ?? null; },
-    async put(_ctx, item) { records.set(`${item.PK}|${item.SK}`, { ...item }); },
+    async put(_ctx, item) {
+      if (item.entityType === 'BATCH_UPLOAD' && options.failUploadWrite) throw new Error('DynamoDB unavailable');
+      if (item.entityType === 'JOB' && options.failJobWrite) throw new Error('DynamoDB unavailable');
+      records.set(`${item.PK}|${item.SK}`, { ...item });
+    },
+    async update() {},
+  };
+  const usage: BatchIngressDependencies['usage'] = {
+    async reserve(input) {
+      reservations.push(input);
+      if (options.reserveError) throw options.reserveError;
+      if (reservedCharacters + input.n > charLimit) throw new CharacterQuotaExceededError(input.n, charLimit);
+      reservedCharacters += input.n;
+      return {
+        tenantId: input.tenantId,
+        requestId: input.requestId,
+        month: '2026-11',
+        reservedChars: input.n,
+        limit: charLimit,
+        source: input.source,
+        createdAt: (input.now ?? NOW).toISOString(),
+      };
+    },
+    async refund(ticket) {
+      refunds.push(ticket);
+      if (options.failRefund) throw new Error('DynamoDB refund unavailable');
+      reservedCharacters -= ticket.reservedChars;
+    },
   };
   const handler = createBatchIngressHandler({
     db,
+    usage,
     s3,
     bucket: 'translateme-batch-test',
-    resolveTenant: async () => ctx,
+    resolveTenant: async () => {
+      if (options.resolveTenantError) throw options.resolveTenantError;
+      return options.tenant === undefined ? ctx : options.tenant;
+    },
     now: () => new Date(NOW),
   });
-  return { handler, records, s3Calls, bytes };
+  return {
+    handler,
+    records,
+    s3Calls,
+    bytes,
+    reservations,
+    refunds,
+    getReservedCharacters: () => reservedCharacters,
+  };
 }
 
 /** Gửi API Gateway event test và giải mã phản hồi JSON. */
-async function request(h: ReturnType<typeof setup>, method: string, path: string, body: unknown) {
-  const response = await h.handler({ httpMethod: method, path, body: JSON.stringify(body), requestContext: { requestId: ctx.requestId } });
+async function request(
+  h: ReturnType<typeof setup>,
+  method: string,
+  path: string,
+  body: unknown,
+  options: { rawBody?: boolean; rawPath?: boolean; requestId?: string } = {},
+) {
+  const response = await h.handler({
+    httpMethod: method,
+    ...(options.rawPath ? { rawPath: path } : { path }),
+    body: options.rawBody ? String(body) : JSON.stringify(body),
+    requestContext: { requestId: options.requestId ?? ctx.requestId },
+  });
   return { ...response, payload: JSON.parse(response.body) as Record<string, any> };
+}
+
+async function createUpload(h: ReturnType<typeof setup>, fileName = 'guide.txt') {
+  return request(h, 'POST', '/translate/batch/upload-url', { file_name: fileName, size_bytes: h.bytes.length });
+}
+
+function storedUpload(h: ReturnType<typeof setup>, fileKey: string) {
+  const uploadId = /\/([0-9a-f-]{36})\./u.exec(fileKey)?.[1];
+  assert.ok(uploadId);
+  const key = keys.batchUpload(ctx, uploadId);
+  const storageKey = `${key.PK}|${key.SK}`;
+  const upload = h.records.get(storageKey);
+  assert.ok(upload);
+  return { key: storageKey, upload };
 }
 
 describe('batch upload ingress', () => {
@@ -56,14 +152,27 @@ describe('batch upload ingress', () => {
     assert.equal(upload.statusCode, 200);
     assert.equal(upload.payload.expires_in, 900);
     assert.equal(upload.payload.required_headers['Content-Type'], 'text/plain');
-    assert.match(upload.payload.file_key, /^tenant\/tenant-a\/batch\/input\//u);
+    assert.match(upload.payload.file_key, /^batch\/tenant-a\/input\/[0-9a-f-]{36}\.txt$/u);
     assert.equal(h.s3Calls[0].operation, 'signPut');
     assert.equal(h.s3Calls[0].input.expiresIn, 900);
+    const stored = [...h.records.values()].find((item) => item.entityType === 'BATCH_UPLOAD');
+    assert.equal(stored?.fileName, 'guide.txt');
+    assert.equal(stored?.format, 'txt');
+    assert.equal(stored?.contentType, 'text/plain');
+    assert.equal(stored?.declaredSize, h.bytes.length);
+    assert.equal(stored?.uploadUrlExpiresAt, new Date(NOW.getTime() + 15 * 60 * 1000).toISOString());
+    assert.equal(stored?.expiresAt, new Date(NOW.getTime() + 7 * 86400 * 1000).toISOString());
+    assert.equal(stored?.ttl, Math.floor(NOW.getTime() / 1000) + 7 * 86400);
+    assert.equal(h.s3Calls[0].input.tenantId, 'tenant-a');
+    assert.equal(h.s3Calls[0].input.bucket, 'translateme-batch-test');
+    assert.equal(h.s3Calls[0].input.key, upload.payload.file_key);
+    assert.equal(h.s3Calls[0].input.contentType, 'text/plain');
 
     const jobResponse = await request(h, 'POST', '/translate/batch', {
       file_key: upload.payload.file_key,
       target_langs: ['en', 'ko'],
       send_email: true,
+      source_lang: 'fr',
     });
     assert.equal(jobResponse.statusCode, 202);
     assert.equal(jobResponse.payload.status, 'QUEUED');
@@ -72,7 +181,75 @@ describe('batch upload ingress', () => {
     const job = [...h.records.values()].find((item) => item.entityType === 'JOB');
     assert.equal(job?.tenantId, 'tenant-a');
     assert.equal(job?.fileKey, upload.payload.file_key);
+    assert.equal(job?.type, 'FILE');
+    assert.deepEqual(job?.targetLangs, ['en', 'ko']);
+    assert.equal(job?.sourceLang, 'fr');
+    assert.equal(job?.sendEmail, true);
+    assert.equal(job?.total, 0);
+    assert.equal(job?.done, 0);
+    assert.equal(job?.failed, 0);
+    assert.equal(job?.estimatedCharacters, jobResponse.payload.estimated_characters);
+    assert.equal(job?.usageReservation?.reservedChars, job?.estimatedCharacters);
     assert.equal(job?.ttl, Math.floor(NOW.getTime() / 1000) + 7 * 86400);
+    assert.equal(h.reservations.length, 1);
+    assert.equal(h.reservations[0].tenantId, 'tenant-a');
+    assert.equal(h.reservations[0].n, jobResponse.payload.estimated_characters);
+    assert.deepEqual(h.reservations[0].source, { kind: 'API', keyId: 'key-a' });
+    assert.equal(h.reservations[0].now?.toISOString(), NOW.toISOString());
+  });
+
+  it('rejects missing or invalid authentication and inactive tenant configuration before storage access', async () => {
+    const noContext = setup({ tenant: null });
+    const unauthenticated = await request(noContext, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: 10 });
+    assert.equal(unauthenticated.statusCode, 401);
+    assert.equal(unauthenticated.payload.error.code, 'UNAUTHORIZED');
+    assert.equal(noContext.s3Calls.length, 0);
+
+    const noKeyId = setup({ tenant: { tenantId: 'tenant-a', via: 'KEYMAP', requestId: ctx.requestId } });
+    const keyRequired = await request(noKeyId, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: 10 });
+    assert.equal(keyRequired.statusCode, 401);
+    assert.equal(keyRequired.payload.error.code, 'UNAUTHORIZED');
+
+    const noSub = setup({ tenant: { tenantId: 'tenant-a', via: 'JWT', requestId: ctx.requestId } });
+    const subRequired = await request(noSub, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: 10 });
+    assert.equal(subRequired.statusCode, 401);
+
+    const authError = setup({ resolveTenantError: new AppError('UNAUTHORIZED', 'expired') });
+    const authFailure = await request(authError, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: 10 });
+    assert.equal(authFailure.statusCode, 401);
+
+    const inactiveMember = setup({ resolveTenantError: new AppError('PERMISSION_DENIED', 'member inactive') });
+    const memberDenied = await request(inactiveMember, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: 10 });
+    assert.equal(memberDenied.statusCode, 403);
+    assert.equal(memberDenied.payload.error.code, 'PERMISSION_DENIED');
+
+    for (const options of [{ missingConfig: true }, { status: 'LOCKED' }]) {
+      const inactive = setup(options);
+      const denied = await request(inactive, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: 10 });
+      assert.equal(denied.statusCode, 403);
+      assert.equal(denied.payload.error.code, 'TENANT_SUSPENDED');
+      assert.equal(inactive.s3Calls.length, 0);
+    }
+  });
+
+  it('returns INVALID_REQUEST for malformed JSON and NOT_FOUND for unsupported method or route', async () => {
+    const h = setup();
+    const malformed = await request(h, 'POST', '/translate/batch/upload-url', '{', { rawBody: true });
+    assert.equal(malformed.statusCode, 400);
+    assert.equal(malformed.payload.error.code, 'INVALID_REQUEST');
+
+    const nonObject = await request(h, 'POST', '/translate/batch/upload-url', '[]', { rawBody: true });
+    assert.equal(nonObject.statusCode, 400);
+    assert.equal(nonObject.payload.error.code, 'INVALID_REQUEST');
+
+    const wrongMethod = await request(h, 'GET', '/translate/batch/upload-url', {});
+    assert.equal(wrongMethod.statusCode, 404);
+    assert.equal(wrongMethod.payload.error.code, 'NOT_FOUND');
+
+    const wrongPath = await request(h, 'POST', '/translate/batch/unknown', {});
+    assert.equal(wrongPath.statusCode, 404);
+    assert.equal(wrongPath.payload.error.code, 'NOT_FOUND');
+    assert.equal(h.s3Calls.length, 0);
   });
 
   it('rejects unsupported formats and declared uploads over 10 MB with INVALID_REQUEST', async () => {
@@ -85,7 +262,149 @@ describe('batch upload ingress', () => {
     assert.equal(tooLarge.payload.error.code, 'INVALID_REQUEST');
   });
 
-  it('checks actual size and actual format after upload, not only the client declaration', async () => {
+  it('rejects unsafe file names and invalid declared sizes without writing upload records', async () => {
+    const h = setup();
+    for (const fileName of [undefined, null, 12, '', '  ', '../guide.txt', 'folder\\guide.txt', 'x'.repeat(252) + '.txt', 'guide.txt\0']) {
+      const response = await request(h, 'POST', '/translate/batch/upload-url', { file_name: fileName, size_bytes: h.bytes.length });
+      assert.equal(response.statusCode, 400, `file name should be rejected: ${JSON.stringify(fileName)}`);
+      assert.equal(response.payload.error.code, 'INVALID_REQUEST');
+    }
+    for (const size of [undefined, null, 0, -1, 1.5, '12', Number.MAX_SAFE_INTEGER + 1, 10 * 1024 * 1024 + 1]) {
+      const response = await request(h, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: size });
+      assert.equal(response.statusCode, 400, `declared size should be rejected: ${String(size)}`);
+      assert.equal(response.payload.error.code, 'INVALID_REQUEST');
+    }
+    assert.equal([...h.records.values()].some((item) => item.entityType === 'BATCH_UPLOAD'), false);
+    assert.equal(h.s3Calls.length, 0);
+  });
+
+  it('returns a server error when upload persistence or presigning fails', async () => {
+    const dbFailure = setup({ failUploadWrite: true });
+    const notStored = await createUpload(dbFailure);
+    assert.equal(notStored.statusCode, 500);
+    assert.equal(notStored.payload.error.code, 'INTERNAL_ERROR');
+    assert.equal(dbFailure.s3Calls.length, 0);
+
+    const signingFailure = setup({ failSignPut: true });
+    const notSigned = await createUpload(signingFailure);
+    assert.equal(notSigned.statusCode, 500);
+    assert.equal(notSigned.payload.error.code, 'INTERNAL_ERROR');
+    assert.equal(signingFailure.s3Calls[0].operation, 'signPut');
+    assert.equal(notSigned.payload.error.message.includes('S3 signing unavailable'), false);
+  });
+
+  it('accepts session routes and accounts valid Cognito jobs against console usage', async () => {
+    const jwt: Ctx = { tenantId: 'tenant-a', via: 'JWT', requestId: ctx.requestId, sub: 'user-a' };
+    const h = setup({ tenant: jwt });
+    const upload = await request(h, 'POST', '/dev/translate/batch/session/upload-url', { file_name: 'guide.txt', size_bytes: h.bytes.length }, { rawPath: true });
+    assert.equal(upload.statusCode, 200);
+    const job = await request(h, 'POST', '/translate/batch/session', { file_key: upload.payload.file_key, target_langs: ['en'] });
+    assert.equal(job.statusCode, 202);
+    assert.deepEqual(h.reservations[0].source, { kind: 'CONSOLE' });
+    assert.equal([...h.records.values()].find((item) => item.entityType === 'JOB')?.sendEmail, false);
+  });
+
+  it('rejects malformed, cross-tenant, expired, missing, or mismatched upload records before reading S3', async () => {
+    const h = setup();
+    for (const fileKey of [
+      undefined,
+      42,
+      '',
+      'batch/tenant-b/input/12345678-1234-1234-1234-123456789012.txt',
+      'batch/tenant-a/output/12345678-1234-1234-1234-123456789012.txt',
+      'batch/tenant-a/input/not-a-uuid.txt',
+      'batch/tenant-a/input/12345678-1234-1234-1234-123456789012.exe',
+    ]) {
+      const response = await request(h, 'POST', '/translate/batch', { file_key: fileKey, target_langs: ['en'] });
+      assert.equal(response.statusCode, 400);
+      assert.equal(response.payload.error.code, 'FILE_NOT_UPLOADED');
+    }
+
+    const expiredHarness = setup();
+    const expiredUploadResponse = await createUpload(expiredHarness);
+    const expiredUpload = storedUpload(expiredHarness, expiredUploadResponse.payload.file_key);
+    expiredUpload.upload.expiresAt = new Date(NOW.getTime() - 1).toISOString();
+    const expired = await request(expiredHarness, 'POST', '/translate/batch', { file_key: expiredUploadResponse.payload.file_key, target_langs: ['en'] });
+    assert.equal(expired.payload.error.code, 'FILE_NOT_UPLOADED');
+    assert.equal(expiredHarness.s3Calls.some((call) => call.operation === 'head'), false);
+
+    const missingHarness = setup();
+    const missingUploadResponse = await createUpload(missingHarness);
+    const missingUpload = storedUpload(missingHarness, missingUploadResponse.payload.file_key);
+    missingHarness.records.delete(missingUpload.key);
+    const missingRecord = await request(missingHarness, 'POST', '/translate/batch', { file_key: missingUploadResponse.payload.file_key, target_langs: ['en'] });
+    assert.equal(missingRecord.payload.error.code, 'FILE_NOT_UPLOADED');
+
+    const mismatchedHarness = setup();
+    const mismatchedUploadResponse = await createUpload(mismatchedHarness);
+    const mismatchedUpload = storedUpload(mismatchedHarness, mismatchedUploadResponse.payload.file_key);
+    mismatchedUpload.upload.fileKey = 'batch/tenant-a/input/different-file.txt';
+    const mismatched = await request(mismatchedHarness, 'POST', '/translate/batch', { file_key: mismatchedUploadResponse.payload.file_key, target_langs: ['en'] });
+    assert.equal(mismatched.payload.error.code, 'FILE_NOT_UPLOADED');
+    assert.equal(mismatchedHarness.s3Calls.some((call) => call.operation === 'head'), false);
+
+    assert.equal(h.s3Calls.some((call) => call.operation === 'head'), false);
+  });
+
+  it('maps missing S3 objects to FILE_NOT_UPLOADED and surfaces other S3 failures as INTERNAL_ERROR', async () => {
+    for (const notFound of [
+      Object.assign(new Error('missing'), { name: 'NoSuchKey' }),
+      Object.assign(new Error('missing'), { $metadata: { httpStatusCode: 404 } }),
+    ]) {
+      const h = setup({ headError: notFound });
+      const upload = await createUpload(h);
+      const response = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
+      assert.equal(response.statusCode, 400);
+      assert.equal(response.payload.error.code, 'FILE_NOT_UPLOADED');
+    }
+
+    const headFailure = setup({ headError: new Error('S3 unavailable') });
+    const headUpload = await createUpload(headFailure);
+    const headResponse = await request(headFailure, 'POST', '/translate/batch', { file_key: headUpload.payload.file_key, target_langs: ['en'] });
+    assert.equal(headResponse.statusCode, 500);
+    assert.equal(headResponse.payload.error.code, 'INTERNAL_ERROR');
+
+    const getFailure = setup({ getError: new Error('S3 unavailable') });
+    const getUpload = await createUpload(getFailure);
+    const getResponse = await request(getFailure, 'POST', '/translate/batch', { file_key: getUpload.payload.file_key, target_langs: ['en'] });
+    assert.equal(getResponse.statusCode, 500);
+    assert.equal(getResponse.payload.error.code, 'INTERNAL_ERROR');
+    assert.equal(getFailure.reservations.length, 0);
+  });
+
+  it('rejects zero, unavailable, and mismatched S3 object metadata', async () => {
+    for (const options of [{ actualSize: 0 }, { omitHeadSize: true }]) {
+      const h = setup(options);
+      const upload = await createUpload(h);
+      const response = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
+      assert.equal(response.statusCode, 400);
+      assert.equal(response.payload.error.code, 'INVALID_REQUEST');
+    }
+  });
+
+  it('validates target languages, source language, and send_email before reserving quota', async () => {
+    const h = setup();
+    const upload = await createUpload(h);
+    const invalidPayloads = [
+      {},
+      { target_langs: [] },
+      { target_langs: 'en' },
+      { target_langs: ['xx'] },
+      { target_langs: ['en', 'en'] },
+      { target_langs: ['en'], source_lang: 'xx' },
+      { target_langs: ['en'], source_lang: 4 },
+      { target_langs: ['en'], send_email: 'true' },
+    ];
+    for (const payload of invalidPayloads) {
+      const response = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, ...payload });
+      assert.equal(response.statusCode, 400, `payload should be rejected: ${JSON.stringify(payload)}`);
+      assert.equal(response.payload.error.code, 'INVALID_REQUEST');
+    }
+    assert.equal(h.reservations.length, 0);
+    assert.equal([...h.records.values()].some((item) => item.entityType === 'JOB'), false);
+  });
+
+  it('checks object size, content type, and parser validity after upload', async () => {
     const tooLargeHarness = setup({ actualSize: 10 * 1024 * 1024 + 1 });
     const upload = await request(tooLargeHarness, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: tooLargeHarness.bytes.length });
     const tooLarge = await request(tooLargeHarness, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
@@ -98,11 +417,24 @@ describe('batch upload ingress', () => {
     assert.equal(mismatch.statusCode, 400);
     assert.equal(mismatch.payload.error.code, 'INVALID_REQUEST');
 
-    const bodyMismatchHarness = setup({ text: 'This is plain text, not an HTML document.', contentType: 'text/html' });
-    const htmlUpload = await request(bodyMismatchHarness, 'POST', '/translate/batch/upload-url', { file_name: 'guide.html', size_bytes: bodyMismatchHarness.bytes.length });
-    const bodyMismatch = await request(bodyMismatchHarness, 'POST', '/translate/batch', { file_key: htmlUpload.payload.file_key, target_langs: ['en'] });
-    assert.equal(bodyMismatch.statusCode, 400);
-    assert.equal(bodyMismatch.payload.error.code, 'INVALID_REQUEST');
+    const invalidUtf8Harness = setup({ text: 'xx', objectBytes: new Uint8Array([0xc3, 0x28]), contentType: 'text/html' });
+    const htmlUpload = await request(invalidUtf8Harness, 'POST', '/translate/batch/upload-url', { file_name: 'guide.html', size_bytes: invalidUtf8Harness.bytes.length });
+    const invalidUtf8 = await request(invalidUtf8Harness, 'POST', '/translate/batch', { file_key: htmlUpload.payload.file_key, target_langs: ['en'] });
+    assert.equal(invalidUtf8.statusCode, 400);
+    assert.equal(invalidUtf8.payload.error.code, 'INVALID_REQUEST');
+    assert.equal(invalidUtf8Harness.reservations.length, 0);
+
+    const changedSizeHarness = setup({ actualSize: 1 });
+    const changedSizeUpload = await createUpload(changedSizeHarness);
+    const changedSize = await request(changedSizeHarness, 'POST', '/translate/batch', { file_key: changedSizeUpload.payload.file_key, target_langs: ['en'] });
+    assert.equal(changedSize.statusCode, 400);
+    assert.equal(changedSize.payload.error.code, 'INVALID_REQUEST');
+
+    const changedObjectHarness = setup({ objectBytes: new TextEncoder().encode('x') });
+    const changedObjectUpload = await createUpload(changedObjectHarness);
+    const changedObject = await request(changedObjectHarness, 'POST', '/translate/batch', { file_key: changedObjectUpload.payload.file_key, target_langs: ['en'] });
+    assert.equal(changedObject.statusCode, 400);
+    assert.equal(changedObject.payload.error.code, 'INVALID_REQUEST');
   });
 
   it('returns FILE_NOT_UPLOADED for an absent object and CHAR_QUOTA_EXCEEDED without creating a job', async () => {
@@ -118,5 +450,59 @@ describe('batch upload ingress', () => {
     assert.equal(overQuota.statusCode, 429);
     assert.equal(overQuota.payload.error.code, 'CHAR_QUOTA_EXCEEDED');
     assert.equal([...quotaHarness.records.values()].some((item) => item.entityType === 'JOB'), false);
+    assert.equal(quotaHarness.getReservedCharacters(), 0);
+  });
+
+  it('reserves quota before creating jobs so concurrent submissions cannot exceed the limit', async () => {
+    const h = setup({ text: 'hello', charLimit: 5 });
+    const upload = await request(h, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: h.bytes.length });
+    const submit = () => request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
+    const responses = await Promise.all([submit(), submit()]);
+
+    assert.deepEqual(responses.map((response) => response.statusCode).sort(), [202, 429]);
+    assert.equal(h.getReservedCharacters(), 5);
+    assert.equal([...h.records.values()].filter((item) => item.entityType === 'JOB').length, 1);
+  });
+
+  it('returns INTERNAL_ERROR when quota reservation fails for a reason other than quota exhaustion', async () => {
+    const h = setup({ reserveError: new Error('Usage store unavailable') });
+    const upload = await createUpload(h);
+    const response = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
+    assert.equal(response.statusCode, 500);
+    assert.equal(response.payload.error.code, 'INTERNAL_ERROR');
+    assert.equal(h.refunds.length, 0);
+    assert.equal([...h.records.values()].some((item) => item.entityType === 'JOB'), false);
+  });
+
+  it('refunds the quota reservation if the shared job record cannot be created', async () => {
+    const h = setup({ failJobWrite: true });
+    const upload = await request(h, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: h.bytes.length });
+    const failed = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
+    assert.equal(failed.statusCode, 500);
+    assert.equal(h.getReservedCharacters(), 0);
+    assert.equal([...h.records.values()].some((item) => item.entityType === 'JOB'), false);
+  });
+
+  it('logs a failed quota refund without exposing the underlying error', async () => {
+    const h = setup({ failJobWrite: true, failRefund: true });
+    const upload = await createUpload(h);
+    const previousError = console.error;
+    const logLines: string[] = [];
+    console.error = (message?: unknown) => { logLines.push(String(message)); };
+    try {
+      const response = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
+      assert.equal(response.statusCode, 500);
+      assert.equal(response.payload.error.code, 'INTERNAL_ERROR');
+    } finally {
+      console.error = previousError;
+    }
+    assert.equal(h.refunds.length, 1);
+    assert.equal(h.getReservedCharacters(), h.reservations[0].n);
+    assert.equal(logLines.length, 1);
+    const log = JSON.parse(logLines[0]) as Record<string, unknown>;
+    assert.equal(log.event, 'BATCH_USAGE_RESERVATION_REFUND_FAILED');
+    assert.equal(log.request_id, ctx.requestId);
+    assert.equal(log.errorName, 'Error');
+    assert.equal(logLines[0].includes('DynamoDB refund unavailable'), false);
   });
 });

@@ -12,9 +12,10 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { db } from '../../../libs/common/db.js';
 import { contextFromIdTokenClaims } from '../auth/context.js';
 import { CorruptFile, countChars, FORMAT_PARSERS, parse, UnsupportedFormat } from '../../../libs/common/parsers.js';
-import { createTenantS3Client } from '../../../libs/common/tenantAws.js';
+import { createTenantDocumentClientRouter, createTenantS3Client } from '../../../libs/common/tenantAws.js';
 import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
-import { monthUtc, usageKeys } from '../../../libs/common/usage/usage.js';
+import { CharacterQuotaExceededError, UsageService, type UsageReservation } from '../../../libs/common/usage/usage.js';
+import { createJobStore, newJobId } from '../../../libs/common/jobs.js';
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const UPLOAD_URL_TTL_SECONDS = 900;
@@ -27,7 +28,8 @@ const FORMAT_CONTENT_TYPES = {
 } as const;
 
 type BatchFormat = keyof typeof FORMAT_CONTENT_TYPES;
-type BatchDb = Pick<typeof db, 'get' | 'put'>;
+type BatchDb = Pick<typeof db, 'get' | 'put' | 'update'>;
+type BatchUsage = Pick<UsageService, 'reserve' | 'refund'>;
 
 /** S3 adapter tối thiểu giúp kiểm tra luồng bằng mock, không phụ thuộc mạng trong unit test. */
 export interface BatchObjectStore {
@@ -39,6 +41,7 @@ export interface BatchObjectStore {
 /** Phụ thuộc có thể thay thế trong kiểm thử; DB mặc định vẫn dùng lớp truy cập chung theo tenant. */
 export interface BatchIngressDependencies {
   db: BatchDb;
+  usage: BatchUsage;
   s3: BatchObjectStore;
   bucket: string;
   resolveTenant(event: BatchIngressEvent, requestId: string): Promise<Ctx | null>;
@@ -201,30 +204,55 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
         }
         if (body.send_email !== undefined && typeof body.send_email !== 'boolean') throw new AppError('INVALID_REQUEST', 'send_email phải là boolean.');
         const estimatedCharacters = sourceCharacters * targetLangs.length;
-        const limit = Number(config.characterLimit ?? config.charLimit);
         const source = ctx.via === 'JWT' ? { kind: 'CONSOLE' as const } : { kind: 'API' as const, keyId: ctx.keyId! };
-        const month = monthUtc(deps.now());
-        const usage = await deps.db.get(ctx, usageKeys(ctx.tenantId, month, source).total, { consistent: true });
-        if (!Number.isSafeInteger(limit) || limit < 0) throw new AppError('INTERNAL_ERROR', 'Cấu hình hạn mức ký tự của tenant không hợp lệ.');
-        const usedCharacters = Number(usage?.machineChars ?? 0);
-        if (!Number.isSafeInteger(usedCharacters) || usedCharacters < 0) throw new AppError('INTERNAL_ERROR', 'Bộ đếm sử dụng ký tự của tenant không hợp lệ.');
-        if (usedCharacters + estimatedCharacters > limit) {
-          throw new AppError('CHAR_QUOTA_EXCEEDED', 'Số ký tự ước tính vượt hạn mức còn lại của tenant.');
+        const jobId = newJobId(deps.now().getTime());
+        let reservation: UsageReservation;
+        try {
+          reservation = await deps.usage.reserve({
+            tenantId: ctx.tenantId,
+            requestId: jobId,
+            n: estimatedCharacters,
+            source,
+            now: deps.now(),
+          });
+        } catch (error) {
+          if (error instanceof CharacterQuotaExceededError) {
+            throw new AppError('CHAR_QUOTA_EXCEEDED', 'Số ký tự ước tính vượt hạn mức còn lại của tenant.');
+          }
+          throw error;
         }
-        const jobId = `job-${randomUUID()}`;
-        const createdAt = deps.now();
-        const job = {
-          ...keys.job(ctx, jobId), entityType: 'JOB', tenantId: ctx.tenantId,
-          jobId, type: 'FILE', status: 'QUEUED', progress: 0,
-          fileKey, fileName: upload.fileName, format,
-          ...(typeof body.source_lang === 'string' ? { sourceLang: body.source_lang } : {}),
-          targetLangs, sendEmail: body.send_email === true, estimatedCharacters, actualCharacters: 0,
-          results: [], warnings: [],
-          usageSource: ctx.via === 'JWT' ? { type: 'CONSOLE' } : { type: 'API', keyId: ctx.keyId },
-          createdAt: createdAt.toISOString(), updatedAt: createdAt.toISOString(),
-          ttl: Math.floor(createdAt.getTime() / 1000) + RETENTION_DAYS * 86400,
-        };
-        await deps.db.put(ctx, job, 'attribute_not_exists(PK) AND attribute_not_exists(SK)');
+
+        try {
+          await createJobStore(deps.db, () => deps.now().getTime()).create(ctx, {
+            jobId,
+            type: 'FILE',
+            targetLangs,
+            file: {
+              fileKey,
+              fileName: upload.fileName,
+              format,
+              ...(typeof body.source_lang === 'string' ? { sourceLang: body.source_lang } : {}),
+              sendEmail: body.send_email === true,
+              estimatedCharacters,
+              usageReservation: reservation,
+            },
+          });
+        } catch (error) {
+          try {
+            await deps.usage.refund(reservation);
+          } catch (refundError) {
+            console.error(JSON.stringify({
+              level: 'ERROR',
+              event: 'BATCH_USAGE_RESERVATION_REFUND_FAILED',
+              tenantId: ctx.tenantId,
+              jobId,
+              request_id: requestId,
+              errorName: refundError instanceof Error ? refundError.name : 'UnknownError',
+            }));
+          }
+          throw error;
+        }
+
         return respond(202, { job_id: jobId, status: 'QUEUED', estimated_characters: estimatedCharacters });
       }
 
@@ -240,6 +268,11 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
 }
 
 const ddbClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
+const usageDdbClient = createTenantDocumentClientRouter(
+  DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } }),
+  { roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN, sessionName: 'batch-usage' },
+) as DynamoDBDocumentClient;
+const usageService = new UsageService(usageDdbClient, { tableName: process.env.TABLE_NAME ?? 'translate-data' });
 const tenantS3Clients = new Map<string, ReturnType<typeof createTenantS3Client>>();
 
 /** Lấy client S3 STS theo tenant; mỗi client bị giới hạn trong prefix batch riêng của tenant. */
@@ -281,6 +314,7 @@ export async function handler(event: BatchIngressEvent) {
   }
   return createBatchIngressHandler({
     db,
+    usage: usageService,
     bucket,
     now: () => new Date(),
     resolveTenant,

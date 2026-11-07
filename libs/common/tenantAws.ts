@@ -96,6 +96,8 @@ export function createTenantCredentialsProvider(
       const result = await sts.send(new AssumeRoleCommand({
         RoleArn: roleArn,
         RoleSessionName: `${sessionName}-${tenantId}`.slice(0, 64),
+        SourceIdentity: tenantId,
+        Tags: [{ Key: 'tenantId', Value: tenantId }],
         Policy: policy,
       })) as { Credentials?: { AccessKeyId?: string; SecretAccessKey?: string; SessionToken?: string; Expiration?: Date } };
       const c = result.Credentials;

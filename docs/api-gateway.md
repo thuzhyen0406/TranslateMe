@@ -44,8 +44,9 @@ role for S3 operations; the STS session policy restricts each request to
 The shared parser in this checkout registers TXT and HTML only. Batch upload
 therefore rejects DOCX until the DOCX parser from task 4.9 is merged and
 registered in `libs/common/parsers.ts`; this keeps the batch estimate aligned
-with the workflow parser. The shared `libs/common/jobs.ts` API from task 4.5 is
-also not present in this checkout, so batch currently writes the existing
-`JOB` shape directly. Once that module is merged, switch creation to
-`createJobStore().create({ type: 'FILE', ... })` and align the worker's FILE
-fields before relying on the Console jobs view.
+with the workflow parser. Batch creates FILE jobs through the shared
+`createJobStore` schema (`total`, `done`, and `failed`) and reserves estimated
+machine characters atomically before queueing. The reservation ticket is stored
+on the job for the batch workflow to settle against actual usage or refund if
+translation fails. Until task 4.7 is integrated, queued jobs remain input
+records and do not start a state machine.
