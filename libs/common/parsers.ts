@@ -11,7 +11,8 @@
  *  - translations[id] thiếu hoặc rỗng -> giữ câu gốc (như trang dịch dở của F2).
  *  - Bất biến (QC-11): rebuild(parse(f).skeleton, []) cho tệp tương đương tệp gốc:
  *      TXT: trùng từng byte (kể cả BOM, kiểu xuống dòng, khoảng trắng);
- *      HTML: cùng cây DOM (so bằng parse5 serialize, vì parse5 chuẩn hóa cách viết HTML).
+ *      HTML: cùng cây DOM (so bằng parse5 serialize, vì parse5 chuẩn hóa cách viết HTML);
+ *      DOCX: cùng số đoạn w:p, số ô bảng w:tc, cùng danh sách blocks/warnings và mở lại được bằng bộ phân tích.
  *
  * TXT: UTF-8 (chấp nhận BOM). Tách theo dòng, giữ nguyên dòng trống và kiểu xuống dòng (\n, \r\n, \r); mỗi dòng
  *      tách câu bằng segmenter của 1.5; câu không có chữ (chỉ số, ký hiệu) giữ nguyên, không gửi dịch.
@@ -19,10 +20,14 @@
  * HTML: dùng lại extract (bước 2 của F2) và rebuildDocument: không viết lại liên kết, không canonical/hreflang/nút
  *      chọn ngôn ngữ; chỉ đặt <html lang> theo ngôn ngữ đích. Tệp phải là UTF-8.
  */
+import { docxParser, type DocxSkeleton } from './docx.js';
 import { extract } from './extract.js';
 import { escapeMarkerText, stripMarkers } from './markers.js';
+import { CorruptFile, MAX_FILE_BYTES, UnsupportedFormat } from './parserErrors.js';
 import { rebuildDocument } from './rebuild.js';
 import { isTranslatable, segmentBlock } from './segmenter.js';
+
+export { docxParser, type DocxSkeleton, CorruptFile, UnsupportedFormat, MAX_FILE_BYTES };
 
 export type DocFormat = 'TXT' | 'HTML' | 'DOCX';
 
@@ -64,7 +69,7 @@ export interface OtherSkeleton {
   [k: string]: unknown;
 }
 
-export type Skeleton = TxtSkeleton | HtmlSkeleton | OtherSkeleton;
+export type Skeleton = TxtSkeleton | HtmlSkeleton | DocxSkeleton | OtherSkeleton;
 
 export interface ParsedDocument<S extends Skeleton = Skeleton> {
   blocks: Sentence[];
@@ -94,27 +99,6 @@ export interface RebuildOptions {
 export interface FormatParser {
   parse(bytes: Uint8Array, opts: Required<ParseOptions>): ParsedDocument;
   rebuild(skeleton: Skeleton, translations: readonly (string | null | undefined)[], opts: RebuildOptions): { bytes: Uint8Array; stats: RebuildStats };
-}
-
-export const MAX_FILE_BYTES = 10 * 1024 * 1024;
-
-/** Định dạng không hỗ trợ (hoặc chưa cắm vào) */
-export class UnsupportedFormat extends Error {
-  override name = 'UnsupportedFormat';
-  constructor(public format: string) {
-    super(`Định dạng không hỗ trợ: ${format}`);
-  }
-}
-
-/** Tệp hỏng hoặc vi phạm giới hạn; reason dùng làm lý do FAILED của JOB */
-export class CorruptFile extends Error {
-  override name = 'CorruptFile';
-  constructor(
-    public reason: 'NOT_UTF8' | 'TOO_LARGE' | 'INVALID_SKELETON' | string,
-    message: string,
-  ) {
-    super(message);
-  }
 }
 
 const UTF8_BOM = '﻿';
@@ -226,7 +210,11 @@ export const htmlParser: FormatParser = {
 // ============================================================================
 
 /** DOCX (4.9 – TV4) thêm: FORMAT_PARSERS.DOCX = docxParser */
-export const FORMAT_PARSERS: Partial<Record<DocFormat, FormatParser>> = { TXT: txtParser, HTML: htmlParser };
+export const FORMAT_PARSERS: Partial<Record<DocFormat, FormatParser>> = {
+  TXT: txtParser,
+  HTML: htmlParser,
+  DOCX: docxParser,
+};
 
 function parserFor(format: string): FormatParser {
   const p = (FORMAT_PARSERS as Record<string, FormatParser | undefined>)[format];
