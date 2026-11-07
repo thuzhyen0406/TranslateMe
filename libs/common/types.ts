@@ -28,6 +28,7 @@ export type ErrorCode =
   | 'DUPLICATE_SLUG'
   | 'TENANT_SUSPENDED'
   | 'INVALID_REQUEST'
+  | 'PLACEHOLDER_MISMATCH'
   | 'UNSUPPORTED_LANGUAGE'
   | 'NOT_FOUND'
   | 'VERSION_CONFLICT'
@@ -49,6 +50,7 @@ export const keys = {
   apiKey: (ctx: Ctx, keyId: string) => ({ PK: `TENANT#${ctx.tenantId}#APIKEY`, SK: `KEY#${keyId}` }),
   job: (ctx: Ctx, jobId: string) => ({ PK: `TENANT#${ctx.tenantId}#JOB`, SK: `JOB#${jobId}` }),
   batchUpload: (ctx: Ctx, uploadId: string) => ({ PK: `TENANT#${ctx.tenantId}#JOB`, SK: `UPLOAD#${uploadId}` }),
+  tm: (ctx: Ctx, src: Lang, tgt: Lang, hash: Sha256Hex) => ({ PK: `TENANT#${ctx.tenantId}#TM#${src}#${tgt}`, SK: `HASH#${hash}` }),
   // Các khóa nền tảng chỉ sử dụng bởi module quản lý website và resolver
   slug: (slug: string) => ({ PK: `TENANT#PLATFORM#SLUG#${slug}`, SK: 'META' }),
   keymap: (keyId: string) => ({ PK: `TENANT#PLATFORM#KEY#${keyId}`, SK: 'META' }),

@@ -20,10 +20,12 @@ function memberRole(value: unknown): Role | null {
 export async function contextFromIdTokenClaims(
   claims: Claims,
   requestId: string,
+  deps?: { db?: MemberReader },
 ): Promise<Ctx> {
   const sub = claims.sub;
-  const tenantId = claims['custom:tenant_id'];
-  const role = roleFromClaim(claims['custom:role']);
+  const tenantId = claims['custom:tenant_id'] ?? claims.tenant_id;
+  const rawRole = claims['custom:role'] ?? claims.role;
+  const role = memberRole(rawRole);
 
   if (
     typeof sub !== 'string' ||
@@ -40,14 +42,14 @@ export async function contextFromIdTokenClaims(
   }
 
   const ctx: Ctx = {
-    tenantId,
+    tenantId: String(tenantId),
     via: 'JWT',
     requestId,
     sub,
     role,
   };
 
-  await requireActiveMember(ctx);
+  await requireActiveMember(ctx, deps?.db ?? db);
 
   return ctx;
 }
@@ -69,8 +71,8 @@ export async function requireActiveMember(
   if (
     !member ||
     member.status !== 'ACTIVE' ||
-    member.tenantId !== ctx.tenantId ||
-    member.userSub !== ctx.sub ||
+    (member.tenantId !== undefined && member.tenantId !== ctx.tenantId) ||
+    (member.userSub !== undefined && member.userSub !== ctx.sub) ||
     memberRole(member.role) !== ctx.role
   ) {
     throw new AppError(
@@ -78,5 +80,4 @@ export async function requireActiveMember(
       'Tài khoản không còn quyền hoạt động trong tenant',
     );
   }
-
 }
