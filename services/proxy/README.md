@@ -103,6 +103,10 @@ Thư viện: `libs/common/seg.ts`. Bước 7 của F2: mỗi lần dựng trang,
 - Ghi SEG lỗi không làm hỏng trang, nhưng trang trả `s-maxage=60` để không bị CloudFront giữ lâu khi chỉ mục còn thiếu. Log: `segWritten`, `segWriteFailed`, `segWriteErrors`, `segWriteError`.
 - Đọc ghi DynamoDB tạm qua `createDynamoSegDb` (stub của 2.2, giống TM) cho tới khi lớp `data` có `batchWrite` và query GSI.
 
+## Dịch trước theo sitemap (4.5, `prewarm.ts`)
+
+Các hàm ReadSitemap, PrewarmPages (C13 chế độ trang), FinishPrewarm, MarkFailed của state machine PREWARM. PrewarmPages dùng lại `createProxyHandler` với `countRequests: false` (ký tự vẫn tính vào `WEB#slug`, không tính lượt xem trang) và không gọi worker hoàn tất nền. Chi tiết, IAM và biến môi trường: `docs/prewarm.md`.
+
 ## Lambda worker C13 (`worker.ts`)
 
 | Mục | Giá trị |
@@ -121,5 +125,4 @@ Worker kiểm tra lại sự kiện và tenant (B.1.1): slug thuộc đúng `ten
 - Khai báo Lambda worker và bucket tải trọng trong IaC (TV1).
 - Đo thời gian: lần tải đầu < 30 giây, lần hai trúng TM (mốc 4).
 - Xóa cache chọn lọc dựa trên SEG (3.5).
-- Worker ở chế độ trang (4.5, dịch trước) ghi SEG như proxy.
 - Tra website từ DynamoDB thay cho `PROXY_SITES_JSON`.
