@@ -745,6 +745,23 @@ describe('Task 3.8 – Duyệt bản dịch (F5)', () => {
     });
     assert.equal(unauthRes.statusCode, 401);
 
+    const devForbiddenRes = await lambdaHandler({
+      httpMethod: 'GET',
+      path: '/console/translations',
+      requestContext: {
+        requestId: 'req-gw-dev',
+        authorizer: {
+          claims: {
+            'custom:tenant_id': TENANT_A,
+            'custom:role': 'DEVELOPER',
+            sub: 'u_dev_01',
+          },
+        },
+      },
+    });
+    assert.equal(devForbiddenRes.statusCode, 403);
+    assert.equal(JSON.parse(devForbiddenRes.body).error?.code, 'PERMISSION_DENIED');
+
     const listRes = await lambdaHandler({
       httpMethod: 'GET',
       path: '/prod/console/translations',

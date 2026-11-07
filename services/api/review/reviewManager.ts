@@ -2,7 +2,7 @@
  * Hạng mục 3.8 – Duyệt bản dịch / Translation Review (F5).
  *
  * Bám sát Quy ước chung (QC-1..QC-8), Mục 1.3.4, 2.2.6, 2.6.4 của Báo cáo:
- *  - Phân quyền: Chỉ cho phép `TENANT_ADMIN` và `REVIEWER` (chặn `DEVELOPER` với `FORBIDDEN`).
+ *  - Phân quyền: Chỉ cho phép `TENANT_ADMIN` và `REVIEWER` (chặn `DEVELOPER` với `PERMISSION_DENIED` theo QC-2).
  *  - Kiểm tra bảng `MEMBER` (`PK = TENANT#<t>`, `SK = MEMBER#<sub>`): thành viên phải đang `ACTIVE`.
  *  - Kiểm tra `CONFIG` (`PK = TENANT#<t>`, `SK = CONFIG`): khi `status === 'LOCKED'`, chặn mọi thao tác ghi
  *    với mã lỗi `TENANT_SUSPENDED` (chỉ cho phép xem danh sách ở chế độ chỉ đọc).
