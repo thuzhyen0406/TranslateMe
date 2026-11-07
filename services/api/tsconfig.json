@@ -26,6 +26,7 @@
     "batch/**/*.ts",
     "keys/**/*.ts",
     "translate/**/*.ts",
+    "prewarm/**/*.ts",
     "platform/**/*.ts",
     "../../libs/common/roles.ts",
     "../../libs/common/types.ts",

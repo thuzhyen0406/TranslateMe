@@ -28,7 +28,7 @@ function setup(
   return { handler, db, translateClient, logger };
 }
 
-describe('proxy + Translation Memory (2.4)', () => {
+describe('proxy + Translation Memory (2.4 & 3.9)', () => {
   it('lần 1 trượt TM, dịch và ghi MACHINE; lần 2 cùng trang trúng TM hoàn toàn, không gọi Translate', async () => {
     const { handler, db, translateClient, logger } = setup();
     const first = await handler(ev('/homestay-abc/en/'));
@@ -97,6 +97,36 @@ describe('proxy + Translation Memory (2.4)', () => {
     await handler(ev('/homestay-abc/en/'));
     assert.equal(logger.infos[1].tmReviewFlagged, undefined, 'đã có cờ thì lần sau không ghi lại');
     assert.equal(logger.infos[1].tmHumanNeedsReview, 1);
+  });
+
+  it('hậu kiểm thuật ngữ (3.9): câu dịch máy lệch thuật ngữ FIXED được gắn cờ Cần xem lại và đưa vào GSI3 REVIEW', async () => {
+    const db = memoryTmDb();
+    const glossary: GlossaryState = {
+      version: 3,
+      terminologyName: `tm-${SITE.tenantId}`,
+      terms: [
+        { normalized: 'homestay abc', sourceTerm: 'Homestay ABC', type: 'KEEP', sinceVersion: 1 },
+        { normalized: 'bảng giá', sourceTerm: 'bảng giá', type: 'FIXED', translations: { en: 'Official Rate Card' }, sinceVersion: 3 },
+      ],
+    };
+    const { handler, logger } = setup({ db, glossary });
+    const res = await handler(ev('/homestay-abc/en/'));
+    assert.equal(res.statusCode, 200);
+    assert.equal(logger.infos[0].glossaryPostCheckFlagged, 1);
+
+    // Câu chứa "bảng giá" được dịch giả thành "BẢNG GIÁ" (thiếu "Official Rate Card") -> needsReview = true
+    const bangGiaHash = hashSentenceStub('Xem {1}bảng giá{/1} nhé.');
+    const bangGiaKey = tmKey(ctx, 'vi', 'en', bangGiaHash);
+    const bangGiaItem = db.store.get(`${bangGiaKey.PK}|${bangGiaKey.SK}`)!;
+    assert.equal(bangGiaItem.needsReview, true);
+    assert.equal(bangGiaItem.GSI3PK, `TENANT#${SITE.tenantId}#TM#REVIEW`);
+
+    // Câu "Homestay ABC" giữ nguyên "HOMESTAY ABC" (khớp KEEP) -> needsReview = false
+    const titleHash = hashSentenceStub('Homestay ABC');
+    const titleKey = tmKey(ctx, 'vi', 'en', titleHash);
+    const titleItem = db.store.get(`${titleKey.PK}|${titleKey.SK}`)!;
+    assert.equal(titleItem.needsReview, false);
+    assert.equal(titleItem.GSI3PK, `TENANT#${SITE.tenantId}#TM#MACHINE`);
   });
 
   it('ghi cờ Cần xem lại lỗi -> trang vẫn 200, chỉ ghi log', async () => {

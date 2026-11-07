@@ -1,0 +1,91 @@
+{
+  "Comment": "TranslateMe PREWARM (F6, Task 4.5): đọc sitemap, Map thường qua các lô URL, worker C13 chế độ trang. Đầu vào M2: {job_id, tenant_id, slug, target_langs}. DefinitionSubstitutions: ReadSitemapFunctionArn, PrewarmPagesFunctionArn, FinishPrewarmFunctionArn, MarkPrewarmFailedFunctionArn.",
+  "StartAt": "ReadSitemap",
+  "States": {
+    "ReadSitemap": {
+      "Type": "Task",
+      "Resource": "${ReadSitemapFunctionArn}",
+      "TimeoutSeconds": 120,
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+      "Next": "PrewarmLots"
+    },
+    "PrewarmLots": {
+      "Type": "Map",
+      "ItemsPath": "$.lots",
+      "MaxConcurrency": 2,
+      "ItemSelector": {
+        "mode": "PREWARM_PAGES",
+        "job_id.$": "$.job_id",
+        "tenant_id.$": "$.tenant_id",
+        "slug.$": "$.slug",
+        "target_langs.$": "$.target_langs",
+        "urls_key.$": "$$.Map.Item.Value"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "PrewarmPages",
+        "States": {
+          "PrewarmPages": {
+            "Type": "Task",
+            "Resource": "${PrewarmPagesFunctionArn}",
+            "TimeoutSeconds": 300,
+            "Retry": [
+              {
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.results",
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+      "Next": "FinishPrewarm"
+    },
+    "FinishPrewarm": {
+      "Type": "Task",
+      "Resource": "${FinishPrewarmFunctionArn}",
+      "TimeoutSeconds": 60,
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+      "End": true
+    },
+    "MarkFailed": {
+      "Type": "Task",
+      "Resource": "${MarkPrewarmFailedFunctionArn}",
+      "TimeoutSeconds": 60,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Failed"
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "PrewarmFailed",
+      "Cause": "Xem lý do trong bản ghi JOB"
+    }
+  }
+}
