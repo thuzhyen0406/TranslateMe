@@ -25,8 +25,10 @@ import {
   type CreateSiteInput,
   type SiteManagerDependencies,
 } from '../sites/siteManager.js';
+import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import {
   handlePrewarmRoute,
+  stepFunctionsStarter,
   type PrewarmManagerDeps,
 } from '../prewarm/prewarmManager.js';
 import { inviteMember, type InviteMemberDeps } from '../auth/inviteMember.js';
@@ -469,12 +471,41 @@ export async function handleMembersApiGatewayRoute(
   }
 }
 
+let defaultSfnClient: SFNClient | undefined;
+function getSfnClient(): SFNClient {
+  if (!defaultSfnClient) {
+    defaultSfnClient = new SFNClient({});
+  }
+  return defaultSfnClient;
+}
+
+/**
+ * Tạo hàm startExecution kết nối Step Functions thật qua SFNClient.
+ * Nếu chưa cấu hình PREWARM_STATE_MACHINE_ARN, hàm ném lỗi CONFIG_ERROR
+ * để startPrewarm đánh dấu JOB là FAILED (START_FAILED) và router trả về HTTP 500,
+ * thay vì trả mã 202 giả lập và để JOB kẹt ở QUEUED.
+ */
+export function createDefaultPrewarmStarter(
+  stateMachineArn: string | undefined = process.env.PREWARM_STATE_MACHINE_ARN,
+  client?: SFNClient,
+): (input: { name: string; input: string }) => Promise<{ executionArn?: string }> {
+  return async (input: { name: string; input: string }): Promise<{ executionArn?: string }> => {
+    const arn = stateMachineArn?.trim() || process.env.PREWARM_STATE_MACHINE_ARN?.trim();
+    if (!arn) {
+      throw new AppError(
+        'INTERNAL_ERROR',
+        'Tính năng dịch trước chưa được cấu hình state machine (thiếu biến môi trường PREWARM_STATE_MACHINE_ARN).',
+      );
+    }
+    const starter = stepFunctionsStarter(client ?? getSfnClient(), StartExecutionCommand, arn);
+    return starter(input);
+  };
+}
+
 /** Dependencies mặc định cho dịch trước theo sitemap (F6) và tra cứu job (F10). */
 export const defaultPrewarmDeps: PrewarmManagerDeps = {
   db,
-  startExecution: async (input) => {
-    return { executionArn: `arn:aws:states:local:execution:prewarm:${input.name}` };
-  },
+  startExecution: createDefaultPrewarmStarter(),
 };
 
 /** Xây dựng danh sách mô-đun route mặc định của Console Lambda (hợp nhất đầy đủ 5 nhóm route). */

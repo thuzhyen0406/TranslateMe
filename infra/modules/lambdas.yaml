@@ -123,6 +123,7 @@ Resources:
           USER_POOL_ARN: !Ref UserPoolArn
           CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistributionId
           TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          PREWARM_STATE_MACHINE_ARN: !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:translateme-${StageName}-prewarm'
 
   TranslateFunction:
     Type: AWS::Lambda::Function

@@ -209,6 +209,12 @@ Resources:
                   - cloudfront:CreateInvalidation
                   - cloudfront:GetInvalidation
                 Resource: !Ref CloudFrontDistributionArn
+              - Sid: StartPrewarmExecution
+                Effect: Allow
+                Action: states:StartExecution
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:translateme-${StageName}-prewarm'
+                  - !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:translateme-${StageName}-prewarm:*'
 
   TranslateApiExecutionRole:
     Type: AWS::IAM::Role

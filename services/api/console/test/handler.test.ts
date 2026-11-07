@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   createConsoleHandler,
+  createDefaultPrewarmStarter,
+  defaultPrewarmDeps,
   handleGlossaryApiGatewayRoute,
   handleSitesApiGatewayRoute,
   handleMembersApiGatewayRoute,
@@ -10,6 +12,7 @@ import {
   type ConsoleEvent,
   type ConsoleRouteModule,
 } from '../handler.js';
+import { StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { handlePrewarmRoute } from '../../prewarm/prewarmManager.js';
 import { memoryDataDb } from '../../../../libs/common/test/memoryDataDb.js';
 import { db } from '../../../../libs/common/db.js';
@@ -450,5 +453,109 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     );
     assert.equal(duplicateRes?.statusCode, 409);
     assert.equal(JSON.parse(duplicateRes!.body).error?.code, 'DUPLICATE_SLUG');
+  });
+
+  it('defaultPrewarmDeps từ chối khởi chạy và đánh dấu JOB thất bại nếu chưa cấu hình PREWARM_STATE_MACHINE_ARN', async () => {
+    // 1. Hàm createDefaultPrewarmStarter ném CONFIG_ERROR khi không có ARN
+    const unconfiguredStarter = createDefaultPrewarmStarter('');
+    await assert.rejects(
+      () => unconfiguredStarter({ name: 'job-1', input: '{}' }),
+      (err: unknown) => err instanceof AppError && err.code === 'INTERNAL_ERROR',
+    );
+
+    // 2. Router với prewarmDeps mặc định (chưa có env ARN): POST /prewarm trả lỗi 500 và đánh dấu JOB = FAILED
+    const memDb = memoryDataDb();
+    const adminCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'r-fail', role: 'TENANT_ADMIN', sub: 'u_1' };
+    await memDb.put(adminCtx, { ...keys.config(adminCtx), status: 'ACTIVE', plan: 'Free' });
+    await memDb.put(adminCtx, {
+      ...keys.host(adminCtx, 'homestay-abc'),
+      homeUrl: 'https://homestay-abc.vn/',
+      sourceLang: 'vi',
+      targetLangs: ['en'],
+      status: 'ACTIVE',
+    });
+
+    const handler = createConsoleHandler(undefined, {
+      prewarmDeps: {
+        db: memDb,
+        startExecution: createDefaultPrewarmStarter(''), // Giả lập chưa cấu hình biến môi trường
+      },
+      db: {
+        get: async (_c, key) => {
+          if (key.SK.startsWith('MEMBER#')) return { status: 'ACTIVE', role: 'TENANT_ADMIN' };
+          return memDb.get(_c as any, key);
+        },
+      },
+    });
+
+    const res = await handler(
+      event('/console/hosts/homestay-abc/prewarm', claims, 'POST', { target_langs: ['en'] }),
+    );
+    assert.equal(res.statusCode, 500, 'Phải trả HTTP 500 khi chưa nối Step Functions thật');
+    const body = JSON.parse(res.body);
+    assert.equal(body.error?.code, 'INTERNAL_ERROR');
+
+    // Kiểm tra JOB không bị kẹt ở QUEUED mà đã chuyển sang FAILED
+    const hostWithPrewarm = (await memDb.get(adminCtx, keys.host(adminCtx, 'homestay-abc'))) as any;
+    assert.ok(hostWithPrewarm?.prewarm?.jobId);
+    const failedJob = (await memDb.get(adminCtx, { PK: 'TENANT#t_a#JOB', SK: `JOB#${hostWithPrewarm.prewarm.jobId}` })) as any;
+    assert.equal(failedJob?.status, 'FAILED');
+    assert.equal(failedJob?.reason, 'START_FAILED');
+  });
+
+  it('createDefaultPrewarmStarter gửi đúng StartExecutionCommand tới Step Functions khi có PREWARM_STATE_MACHINE_ARN', async () => {
+    const sentCommands: unknown[] = [];
+    const mockSfnClient = {
+      send: async (cmd: unknown) => {
+        sentCommands.push(cmd);
+        return { executionArn: 'arn:aws:states:ap-southeast-1:123456789012:execution:translateme-dev-prewarm:exec-1' };
+      },
+    };
+
+    const targetArn = 'arn:aws:states:ap-southeast-1:123456789012:stateMachine:translateme-dev-prewarm';
+    const runtimeStarter = createDefaultPrewarmStarter(targetArn, mockSfnClient as any);
+
+    const memDb = memoryDataDb();
+    const adminCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'r-ok', role: 'TENANT_ADMIN', sub: 'u_1' };
+    await memDb.put(adminCtx, { ...keys.config(adminCtx), status: 'ACTIVE', plan: 'Free' });
+    await memDb.put(adminCtx, {
+      ...keys.host(adminCtx, 'homestay-abc'),
+      homeUrl: 'https://homestay-abc.vn/',
+      sourceLang: 'vi',
+      targetLangs: ['en'],
+      status: 'ACTIVE',
+    });
+
+    const handler = createConsoleHandler(undefined, {
+      prewarmDeps: {
+        db: memDb,
+        startExecution: runtimeStarter,
+      },
+      db: {
+        get: async (_c, key) => {
+          if (key.SK.startsWith('MEMBER#')) return { status: 'ACTIVE', role: 'TENANT_ADMIN' };
+          return memDb.get(_c as any, key);
+        },
+      },
+    });
+
+    const res = await handler(
+      event('/console/hosts/homestay-abc/prewarm', claims, 'POST', { target_langs: ['en'] }),
+    );
+    assert.equal(res.statusCode, 202);
+    const body = JSON.parse(res.body);
+    assert.equal(body.job.status, 'QUEUED');
+
+    // Chứng minh mockSfnClient nhận đúng StartExecutionCommand thật của AWS SDK
+    assert.equal(sentCommands.length, 1);
+    const sent = sentCommands[0] as StartExecutionCommand;
+    assert.ok(sent instanceof StartExecutionCommand, 'Phải gửi đúng instance của StartExecutionCommand');
+    assert.equal((sent as any).input.stateMachineArn, targetArn);
+    assert.equal((sent as any).input.name, body.job.job_id);
+    const inputPayload = JSON.parse((sent as any).input.input);
+    assert.equal(inputPayload.job_id, body.job.job_id);
+    assert.equal(inputPayload.tenant_id, 't_a');
+    assert.equal(inputPayload.slug, 'homestay-abc');
+    assert.deepEqual(inputPayload.target_langs, ['en']);
   });
 });
