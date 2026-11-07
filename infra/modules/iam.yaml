@@ -164,7 +164,7 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: !Sub '${PayloadBucketArn}/worker/${!aws:PrincipalTag/TenantId}/*'
+                Resource: !Sub '${PayloadBucketArn}/tenant/${!aws:PrincipalTag/TenantId}/worker/*'
               - Sid: PayloadKmsUse
                 Effect: Allow
                 Action:

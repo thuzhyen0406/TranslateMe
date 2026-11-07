@@ -87,7 +87,7 @@ export function tenantSessionPolicy(
     });
   }
   if (buckets.payloadBucketArn) {
-    statements.push({ Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject'], Resource: `${buckets.payloadBucketArn}/worker/${tenantId}/*` });
+    statements.push({ Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject'], Resource: `${buckets.payloadBucketArn}/tenant/${tenantId}/worker/*` });
   }
   if (buckets.batchUploadBucketArn) {
     statements.push({

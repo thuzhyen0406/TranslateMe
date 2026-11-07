@@ -76,7 +76,7 @@ Resources:
         Rules:
           - Id: ExpireWorkerPayloads
             Status: Enabled
-            Prefix: worker/
+            Prefix: tenant/
             ExpirationInDays: 1
             NoncurrentVersionExpiration:
               NoncurrentDays: 1
