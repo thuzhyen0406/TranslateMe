@@ -1,16 +1,17 @@
 /**
- * Lambda worker C13 – chế độ hoàn tất nền cho proxy (FINISH_PAGE, 2.5 – TV2). Theo B.10.
+ * Lambda worker C13 – chế độ hoàn tất nền cho proxy (FINISH_PAGE, 2.5 – TV2; nối Thuật ngữ 3.9 – TV4). Theo B.10.
  *
  * Proxy hết ngân sách 20 giây thì gửi các câu chưa dịch kịp sang đây (InvocationType = Event).
  * Worker:
  *  1. Kiểm tra lại sự kiện và tenant (B.1.1): slug tồn tại, thuộc đúng tenantId, website ACTIVE, tenant không LOCKED.
  *     Câu đọc từ S3 chỉ được nằm dưới worker/<tenantId>/.
- *  2. Tra lại TM (lượt truy cập khác có thể đã dịch), chỉ dịch câu còn trượt.
+ *  2. Tra lại TM (lượt truy cập khác có thể đã dịch), gắn cờ "Cần xem lại" cho bản HUMAN lỗi thời nếu có, chỉ dịch câu còn trượt.
  *  3. Tự đặt trước hạn mức cho phần mình dịch (proxy đã hoàn lại phần chưa dịch ở bước 8). Hết hạn mức thì dừng,
  *     câu còn lại giữ ngôn ngữ gốc.
- *  4. Dịch, ghi TM bản MACHINE, settleUsage với Source = { kind: 'WEB', slug }.
+ *  4. Dịch, hậu kiểm thuật ngữ (postCheckGlossary, 3.9), ghi TM bản MACHINE, settleUsage với Source = { kind: 'WEB', slug }.
  * Không throw khi lỗi (tránh Lambda tự gọi lại 2 lần làm dịch và tính phí trùng); kết quả nằm trong log.
  */
+import { postCheckGlossary } from '../../libs/common/glossary.js';
 import { createTM, type GlossaryState, type SentenceWithHash } from '../../libs/common/tm.js';
 import type { TranslateRequest, TranslateResult } from '../../libs/common/translator.js';
 import type { Ctx } from '../../libs/common/types.js';
@@ -124,18 +125,41 @@ export function createWorkerHandler(deps: WorkerDeps) {
       if (!validSentences(sentences)) return reject('INVALID_SENTENCES');
       res.received = sentences.length;
 
-      // Thuật ngữ hiện hành (có thể đã đổi từ lúc proxy gửi); lỗi thì dùng giá trị trong sự kiện
+      // Thuật ngữ hiện hành (có thể đã đổi từ lúc proxy gửi).
+      // Nếu đọc Glossary lỗi thì dừng xử lý (status = ERROR) trước khi tra/ghi TM hay đặt hạn mức,
+      // tránh bỏ sót việc gắn cờ HUMAN lỗi thời hoặc ghi bản MACHINE vào TM mà chưa qua hậu kiểm thuật ngữ.
       let glossary: GlossaryState = { version: event.glossaryVersion, terminologyName: event.terminologyName, terms: [] };
       if (deps.getGlossaryState) {
         try {
           glossary = await deps.getGlossaryState(ctx);
         } catch (err) {
-          log.glossaryError = err instanceof Error ? err.name : 'Unknown';
+          const errName = err instanceof Error ? err.name : 'Unknown';
+          log.glossaryError = errName;
+          logger.error({
+            ...log,
+            action: 'WORKER_GLOSSARY_ERROR',
+            error: errName,
+            message: String(err).slice(0, 200),
+          });
+          return finish({ ...res, status: 'ERROR', reason: 'GLOSSARY_READ_ERROR', pending: sentences.length });
         }
       }
 
-      // 2. Tra lại TM
-      const { misses } = await deps.tm.getTM(ctx, event.src, event.tgt, sentences, glossary);
+      // 2. Tra lại TM (kèm gắn cờ "Cần xem lại" cho bản HUMAN lỗi thời nếu phát hiện lúc tra)
+      const { hits, misses, reviewFlags } = await deps.tm.getTM(ctx, event.src, event.tgt, sentences, glossary);
+      if (reviewFlags.length) {
+        try {
+          const flagRep = await deps.tm.markHumanNeedsReview(
+            ctx,
+            event.src,
+            event.tgt,
+            reviewFlags.map((hash) => ({ hash, tgt: hits.get(hash)!.tgt })),
+          );
+          Object.assign(log, { tmReviewFlagged: flagRep.marked, tmReviewFlagSkipped: flagRep.skipped, tmReviewFlagFailed: flagRep.failed.length });
+        } catch (err) {
+          log.tmReviewFlagError = err instanceof Error ? err.name : 'Unknown';
+        }
+      }
       if (!misses.length) return finish({ ...res, status: 'NOTHING_TO_DO' });
 
       // 3. Đặt trước hạn mức cho phần worker dịch
@@ -148,7 +172,7 @@ export function createWorkerHandler(deps: WorkerDeps) {
         throw err;
       }
 
-      // 4. Dịch, ghi TM, đếm
+      // 4. Dịch, hậu kiểm thuật ngữ (3.9), ghi TM, đếm
       let tr: TranslateResult;
       try {
         tr = await deps.translate({
@@ -164,17 +188,23 @@ export function createWorkerHandler(deps: WorkerDeps) {
         throw err;
       }
       const byId = new Map(misses.map((s) => [s.id, s]));
+      let postCheckFlagged = 0;
       const rep = await deps.tm.putMachineTM(
         ctx,
         event.src,
         event.tgt,
-        tr.translated.map((t) => ({
-          hash: byId.get(t.id)!.hash,
-          sourceText: byId.get(t.id)!.text,
-          tgt: t.tgt,
-          glossaryVersion: glossary.version,
-          needsReview: t.needsReview,
-        })),
+        tr.translated.map((t) => {
+          const item = byId.get(t.id)!;
+          const postCheck = postCheckGlossary(item.text, t.tgt, event.tgt, glossary);
+          if (postCheck.needsReview) postCheckFlagged++;
+          return {
+            hash: item.hash,
+            sourceText: item.text,
+            tgt: t.tgt,
+            glossaryVersion: glossary.version,
+            needsReview: t.needsReview || postCheck.needsReview,
+          };
+        }),
       );
       const machineChars = tr.translated.reduce((sum, t) => sum + countChars(byId.get(t.id)!.text), 0);
       await deps.quota.settleUsage(ctx, reservation, { kind: 'WEB', slug: site.slug }, {
@@ -184,7 +214,13 @@ export function createWorkerHandler(deps: WorkerDeps) {
         sentFromTM: 0,
         requests: 0,
       });
-      Object.assign(log, { charsSent: tr.stats.charsSent, tmWritten: rep.written, tmSkippedHuman: rep.skippedHuman, tmWriteFailed: rep.failed.length });
+      Object.assign(log, {
+        charsSent: tr.stats.charsSent,
+        tmWritten: rep.written,
+        tmSkippedHuman: rep.skippedHuman,
+        tmWriteFailed: rep.failed.length,
+        ...(postCheckFlagged > 0 ? { glossaryPostCheckFlagged: postCheckFlagged } : {}),
+      });
       return finish({ ...res, translated: tr.translated.length, pending: tr.pending.length, failed: tr.failed.length });
     } catch (err) {
       logger.error({ ...log, action: 'WORKER_ERROR', error: err instanceof Error ? err.name : 'Unknown', message: String(err).slice(0, 200) });
