@@ -110,6 +110,11 @@ export interface ProxyDeps {
   /** Gửi sự kiện cho worker C13 (InvocationType = Event). Không truyền = không hoàn tất nền. */
   invokeWorker?: (event: WorkerEvent) => Promise<void>;
   workerStore?: PayloadStore;
+  /**
+   * Đếm lượt truy cập (requests, pagesServed) khi settleUsage. Mặc định true (Visitor).
+   * Dịch trước (F6, 4.5) đặt false: ký tự vẫn tính vào WEB#slug nhưng không tính là lượt xem trang.
+   */
+  countRequests?: boolean;
 }
 
 export const defaultLogger: ProxyLogger = {
@@ -403,8 +408,8 @@ export function createProxyHandler(deps: ProxyDeps) {
           memoryChars,
           sentTotal: items.length,
           sentFromTM: items.length - misses.length,
-          requests: 1,
-          pagesServed: 1,
+          requests: deps.countRequests === false ? 0 : 1,
+          pagesServed: deps.countRequests === false ? 0 : 1,
         });
       } catch (err) {
         extra.usageError = err instanceof Error ? err.name : 'Unknown';
