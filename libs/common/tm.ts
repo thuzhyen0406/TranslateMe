@@ -1,5 +1,5 @@
 /**
- * tm – Translation Memory F3 (Nhiệm vụ 2.4 – TV2). Đúng hợp đồng B.8 (Phần B, phiên bản 1.1).
+ * tm – Translation Memory F3 (Nhiệm vụ 2.4 – TV2; nối Thuật ngữ 3.9 – TV4). Đúng hợp đồng B.8 (Phần B, phiên bản 1.1).
  * Dùng chung cho F2 (proxy), F9 (realtime), F10 (batch) và worker C13.
  *
  * Bản ghi TM (Bảng 2.5):
@@ -7,7 +7,7 @@
  *   src           câu nguồn (dạng marker {n}…{/n})
  *   tgt           bản dịch đang dùng (MACHINE hoặc HUMAN)
  *   label         'MACHINE' | 'HUMAN'
- *   needsReview   cờ "Cần xem lại" (ví dụ dịch lại không kèm thẻ nội tuyến)
+ *   needsReview   cờ "Cần xem lại" (ví dụ dịch lại không kèm thẻ nội tuyến hoặc lệch thuật ngữ)
  *   glossaryVersion  phiên bản thuật ngữ lúc dịch máy
  *   machineTgt    bản máy dịch gần nhất (F5 dùng khi "Khôi phục bản máy dịch")
  *   version       tăng 1 mỗi lần ghi (khoá lạc quan của F5)
@@ -26,7 +26,7 @@
  *  - Hash do nơi gọi tính bằng thư viện 1.8 (hashSentence) – module này không tự băm.
  */
 import { BatchGetCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { stripMarkers } from './markers.js';
+import { isStale as isStaleGlossary, type GlossaryState } from './glossary.js';
 import type { Ctx, Lang, Sha256Hex } from './types.js';
 
 export type Label = 'MACHINE' | 'HUMAN';
@@ -40,14 +40,10 @@ export interface SentenceWithHash extends Sentence {
   hash: Sha256Hex;
 }
 
-/** B.7 (TV4 cung cấp getGlossaryState; tuần này dùng stub EMPTY_GLOSSARY_STATE) */
-export interface GlossaryState {
-  version: number;
-  terminologyName: string | null;
-  terms: { normalized: string; type: 'KEEP' | 'FIXED'; sinceVersion: number }[];
-}
+/** B.7 (cung cấp từ libs/common/glossary.ts – Nhiệm vụ 2.8 & 3.9) */
+export type { GlossaryState };
 
-/** Stub theo B.14 cho tới khi 2.8 xong */
+/** Stub theo B.14 khi chưa có thuật ngữ */
 export const EMPTY_GLOSSARY_STATE: GlossaryState = Object.freeze({ version: 1, terminologyName: null, terms: [] });
 
 /** B.8 */
@@ -63,7 +59,7 @@ export interface TmEntry {
   sourceText: string;
   tgt: string;
   glossaryVersion: number;
-  /** Mở rộng B.8: true khi câu phải dịch lại không kèm thẻ nội tuyến (2.5) */
+  /** Mở rộng B.8: true khi câu phải dịch lại không kèm thẻ nội tuyến (2.5) hoặc lệch thuật ngữ hậu kiểm (3.9) */
   needsReview?: boolean;
 }
 
@@ -92,17 +88,12 @@ export function tmKey(ctx: Ctx, src: Lang, tgt: Lang, hash: Sha256Hex): TmKey {
   return { PK: `TENANT#${ctx.tenantId}#TM#${src}#${tgt}`, SK: `HASH#${hash}` };
 }
 
-const normForMatch = (s: string): string => s.normalize('NFC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase('vi');
-
 /**
- * Quy tắc lỗi thời (B.7): câu nguồn chứa một thuật ngữ có sinceVersion > glossaryVersion của bản dịch.
- * Bản mặc định khớp chuỗi con không phân biệt hoa thường trên văn bản đã bỏ marker.
- * Khi TV4 có isStale (2.8) thì truyền vào TmDeps.isStale.
+ * Quy tắc lỗi thời (B.7, 2.8 & 3.9): câu nguồn chứa một thuật ngữ có sinceVersion > glossaryVersion của bản dịch.
+ * Dùng bản đầy đủ `isStale` của `libs/common/glossary.ts` (bỏ thẻ/marker, chuẩn hoá NFC, khớp ranh giới từ Latin & CJK).
  */
 export function isStaleDefault(sourceText: string, entryGlossaryVersion: number, g: GlossaryState): boolean {
-  if (!g.terms.length) return false;
-  const text = normForMatch(stripMarkers(sourceText));
-  return g.terms.some((t) => t.sinceVersion > entryGlossaryVersion && t.normalized && text.includes(normForMatch(t.normalized)));
+  return isStaleGlossary(sourceText, entryGlossaryVersion, g);
 }
 
 export interface TmDeps {

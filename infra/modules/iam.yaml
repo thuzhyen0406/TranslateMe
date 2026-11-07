@@ -38,7 +38,10 @@ Resources:
           - Effect: Allow
             Principal:
               AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
-            Action: sts:AssumeRole
+            Action:
+              - sts:AssumeRole
+              - sts:SetSourceIdentity
+              - sts:TagSession
             Condition:
               ArnLike:
                 aws:PrincipalArn:
@@ -111,7 +114,10 @@ Resources:
                     dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InvokeAsyncWorker
                 Effect: Allow
@@ -148,7 +154,10 @@ Resources:
                     dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: TranslateText
                 Effect: Allow
@@ -181,20 +190,44 @@ Resources:
                     dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InviteTenantMembers
                 Effect: Allow
-                Action: cognito-idp:AdminCreateUser
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminDeleteUser
                 Resource: !Ref UserPoolArn
+              - Sid: ManageTenantApiKeys
+                Effect: Allow
+                Action:
+                  - apigateway:POST
+                  - apigateway:PATCH
+                  - apigateway:DELETE
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys'
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys/*'
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys'
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys/*'
               - Sid: ImportGlossaryTerminology
                 Effect: Allow
                 Action: translate:ImportTerminology
                 Resource: '*'
               - Sid: InvalidateWebsiteCache
                 Effect: Allow
-                Action: cloudfront:CreateInvalidation
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
                 Resource: !Ref CloudFrontDistributionArn
+              - Sid: StartPrewarmExecution
+                Effect: Allow
+                Action: states:StartExecution
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:translateme-${StageName}-prewarm'
+                  - !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:translateme-${StageName}-prewarm:*'
 
   TranslateApiExecutionRole:
     Type: AWS::IAM::Role
@@ -222,7 +255,10 @@ Resources:
                     dynamodb:LeadingKeys: 'TENANT#PLATFORM#KEY#*'
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: TranslateText
                 Effect: Allow
@@ -252,7 +288,10 @@ Resources:
             Statement:
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InvalidateWebsiteCache
                 Effect: Allow
@@ -278,7 +317,10 @@ Resources:
             Statement:
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
-                Action: sts:AssumeRole
+                Action:
+                  - sts:AssumeRole
+                  - sts:SetSourceIdentity
+                  - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: SetTenantClaimsOnConfirmedUser
                 Effect: Allow

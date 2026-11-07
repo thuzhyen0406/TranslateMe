@@ -1,7 +1,7 @@
 /**
- * Lambda proxy F2 (Nhiệm vụ 1.6, 2.4, 2.5 – TV2). Thứ tự theo B.10:
+ * Lambda proxy F2 (Nhiệm vụ 1.6, 2.4, 2.5 – TV2; nối Thuật ngữ 3.9 – TV4). Thứ tự theo B.10:
  *   resolve website -> safe_fetch -> extract (tách câu {n}) -> hash -> getTM -> reserveChars
- *   -> translateSentences (B.9) -> putMachineTM + ghi SEG -> rebuild -> settleUsage -> (worker) -> trả về.
+ *   -> translateSentences (B.9) -> hậu kiểm thuật ngữ + putMachineTM + ghi SEG -> rebuild -> settleUsage -> (worker) -> trả về.
  * Gọi qua Lambda function URL (AWS_IAM) phía sau CloudFront + OAC; đường dẫn luôn có dạng /{slug}/{lang}/{path}.
  *
  * Phản hồi (B.10):
@@ -14,13 +14,15 @@
  * Đọc thuật ngữ (getGlossaryState) lỗi -> xử lý như lỗi tra TM: bỏ qua TM (không tra, không ghi, không gọi worker),
  * dịch không kèm terminology và cache ngắn (s-maxage=60) để sớm dịch lại khi thuật ngữ đọc được.
  * Bản HUMAN lỗi thời theo thuật ngữ vẫn dùng, và được ghi cờ "Cần xem lại" (markHumanNeedsReview).
+ * Bản MACHINE vừa dịch qua hậu kiểm thuật ngữ (postCheckGlossary, 3.9): nếu thiếu bản dịch thuật ngữ bắt buộc
+ * thì gắn cờ needsReview = true để vào hàng đợi duyệt (F5).
  * Bước 7 (3.4): ghi chỉ mục câu–trang SEG cho mọi câu của trang, <path> gồm slug (QC-5). Ghi SEG lỗi không làm
  * hỏng trang nhưng trả cache ngắn (s-maxage=60): thiếu SEG thì xóa cache chọn lọc (F5) có thể sót trang này.
  *
- * Bản tạm (B.14): hash câu và countChars chờ thư viện 1.8; getGlossaryState chờ 2.8; db chờ batchGet/update của 2.2;
+ * Bản tạm (B.14): hash câu và countChars chờ thư viện 1.8; db chờ batchGet/update của 2.2;
  * reserveChars/settleUsage chờ 2.7 (quotaStub); db của SEG chờ batchWrite/query GSI của 2.2.
  *
- * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), TABLE_NAME (DynamoDB; website/TM và SEG),
+ * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), TABLE_NAME (DynamoDB; website/TM, SEG và Glossary),
  * TRANSLATE_BUDGET_MS (20000), TRANSLATE_CONCURRENCY (4), WORKER_FUNCTION_NAME (bật hoàn tất nền),
  * WORKER_PAYLOAD_BUCKET (S3 cho danh sách câu lớn), WORKER_BUDGET_MS (240000), USE_FETCH_STUB=1.
  */
@@ -31,6 +33,7 @@ import { TranslateClient } from '@aws-sdk/client-translate';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { createTenantDocumentClientRouter, createTenantS3Client } from '../../libs/common/tenantAws.js';
 import { extract } from '../../libs/common/extract.js';
+import { createDynamoGlossaryReader, postCheckGlossary } from '../../libs/common/glossary.js';
 import { DEFAULT_PUBLIC_BASE_URL, rebuildDetailed, type BaseMode } from '../../libs/common/rebuild.js';
 import { safe_fetch as realSafeFetch, type SafeFetchCompatResult } from '../../libs/common/safeFetch.js';
 import { safe_fetch as stubSafeFetch } from '../../libs/common/safeFetch.stub.js';
@@ -59,6 +62,8 @@ import { countCharsStub, getGlossaryStateStub, hashSentenceStub } from './stubs.
 import { emptyReservation, isCharQuotaExceeded, quotaStub, type QuotaApi, type Reservation } from './usage.js';
 import { DEFAULT_WORKER_BUDGET_MS, type WorkerDeps } from './worker.js';
 import { buildWorkerEvents, type PayloadStore, type WorkerEvent } from './workerEvents.js';
+
+export type { SiteConfig };
 
 export const DEFAULT_BUDGET_MS = 20_000;
 export const PARTIAL_CACHE_SECONDS = 60;
@@ -110,6 +115,11 @@ export interface ProxyDeps {
   /** Gửi sự kiện cho worker C13 (InvocationType = Event). Không truyền = không hoàn tất nền. */
   invokeWorker?: (event: WorkerEvent) => Promise<void>;
   workerStore?: PayloadStore;
+  /**
+   * Đếm lượt truy cập (requests, pagesServed) khi settleUsage. Mặc định true (Visitor).
+   * Dịch trước (F6, 4.5) đặt false: ký tự vẫn tính vào WEB#slug nhưng không tính là lượt xem trang.
+   */
+  countRequests?: boolean;
 }
 
 export const defaultLogger: ProxyLogger = {
@@ -340,26 +350,36 @@ export function createProxyHandler(deps: ProxyDeps) {
         }
       })();
 
-      // Ghi bản MACHINE mới vào TM (không đè HUMAN) và ghi cờ "Cần xem lại" cho HUMAN lỗi thời, song song
+      // Ghi bản MACHINE mới vào TM (không đè HUMAN, kèm hậu kiểm thuật ngữ 3.9) và ghi cờ "Cần xem lại" cho HUMAN lỗi thời, song song
       if (deps.tm && glossary) {
         const tm = deps.tm;
         const glossaryVersion = glossary.version;
         const writeMachine = async () => {
           if (!tr.translated.length) return;
           try {
+            let postCheckFlagged = 0;
             const rep = await tm.putMachineTM(
               ctx,
               src,
               tgt,
-              tr.translated.map((t) => ({
-                hash: items[t.id].hash,
-                sourceText: items[t.id].text,
-                tgt: t.tgt,
-                glossaryVersion,
-                needsReview: t.needsReview,
-              })),
+              tr.translated.map((t) => {
+                const postCheck = postCheckGlossary(items[t.id].text, t.tgt, tgt, glossary);
+                if (postCheck.needsReview) postCheckFlagged++;
+                return {
+                  hash: items[t.id].hash,
+                  sourceText: items[t.id].text,
+                  tgt: t.tgt,
+                  glossaryVersion,
+                  needsReview: t.needsReview || postCheck.needsReview,
+                };
+              }),
             );
-            Object.assign(extra, { tmWritten: rep.written, tmSkippedHuman: rep.skippedHuman, tmWriteFailed: rep.failed.length });
+            Object.assign(extra, {
+              tmWritten: rep.written,
+              tmSkippedHuman: rep.skippedHuman,
+              tmWriteFailed: rep.failed.length,
+              ...(postCheckFlagged > 0 ? { glossaryPostCheckFlagged: postCheckFlagged } : {}),
+            });
           } catch (err) {
             extra.tmWriteError = err instanceof Error ? err.name : 'Unknown';
           }
@@ -403,8 +423,8 @@ export function createProxyHandler(deps: ProxyDeps) {
           memoryChars,
           sentTotal: items.length,
           sentFromTM: items.length - misses.length,
-          requests: 1,
-          pagesServed: 1,
+          requests: deps.countRequests === false ? 0 : 1,
+          pagesServed: deps.countRequests === false ? 0 : 1,
         });
       } catch (err) {
         extra.usageError = err instanceof Error ? err.name : 'Unknown';
@@ -560,6 +580,9 @@ function sharedFromEnv(
   const seg = tableName
     ? createSEG({ db: createDynamoSegDb(documentClient!, tableName) })
     : undefined;
+  const getGlossaryState = tableName
+    ? createDynamoGlossaryReader(documentClient as DynamoDBDocumentClient, tableName)
+    : undefined;
   if (!tm) logger.error({ action: 'TM_DISABLED', reason: 'MISSING_TABLE_NAME' });
   if (!seg) logger.error({ action: 'SEG_DISABLED', reason: 'MISSING_TABLE_NAME' });
   const bucket = env.WORKER_PAYLOAD_BUCKET?.trim();
@@ -575,6 +598,7 @@ function sharedFromEnv(
     ),
     tm,
     seg,
+    getGlossaryState,
     store: bucket ? s3PayloadStore(new S3Client({}), bucket, (tenantId) => createTenantS3Client(
       env.TENANT_DATA_ACCESS_ROLE_ARN ?? '',
       tenantId,
@@ -650,6 +674,7 @@ export function depsFromEnv(
     logger,
     tm: shared.tm,
     seg: shared.seg,
+    getGlossaryState: shared.getGlossaryState,
     quota: shared.quota,
     invokeWorker: workerName ? lambdaWorkerInvoker(new LambdaClient({}), workerName) : undefined,
     workerStore: shared.store,
@@ -667,6 +692,7 @@ export function workerDepsFromEnv(
   return {
     resolveSite: shared.resolveSite,
     tm: shared.tm,
+    getGlossaryState: shared.getGlossaryState,
     translate: createTranslator(new TranslateClient({ maxAttempts: 3 })),
     quota: shared.quota,
     store: shared.store,

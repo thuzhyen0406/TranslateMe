@@ -3,6 +3,7 @@ import { getVisibleMenuItems, ROLE_DISPLAY_LABEL } from '../services/cognitoAuth
 import type { AuthenticatedSession, ConsoleMenuKey } from '../types/auth.js';
 import { GlossaryPage } from './GlossaryPage.js';
 import { MembersPage } from './MembersPage.js';
+import { WebsitePage } from './WebsitePage.js';
 
 interface ConsoleLayoutProps {
   session: AuthenticatedSession;
@@ -10,15 +11,16 @@ interface ConsoleLayoutProps {
 
 export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session }) => {
   const visibleMenus = useMemo(() => getVisibleMenuItems(session.role), [session.role]);
+  // Reviewer mở mặc định màn Duyệt bản dịch (Q4); các vai trò khác mở mục đầu tiên được phép (Tenant Admin: Website)
   const [activeMenu, setActiveMenu] = useState<ConsoleMenuKey>(() =>
-    session.role === 'TENANT_ADMIN' ? 'members' : 'glossary',
+    session.role === 'REVIEWER' ? 'review' : (visibleMenus[0]?.key ?? 'glossary'),
   );
 
   useEffect(() => {
     if (!visibleMenus.some((m) => m.key === activeMenu)) {
-      setActiveMenu(visibleMenus[0]?.key ?? 'glossary');
+      setActiveMenu(session.role === 'REVIEWER' ? 'review' : (visibleMenus[0]?.key ?? 'glossary'));
     }
-  }, [visibleMenus, activeMenu]);
+  }, [visibleMenus, activeMenu, session.role]);
 
   return (
     <div className="min-h-[calc(100vh-4rem)] flex bg-[#f4f7f6]">
@@ -66,6 +68,8 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session }) => {
       <main className="flex-1 min-w-0">
         {activeMenu === 'members' ? (
           <MembersPage session={session} />
+        ) : activeMenu === 'website' ? (
+          <WebsitePage session={session} />
         ) : activeMenu === 'glossary' ? (
           <GlossaryPage session={session} />
         ) : (

@@ -10,6 +10,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { Ctx, AppError, keys, type Role } from './types.js';
 import { createTenantDocumentClientRouter } from './tenantAws.js';
+import { validateApiKeyTransaction } from './api-key-transaction.js';
 
 const client = new DynamoDBClient({});
 const docClient = createTenantDocumentClientRouter(DynamoDBDocumentClient.from(client), {
@@ -226,6 +227,22 @@ export const db = {
       }
     }
     await docClient.send(new TransactWriteCommand({ TransactItems: ops }));
+  },
+
+  /**
+   * Ghi/xóa APIKEY tenant cùng KEYMAP nền tảng trong một giao dịch có kiểm tra cặp khóa.
+   * Input là đúng hai thao tác Put APIKEY+KEYMAP hoặc Update/Delete APIKEY+Delete KEYMAP;
+   * output không có giá trị, lỗi nếu tenant/khóa không khớp hoặc giao dịch DynamoDB thất bại.
+   */
+  async transactApiKey(ctx: Ctx, ops: any[]) {
+    validateApiKeyTransaction(ctx, ops);
+
+    const transactItems = ops.map((op) => {
+      const operation = op.Put ? 'Put' : op.Update ? 'Update' : op.Delete ? 'Delete' : op.ConditionCheck ? 'ConditionCheck' : undefined;
+      if (!operation) throw new AppError('INVALID_REQUEST', 'Giao dịch API key chứa thao tác không hợp lệ.');
+      return { [operation]: { ...op[operation], TableName: op[operation].TableName ?? TABLE_NAME } };
+    });
+    await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
   },
 };
 

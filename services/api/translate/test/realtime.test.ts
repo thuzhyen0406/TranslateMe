@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { BatchGetCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { createRealtimeHandler, type RealtimeDeps } from '../realtime.js';
 import { CharacterQuotaExceededError } from '../../../../libs/common/usage/usage.js';
 
@@ -20,7 +20,23 @@ function event(body: unknown) {
 }
 
 /** Tạo handler giả cùng các bản ghi nhớ và lệnh AWS đã được gọi trong bài test. */
-function setup(options: { memory?: string; locked?: boolean; quotaExceeded?: boolean; tmWriteFails?: boolean; keymapTenantId?: string; detected?: { language?: string; confidence?: number } } = {}) {
+function setup(options: {
+  memory?: string;
+  memoryLabel?: 'MACHINE' | 'HUMAN';
+  memoryGlossaryVersion?: number;
+  glossaryTerms?: Array<Record<string, any>>;
+  /** Chia glossaryTerms thành nhiều trang Query (LastEvaluatedKey) để kiểm thử phân trang */
+  glossaryPageSize?: number;
+  /** terminologyName đã đồng bộ trong CONFIG (mặc định: chưa đồng bộ) */
+  configTerminologyName?: string;
+  glossaryQueryFails?: boolean;
+  getGlossaryState?: (ctx: any) => Promise<any>;
+  locked?: boolean;
+  quotaExceeded?: boolean;
+  tmWriteFails?: boolean;
+  keymapTenantId?: string;
+  detected?: { language?: string; confidence?: number };
+} = {}) {
   const calls: Array<{ name: string; input: Record<string, any> }> = [];
   const stored: Array<Record<string, any>> = [];
   const translateInputs: Array<Record<string, any>> = [];
@@ -37,14 +53,40 @@ function setup(options: { memory?: string; locked?: boolean; quotaExceeded?: boo
         if (key?.PK === `TENANT#PLATFORM#KEY#${KEY_ID}`) {
           return options.keymapTenantId ? { Item: { tenantId: options.keymapTenantId } } : {};
         }
-        return { Item: { status: options.locked ? 'LOCKED' : 'ACTIVE', charLimit: 50_000, glossaryVersion: 7 } };
+        return {
+          Item: {
+            status: options.locked ? 'LOCKED' : 'ACTIVE',
+            charLimit: 50_000,
+            glossaryVersion: 7,
+            ...(options.configTerminologyName ? { terminologyName: options.configTerminologyName } : {}),
+          },
+        };
+      }
+      if (command instanceof QueryCommand) {
+        if (options.glossaryQueryFails) throw Object.assign(new Error('DynamoDB query failed'), { name: 'ThrottlingException' });
+        const all = options.glossaryTerms ?? [];
+        const size = options.glossaryPageSize;
+        if (!size) return { Items: all };
+        const start = Number((input.ExclusiveStartKey as { offset?: number } | undefined)?.offset ?? 0);
+        const next = start + size;
+        return {
+          Items: all.slice(start, next),
+          ...(next < all.length ? { LastEvaluatedKey: { offset: next } } : {}),
+        };
       }
       if (command instanceof BatchGetCommand) {
         const keys = input.RequestItems[TABLE].Keys as Array<{ PK: string; SK: string }>;
         const rows = keys.flatMap((key) => {
           const found = stored.find((item) => item.PK === key.PK && item.SK === key.SK);
           if (found) return [found];
-          if (options.memory) return [{ ...key, tgt: options.memory, label: 'HUMAN', glossaryVersion: 7 }];
+          if (options.memory) {
+            return [{
+              ...key,
+              tgt: options.memory,
+              label: options.memoryLabel ?? 'HUMAN',
+              glossaryVersion: options.memoryGlossaryVersion ?? 7,
+            }];
+          }
           return [];
         });
         return { Responses: { [TABLE]: rows } };
@@ -52,12 +94,26 @@ function setup(options: { memory?: string; locked?: boolean; quotaExceeded?: boo
       if (command instanceof UpdateCommand) {
         if (options.tmWriteFails) throw Object.assign(new Error('DynamoDB throttled'), { name: 'ThrottlingException' });
         const key = input.Key as { PK: string; SK: string };
-        const item = stored.find((row) => row.PK === key.PK && row.SK === key.SK) ?? { ...key };
+        const names = input.ExpressionAttributeNames as Record<string, string>;
+        const values = input.ExpressionAttributeValues as Record<string, unknown>;
+        const existingIndex = stored.findIndex((row) => row.PK === key.PK && row.SK === key.SK);
+        const item = existingIndex >= 0 ? stored[existingIndex] : {
+          ...key,
+          ...(options.memory ? { tgt: options.memory, label: options.memoryLabel ?? 'HUMAN', glossaryVersion: options.memoryGlossaryVersion ?? 7 } : {}),
+        };
+        if (values[':human'] !== undefined) {
+          if (item.label !== 'HUMAN' || item.tgt !== values[':tgt'] || item.needsReview === true) {
+            throw Object.assign(new Error('ConditionalCheckFailed'), { name: 'ConditionalCheckFailedException' });
+          }
+          item.needsReview = true;
+          item.GSI3PK = values[':g3pk'];
+          item.GSI3SK = item.GSI3SK ?? values[':at'];
+          if (existingIndex < 0) stored.push(item);
+          return {};
+        }
         if (item.label === 'HUMAN') {
           throw Object.assign(new Error('Human TM entries cannot be overwritten'), { name: 'ConditionalCheckFailedException' });
         }
-        const names = input.ExpressionAttributeNames as Record<string, string>;
-        const values = input.ExpressionAttributeValues as Record<string, unknown>;
         const expression = String(input.UpdateExpression);
         const [setExpression, addExpression] = expression.split(' ADD ');
         for (const assignment of setExpression.replace(/^SET /, '').split(', ')) {
@@ -71,7 +127,6 @@ function setup(options: { memory?: string; locked?: boolean; quotaExceeded?: boo
             item[name] = Number(item[name] ?? 0) + Number(values[valueToken]);
           }
         }
-        const existingIndex = stored.findIndex((row) => row.PK === key.PK && row.SK === key.SK);
         if (existingIndex < 0) stored.push(item);
         else stored[existingIndex] = item;
         return {};
@@ -102,6 +157,7 @@ function setup(options: { memory?: string; locked?: boolean; quotaExceeded?: boo
     ddb: ddb as unknown as RealtimeDeps['ddb'],
     usage: usage as unknown as RealtimeDeps['usage'],
     translate,
+    getGlossaryState: options.getGlossaryState,
     detectLanguage: async () => options.detected ?? { language: 'vi', confidence: 0.99 },
     now: () => new Date('2026-10-29T00:00:00.000Z'),
   } satisfies RealtimeDeps;
@@ -257,5 +313,137 @@ describe('POST /translate/realtime', () => {
     assert.equal(test.settlements.length, 1);
     assert.equal(test.settlements[0].machineChars, 'Xin chào.'.length);
     assert.equal(test.calls.some((call) => call.name === 'UpdateCommand'), true);
+  });
+
+  it('coi bản MACHINE lỗi thời theo sinceVersion là trượt, dịch lại và hậu kiểm thuật ngữ gắn Cần xem lại (3.9)', async () => {
+    const test = setup({
+      memory: 'Near the old town.',
+      memoryLabel: 'MACHINE',
+      memoryGlossaryVersion: 2,
+      glossaryTerms: [
+        {
+          PK: `TENANT#${TENANT}#GLOSS`,
+          SK: 'TERM#phố cổ hội an',
+          normalized: 'phố cổ hội an',
+          sourceTerm: 'phố cổ Hội An',
+          type: 'FIXED',
+          translations: { en: 'Hoi An Ancient Town' },
+          sinceVersion: 5,
+        },
+      ],
+    });
+    const sentence = 'Gần phố cổ Hội An.';
+    const response = await test.handler(event({ text: sentence, source_lang: 'vi', target_lang: 'en' }));
+    const body = responseBody(response);
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(test.translateCalls, 1, 'bản MACHINE cũ phải bị dịch lại');
+    assert.equal(body.characters_machine_translated, sentence.length);
+    assert.equal(body.characters_from_memory, 0);
+    assert.equal(test.stored[0].needsReview, true, 'hậu kiểm phát hiện thiếu Hoi An Ancient Town -> needsReview = true');
+    assert.equal(test.stored[0].GSI3PK, `TENANT#${TENANT}#TM#REVIEW`);
+  });
+
+  it('tenant chưa đồng bộ Custom Terminology vẫn dịch được và không gửi tên terminology (3.9)', async () => {
+    const test = setup();
+    const response = await test.handler(event({ text: 'Xin chào.', source_lang: 'vi', target_lang: 'en' }));
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(responseBody(response).translated_text, 'XIN CHÀO.');
+    assert.equal(test.translateCalls, 1);
+    assert.equal(test.translateInputs[0].TerminologyNames, undefined, 'không được gửi tm-<tenantId> dự phòng');
+  });
+
+  it('có thuật ngữ hiệu lực và CONFIG đã đồng bộ terminologyName thì gửi đúng tên đó (3.9)', async () => {
+    const test = setup({
+      configTerminologyName: 'tm-t_test',
+      glossaryTerms: [
+        { SK: 'TERM#homestay abc', normalized: 'homestay abc', sourceTerm: 'Homestay ABC', type: 'KEEP', sinceVersion: 1 },
+      ],
+    });
+    const response = await test.handler(event({ text: 'Xin chào.', source_lang: 'vi', target_lang: 'en' }));
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(test.translateInputs[0].TerminologyNames, ['tm-t_test']);
+  });
+
+  it('fallback đọc Glossary phân trang theo LastEvaluatedKey, không bỏ sót thuật ngữ (3.9)', async () => {
+    const terms = ['a', 'b', 'c'].map((word, index) => ({
+      SK: `TERM#${word}`,
+      normalized: word,
+      sourceTerm: word,
+      type: 'FIXED',
+      translations: { en: `T-${word}` },
+      sinceVersion: 3 + index,
+    }));
+    const test = setup({ glossaryTerms: terms, glossaryPageSize: 1, memory: 'Old.', memoryLabel: 'MACHINE', memoryGlossaryVersion: 2 });
+    // Câu chỉ chứa thuật ngữ nằm ở trang Query cuối cùng (c) -> bản MACHINE cũ phải bị coi lỗi thời và dịch lại
+    const response = await test.handler(event({ text: 'Xin c.', source_lang: 'vi', target_lang: 'en' }));
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(test.calls.filter((call) => call.name === 'QueryCommand').length, 3, 'phải đọc đủ 3 trang');
+    assert.equal(test.translateCalls, 1, 'thuật ngữ ở trang cuối được nhận ra nên dịch lại');
+  });
+
+  it('giữ nguyên bản HUMAN khi thuật ngữ đổi nhưng gắn nhãn Cần xem lại khi tra (3.9)', async () => {
+    const test = setup({
+      memory: 'Near the old quarter.',
+      memoryLabel: 'HUMAN',
+      memoryGlossaryVersion: 2,
+      glossaryTerms: [
+        {
+          PK: `TENANT#${TENANT}#GLOSS`,
+          SK: 'TERM#phố cổ hội an',
+          normalized: 'phố cổ hội an',
+          sourceTerm: 'phố cổ Hội An',
+          type: 'FIXED',
+          translations: { en: 'Hoi An Ancient Town' },
+          sinceVersion: 5,
+        },
+      ],
+    });
+    const sentence = 'Gần phố cổ Hội An.';
+    const response = await test.handler(event({ text: sentence, source_lang: 'vi', target_lang: 'en' }));
+    const body = responseBody(response);
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(body.translated_text, 'Near the old quarter.');
+    assert.equal(test.translateCalls, 0, 'bản HUMAN vẫn được dùng ngay');
+    assert.equal(test.stored[0].label, 'HUMAN');
+    assert.equal(test.stored[0].needsReview, true);
+    assert.equal(test.stored[0].GSI3PK, `TENANT#${TENANT}#TM#REVIEW`);
+  });
+
+  it('lỗi đọc Glossary trong fallback -> trả 500 và không lưu TM entry tươi (3.9)', async () => {
+    const test = setup({
+      glossaryQueryFails: true,
+      glossaryTerms: [
+        { SK: 'TERM#hội an', normalized: 'hội an', sourceTerm: 'Hội An', type: 'KEEP', sinceVersion: 1 },
+      ],
+    });
+    const response = await test.handler(event({ text: 'Xin chào Hội An.', source_lang: 'vi', target_lang: 'en' }));
+    const body = responseBody(response);
+
+    assert.equal(response.statusCode, 500);
+    assert.equal(body.error.code, 'INTERNAL_ERROR');
+    assert.equal(test.translateCalls, 0, 'không được gọi Translate khi đọc Glossary lỗi');
+    assert.equal(test.stored.length, 0, 'không được tạo bản ghi TM mới');
+    assert.equal(test.calls.some((call) => call.name === 'UpdateCommand'), false, 'không được gọi UpdateCommand ghi TM');
+  });
+
+  it('deps.getGlossaryState ném lỗi -> trả 500 và không lưu TM entry tươi (3.9)', async () => {
+    const test = setup({
+      getGlossaryState: async () => {
+        throw new Error('Glossary reader timeout');
+      },
+    });
+    const response = await test.handler(event({ text: 'Xin chào Hội An.', source_lang: 'vi', target_lang: 'en' }));
+    const body = responseBody(response);
+
+    assert.equal(response.statusCode, 500);
+    assert.equal(body.error.code, 'INTERNAL_ERROR');
+    assert.equal(test.translateCalls, 0, 'không được gọi Translate khi getGlossaryState lỗi');
+    assert.equal(test.stored.length, 0, 'không được tạo bản ghi TM mới');
+    assert.equal(test.calls.some((call) => call.name === 'UpdateCommand'), false, 'không được gọi UpdateCommand ghi TM');
   });
 });
