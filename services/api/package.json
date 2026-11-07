@@ -10,7 +10,7 @@
   "scripts": {
   "build": "tsc -p tsconfig.json",
   "test": "tsc -p tsconfig.json && node --test \"dist/services/api/**/*.test.js\""
-}
+},
   "dependencies": {
     "@aws-sdk/client-api-gateway": "^3.1164.0",
     "@aws-sdk/client-cloudfront": "^3.650.0",
