@@ -8,6 +8,7 @@
  *  3. Quản lý website F3 (Task 4.6): `/console/hosts*` và `/console/websites*` qua `handleSitesApiGatewayRoute`.
  *  4. Dịch trước F6 & Job F10 (Task 4.5): `/console/hosts/{slug}/prewarm` và `/console/jobs/{jobId}` qua `handlePrewarmRoute`.
  *  5. Quản lý thành viên E.5 (Task 2.9): `/console/members*` qua `handleMembersApiGatewayRoute`.
+ *  6. Quản lý API key (Task 3.6): `/console/api-keys*` qua `handleApiKeysApiGatewayRoute` (`handleApiKeyRoute`).
  *
  * Biến môi trường: TABLE_NAME, CLOUDFRONT_DISTRIBUTION_ID, USER_POOL_ARN, TENANT_DATA_ACCESS_ROLE_ARN.
  */
@@ -17,6 +18,7 @@ import {
   type ReviewApiGatewayResponse,
 } from '../review/reviewManager.js';
 import { handleGlossaryRoute, type GlossaryDependencies } from '../glossary/glossaryManager.js';
+import { handleApiKeyRoute, type ApiKeyManagerDependencies } from '../keys/keyManager.js';
 import {
   createSite,
   verifySite,
@@ -502,15 +504,33 @@ export function createDefaultPrewarmStarter(
   };
 }
 
+/**
+ * 4. Adapter HTTP cho nhóm route Quản lý API key (`/console/api-keys*`).
+ * Trả `null` nếu đường dẫn không thuộc `/console/api-keys` để router thử tiếp mô-đun sau.
+ */
+export async function handleApiKeysApiGatewayRoute(
+  event: ConsoleEvent,
+  ctx: Ctx,
+  deps?: ApiKeyManagerDependencies,
+): Promise<ConsoleResponse | null> {
+  const rawPath = event.path ?? (event as { rawPath?: string }).rawPath ?? '';
+  const path = normalizeConsolePath(rawPath);
+  if (path !== '/console/api-keys' && !path.startsWith('/console/api-keys/')) {
+    return null;
+  }
+  return handleApiKeyRoute({ ...event, path }, ctx, deps);
+}
+
 /** Dependencies mặc định cho dịch trước theo sitemap (F6) và tra cứu job (F10). */
 export const defaultPrewarmDeps: PrewarmManagerDeps = {
   db,
   startExecution: createDefaultPrewarmStarter(),
 };
 
-/** Xây dựng danh sách mô-đun route mặc định của Console Lambda (hợp nhất đầy đủ 5 nhóm route). */
+/** Xây dựng danh sách mô-đun route mặc định của Console Lambda (hợp nhất đầy đủ 6 nhóm route). */
 export function buildConsoleRouteModules(
   prewarmDeps: PrewarmManagerDeps = defaultPrewarmDeps,
+  apiKeyDeps?: ApiKeyManagerDependencies,
 ): readonly ConsoleRouteModule[] {
   return [
     (event, ctx) => handleReviewApiGatewayRoute(event, ctx),
@@ -518,16 +538,18 @@ export function buildConsoleRouteModules(
     (event, ctx) => handleSitesApiGatewayRoute(event, ctx),
     (event, ctx) => handlePrewarmRoute(event, ctx, prewarmDeps),
     (event, ctx) => handleMembersApiGatewayRoute(event, ctx),
+    (event, ctx) => handleApiKeysApiGatewayRoute(event, ctx, apiKeyDeps),
   ];
 }
 
-/** Danh sách các mô-đun route mặc định của Console Lambda (hợp nhất đầy đủ 5 nhóm). */
+/** Danh sách các mô-đun route mặc định của Console Lambda (hợp nhất đầy đủ 6 nhóm). */
 export const CONSOLE_ROUTE_MODULES: readonly ConsoleRouteModule[] = buildConsoleRouteModules();
 
 export interface ConsoleHandlerDeps {
   contextFromClaims?: (claims: Record<string, unknown>, requestId: string) => Promise<Ctx>;
   db?: Pick<typeof db, 'get'>;
   prewarmDeps?: PrewarmManagerDeps;
+  apiKeyDeps?: ApiKeyManagerDependencies;
 }
 
 export function createConsoleHandler(
@@ -535,7 +557,10 @@ export function createConsoleHandler(
   deps?: ConsoleHandlerDeps,
 ) {
   const effectiveModules =
-    modules ?? (deps?.prewarmDeps ? buildConsoleRouteModules(deps.prewarmDeps) : CONSOLE_ROUTE_MODULES);
+    modules ??
+    (deps?.prewarmDeps || deps?.apiKeyDeps
+      ? buildConsoleRouteModules(deps.prewarmDeps ?? defaultPrewarmDeps, deps.apiKeyDeps)
+      : CONSOLE_ROUTE_MODULES);
   return async (event: ConsoleEvent): Promise<ConsoleResponse> => {
     const requestId = event.requestContext?.requestId ?? 'req-unknown';
     let ctx: Ctx;

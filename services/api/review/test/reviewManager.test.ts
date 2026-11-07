@@ -543,14 +543,14 @@ describe('Task 3.8 – Duyệt bản dịch (F5)', () => {
       version: 1,
     });
 
-    // 1. DEVELOPER bị từ chối truy cập F5 với FORBIDDEN (theo đúng contract Bảng 1.2 / F5)
+    // 1. DEVELOPER bị từ chối truy cập F5 với PERMISSION_DENIED (theo đúng hợp đồng QC-2 / Bảng 1.2)
     await assert.rejects(
       listTranslations(devCtx, {}, deps),
-      (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
+      (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
     );
     await assert.rejects(
       acceptTranslation(devCtx, { src: 'vi', tgt: 'en', hash: seeded.hash, expectedVersion: 1 }, deps),
-      (err: unknown) => err instanceof AppError && err.code === 'FORBIDDEN',
+      (err: unknown) => err instanceof AppError && err.code === 'PERMISSION_DENIED',
     );
 
     // 2. Thiếu hoặc rỗng ctx.sub -> bị từ chối ngay với UNAUTHORIZED (không bỏ qua kiểm tra MEMBER)
@@ -967,6 +967,55 @@ describe('Task 3.8 – Duyệt bản dịch (F5)', () => {
     assert.ok(
       consoleSnippet.includes('cloudfront:CreateInvalidation'),
       'ConsoleApiExecutionRole phải có quyền cloudfront:CreateInvalidation',
+    );
+  });
+
+  it('listTranslations phân trang trên GSI3 theo thứ tự GSI3SK giảm dần với Limit và con trỏ cursor / nextCursor', async () => {
+    const { deps, seedTmEntry } = createReviewHarness();
+
+    seedTmEntry({
+      sourceText: 'Câu 1 cũ nhất.',
+      tgt: 'Sentence 1 oldest.',
+      label: 'MACHINE',
+      needsReview: true,
+      updatedAt: '2026-10-28T08:00:00.000Z',
+    });
+    seedTmEntry({
+      sourceText: 'Câu 2 giữa.',
+      tgt: 'Sentence 2 middle.',
+      label: 'MACHINE',
+      needsReview: true,
+      updatedAt: '2026-10-28T09:00:00.000Z',
+    });
+    seedTmEntry({
+      sourceText: 'Câu 3 mới nhất.',
+      tgt: 'Sentence 3 newest.',
+      label: 'MACHINE',
+      needsReview: true,
+      updatedAt: '2026-10-28T10:00:00.000Z',
+    });
+
+    // Trang 1 (limit = 2): trả 2 câu mới nhất kèm nextCursor
+    const page1 = await listTranslations(reviewerCtx, { tab: 'REVIEW', limit: 2 }, deps);
+    assert.equal(page1.items.length, 2);
+    assert.equal(page1.items[0].sourceText, 'Câu 3 mới nhất.');
+    assert.equal(page1.items[1].sourceText, 'Câu 2 giữa.');
+    assert.ok(page1.nextCursor, 'Phải trả nextCursor khi còn bản ghi tiếp theo');
+
+    // Trang 2 (dùng cursor từ trang 1): trả câu còn lại và không còn nextCursor
+    const page2 = await listTranslations(
+      reviewerCtx,
+      { tab: 'REVIEW', limit: 2, cursor: page1.nextCursor },
+      deps,
+    );
+    assert.equal(page2.items.length, 1);
+    assert.equal(page2.items[0].sourceText, 'Câu 1 cũ nhất.');
+    assert.equal(page2.nextCursor, undefined);
+
+    // Con trỏ giả mạo hoặc khác tenant/tab bị từ chối với INVALID_REQUEST
+    await assert.rejects(
+      listTranslations(reviewerCtx, { tab: 'HUMAN', cursor: page1.nextCursor }, deps),
+      (err: unknown) => err instanceof AppError && err.code === 'INVALID_REQUEST',
     );
   });
 });

@@ -197,8 +197,21 @@ Resources:
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InviteTenantMembers
                 Effect: Allow
-                Action: cognito-idp:AdminCreateUser
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminDeleteUser
                 Resource: !Ref UserPoolArn
+              - Sid: ManageTenantApiKeys
+                Effect: Allow
+                Action:
+                  - apigateway:POST
+                  - apigateway:PATCH
+                  - apigateway:DELETE
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys'
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys/*'
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys'
+                  - !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/usageplans/*/keys/*'
               - Sid: ImportGlossaryTerminology
                 Effect: Allow
                 Action: translate:ImportTerminology

@@ -26,21 +26,21 @@ describe('validateApiKeyTransaction', () => {
   });
 
   it('rejects an APIKEY partition belonging to another tenant', () => {
-    assertRejected(createOps(keys.apiKey({ ...ctx, tenantId: 'tenant-2' }, 'key-1')), ctx, 'FORBIDDEN');
+    assertRejected(createOps(keys.apiKey({ ...ctx, tenantId: 'tenant-2' }, 'key-1')), ctx, 'PERMISSION_DENIED');
   });
 
   it('rejects a KEYMAP whose keyId differs from the APIKEY', () => {
-    assertRejected(createOps(undefined, keys.keymap('other-key')), ctx, 'FORBIDDEN');
+    assertRejected(createOps(undefined, keys.keymap('other-key')), ctx, 'PERMISSION_DENIED');
   });
 
   it('rejects a KEYMAP that points to another tenant', () => {
     const ops = createOps();
     (ops[1] as { Put: { Item: Record<string, unknown> } }).Put.Item.tenantId = 'tenant-2';
-    assertRejected(ops, ctx, 'FORBIDDEN');
+    assertRejected(ops, ctx, 'PERMISSION_DENIED');
   });
 
   it('rejects a context that is not authenticated through JWT', () => {
-    assertRejected(createOps(), { ...ctx, via: 'KEYMAP' }, 'FORBIDDEN');
+    assertRejected(createOps(), { ...ctx, via: 'KEYMAP' }, 'PERMISSION_DENIED');
   });
 
   it('rejects unsupported operation combinations', () => {

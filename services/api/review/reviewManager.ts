@@ -92,12 +92,16 @@ export interface ReviewMutationResult {
   invalidation: ReviewInvalidationResult;
 }
 
+export const DEFAULT_TRANSLATIONS_LIMIT = 50;
+export const MAX_TRANSLATIONS_LIMIT = 200;
+
 export interface ListTranslationsFilter {
   src?: Lang;
   tgt?: Lang;
   tab?: ReviewTab;
   search?: string;
   limit?: number;
+  cursor?: string;
 }
 
 export interface ListTranslationsResult {
@@ -106,6 +110,7 @@ export interface ListTranslationsResult {
   tab: ReviewTab;
   tenantLocked: boolean;
   glossaryVersion: number;
+  nextCursor?: string;
 }
 
 export interface AcceptTranslationInput {
@@ -140,9 +145,36 @@ export interface RetryInvalidationInput {
   hashes: readonly Sha256Hex[];
 }
 
+export interface QueryGsi3Options {
+  /** Sắp xếp theo GSI3SK tăng dần (true) hay giảm dần (false, mặc định mới nhất trước). */
+  scanIndexForward?: boolean;
+  /** Giới hạn số bản ghi tối đa đọc trong một truy vấn GSI3. */
+  limit?: number;
+  /** Con trỏ phân trang mã hóa base64url của ExclusiveStartKey. */
+  cursor?: string;
+  /** Tiền tố GSI3SK tùy chọn. */
+  gsi3skPrefix?: string;
+}
+
+export interface QueryGsi3PageResult {
+  items: Record<string, any>[];
+  nextCursor?: string;
+}
+
 export interface ReviewDb extends Pick<typeof db, 'get' | 'update' | 'query'> {
-  /** Truy vấn trên GSI3 (PK = TENANT#<t>#TM#<REVIEW|MACHINE|HUMAN>) nếu có */
-  queryGsi3?: (ctx: Ctx, gsi3pk: string, gsi3skPrefix?: string) => Promise<Record<string, any>[]>;
+  /** Truy vấn trên GSI3 (PK = TENANT#<t>#TM#<REVIEW|MACHINE|HUMAN>) theo thứ tự GSI3SK giảm dần và có giới hạn Limit */
+  queryGsi3?: (
+    ctx: Ctx,
+    gsi3pk: string,
+    gsi3skPrefix?: string,
+    options?: QueryGsi3Options,
+  ) => Promise<Record<string, any>[]>;
+  /** Truy vấn một trang trên GSI3 theo thứ tự GSI3SK giảm dần kèm con trỏ phân trang */
+  queryGsi3Page?: (
+    ctx: Ctx,
+    gsi3pk: string,
+    options?: QueryGsi3Options,
+  ) => Promise<QueryGsi3PageResult>;
 }
 
 export interface ReviewDependencies {
@@ -231,29 +263,78 @@ function getDefaultInvalidator() {
   });
 }
 
+/** Mã hóa khóa đánh giá cuối cùng của DynamoDB thành con trỏ base64url. */
+export function encodeReviewCursor(key: Record<string, any>): string {
+  return Buffer.from(JSON.stringify(key), 'utf8').toString('base64url');
+}
+
+/** Giải mã và xác thực con trỏ phân trang phải thuộc đúng tenant và GSI3PK hiện tại. */
+export function decodeReviewCursor(
+  cursor: string,
+  expectedTenantId: string,
+  expectedGsi3pk: string,
+): Record<string, any> {
+  try {
+    const raw = Buffer.from(cursor.trim(), 'base64url').toString('utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Invalid cursor object');
+    }
+    const pk = typeof parsed.PK === 'string' ? parsed.PK : '';
+    const gsi3pk = typeof parsed.GSI3PK === 'string' ? parsed.GSI3PK : '';
+    if (!pk.startsWith(`TENANT#${expectedTenantId}#`) || gsi3pk !== expectedGsi3pk) {
+      throw new Error('Cursor tenant/GSI3PK mismatch');
+    }
+    return parsed as Record<string, any>;
+  } catch {
+    throw new AppError('INVALID_REQUEST', 'Con trỏ phân trang (cursor) không hợp lệ');
+  }
+}
+
 export const defaultReviewDb: ReviewDb = {
   ...db,
-  async queryGsi3(ctx: Ctx, gsi3pk: string, gsi3skPrefix?: string) {
+  async queryGsi3Page(ctx: Ctx, gsi3pk: string, options?: QueryGsi3Options): Promise<QueryGsi3PageResult> {
     const allowedPrefix = `TENANT#${ctx.tenantId}#`;
     if (!ctx.tenantId || ctx.tenantId === 'PLATFORM' || !gsi3pk.startsWith(allowedPrefix)) {
       throw new AppError('FORBIDDEN', `Bị từ chối: Ctx Tenant (${ctx.tenantId}) không có quyền truy cập GSI3PK (${gsi3pk})`);
     }
-    const items: Record<string, any>[] = [];
-    let exclusiveStartKey: Record<string, any> | undefined;
-    do {
-      const res = await defaultDocClient.send(
-        new QueryCommand({
-          TableName: TABLE_NAME,
-          IndexName: 'GSI3',
-          KeyConditionExpression: gsi3skPrefix ? 'GSI3PK = :gsi3pk AND begins_with(GSI3SK, :sk)' : 'GSI3PK = :gsi3pk',
-          ExpressionAttributeValues: gsi3skPrefix ? { ':gsi3pk': gsi3pk, ':sk': gsi3skPrefix } : { ':gsi3pk': gsi3pk },
-          ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-        }),
-      );
-      if (res.Items) items.push(...(res.Items as Record<string, any>[]));
-      exclusiveStartKey = res.LastEvaluatedKey as Record<string, any> | undefined;
-    } while (exclusiveStartKey);
-    return items;
+    const gsi3skPrefix = options?.gsi3skPrefix;
+    const scanIndexForward = options?.scanIndexForward ?? false;
+    const limit = Math.min(
+      Math.max(Number(options?.limit ?? DEFAULT_TRANSLATIONS_LIMIT) || DEFAULT_TRANSLATIONS_LIMIT, 1),
+      MAX_TRANSLATIONS_LIMIT,
+    );
+    const exclusiveStartKey = options?.cursor
+      ? decodeReviewCursor(options.cursor, ctx.tenantId, gsi3pk)
+      : undefined;
+
+    const res = await defaultDocClient.send(
+      new QueryCommand({
+        TableName: TABLE_NAME,
+        IndexName: 'GSI3',
+        KeyConditionExpression: gsi3skPrefix ? 'GSI3PK = :gsi3pk AND begins_with(GSI3SK, :sk)' : 'GSI3PK = :gsi3pk',
+        ExpressionAttributeValues: gsi3skPrefix ? { ':gsi3pk': gsi3pk, ':sk': gsi3skPrefix } : { ':gsi3pk': gsi3pk },
+        ScanIndexForward: scanIndexForward,
+        Limit: limit,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+
+    const items = (res.Items as Record<string, any>[] | undefined) ?? [];
+    const lastKey = res.LastEvaluatedKey as Record<string, any> | undefined;
+    return {
+      items,
+      ...(lastKey ? { nextCursor: encodeReviewCursor(lastKey) } : {}),
+    };
+  },
+  async queryGsi3(ctx: Ctx, gsi3pk: string, gsi3skPrefix?: string, options?: QueryGsi3Options) {
+    const page = await defaultReviewDb.queryGsi3Page!(ctx, gsi3pk, {
+      ...options,
+      gsi3skPrefix: gsi3skPrefix ?? options?.gsi3skPrefix,
+      scanIndexForward: options?.scanIndexForward ?? false,
+      limit: options?.limit ?? MAX_TRANSLATIONS_LIMIT,
+    });
+    return page.items;
   },
 };
 
@@ -330,7 +411,7 @@ async function assertReviewAccess(
   tenantLocked: boolean;
 }> {
   if (!ctx.tenantId || ctx.tenantId === 'PLATFORM') {
-    throw new AppError('FORBIDDEN', 'Ngữ cảnh tenant không hợp lệ');
+    throw new AppError('PERMISSION_DENIED', 'Ngữ cảnh tenant không hợp lệ');
   }
 
   if (ctx.via && ctx.via !== 'JWT') {
@@ -339,7 +420,7 @@ async function assertReviewAccess(
 
   if (!ctx.role || (ctx.role !== 'TENANT_ADMIN' && ctx.role !== 'REVIEWER')) {
     throw new AppError(
-      'FORBIDDEN',
+      'PERMISSION_DENIED',
       'Vai trò không được phép truy cập màn Duyệt bản dịch (chỉ TENANT_ADMIN và REVIEWER)',
     );
   }
@@ -500,8 +581,12 @@ async function handleVersionConflictOrThrow(
 // 1. Liệt kê & Tra cứu câu dịch (GET /console/translations)
 // ============================================================================
 
+const MAX_GSI3_SCAN_PAGES = 5;
+
 /**
  * Liệt kê danh sách bản dịch trong TM theo tab (`REVIEW`, `MACHINE`, `HUMAN`), cặp ngôn ngữ và từ khóa tìm kiếm.
+ * Truy vấn trên GSI3 theo thứ tự `GSI3SK` giảm dần (`ScanIndexForward: false`) với `Limit` giới hạn
+ * (mặc định 50, tối đa 200) và hỗ trợ con trỏ phân trang `cursor` / `nextCursor`.
  */
 export async function listTranslations(
   ctx: Ctx,
@@ -514,11 +599,105 @@ export async function listTranslations(
       ? filter.tab
       : 'REVIEW';
 
+  const limit =
+    filter.limit && Number.isFinite(filter.limit) && filter.limit > 0
+      ? Math.min(Math.floor(filter.limit), MAX_TRANSLATIONS_LIMIT)
+      : DEFAULT_TRANSLATIONS_LIMIT;
+
   const gsi3pk = `TENANT#${ctx.tenantId}#TM#${tab}`;
+  const srcFilter = filter.src ? filter.src.trim() : undefined;
+  const tgtFilter = filter.tgt ? filter.tgt.trim() : undefined;
+  const searchQuery =
+    typeof filter.search === 'string' && filter.search.trim() !== ''
+      ? filter.search.normalize('NFC').trim().toLowerCase()
+      : undefined;
+  const hasPostFilter = Boolean(srcFilter || tgtFilter || searchQuery);
+
+  const matchesFilter = (item: ReviewTranslationEntry): boolean => {
+    if (tab === 'REVIEW' && !(item.needsReview === true || item.GSI3PK.endsWith('#TM#REVIEW'))) {
+      return false;
+    }
+    if (tab === 'HUMAN' && !(item.label === 'HUMAN' && !item.needsReview)) {
+      return false;
+    }
+    if (tab === 'MACHINE' && !(item.label === 'MACHINE' && !item.needsReview)) {
+      return false;
+    }
+    if (srcFilter && item.srcLang !== srcFilter) return false;
+    if (tgtFilter && item.tgtLang !== tgtFilter) return false;
+    if (searchQuery) {
+      const matchSrc = item.sourceText.normalize('NFC').toLowerCase().includes(searchQuery);
+      const matchTgt = item.tgt.normalize('NFC').toLowerCase().includes(searchQuery);
+      if (!matchSrc && !matchTgt) return false;
+    }
+    return true;
+  };
+
+  if (deps.db.queryGsi3Page) {
+    const collected: ReviewTranslationEntry[] = [];
+    let currentCursor = filter.cursor;
+    let nextCursor: string | undefined;
+    const pageLimit = hasPostFilter ? MAX_TRANSLATIONS_LIMIT : limit;
+
+    for (let pageIdx = 0; pageIdx < MAX_GSI3_SCAN_PAGES; pageIdx++) {
+      const page = await deps.db.queryGsi3Page(ctx, gsi3pk, {
+        scanIndexForward: false,
+        limit: pageLimit,
+        cursor: currentCursor,
+      });
+      const mapped = page.items.map(mapRawToReviewEntry);
+
+      for (let i = 0; i < mapped.length; i++) {
+        const entry = mapped[i];
+        if (!matchesFilter(entry)) continue;
+        collected.push(entry);
+        if (collected.length === limit) {
+          const hasMoreInPage = mapped.slice(i + 1).some(matchesFilter);
+          if (hasMoreInPage || page.nextCursor) {
+            const itemKey = tmKey(ctx, entry.srcLang, entry.tgtLang, entry.hash);
+            nextCursor = encodeReviewCursor({
+              PK: itemKey.PK,
+              SK: itemKey.SK,
+              GSI3PK: entry.GSI3PK,
+              GSI3SK: entry.GSI3SK,
+            });
+          }
+          break;
+        }
+      }
+
+      if (collected.length >= limit) {
+        break;
+      }
+      if (!page.nextCursor) {
+        nextCursor = undefined;
+        break;
+      }
+      currentCursor = page.nextCursor;
+      nextCursor = page.nextCursor;
+    }
+
+    return {
+      items: collected,
+      total: collected.length,
+      tab,
+      tenantLocked,
+      glossaryVersion: currentGlossaryVersion,
+      ...(nextCursor ? { nextCursor } : {}),
+    };
+  }
+
   let rawItems: Record<string, any>[] = [];
+  const decodedCursor = filter.cursor
+    ? decodeReviewCursor(filter.cursor, ctx.tenantId, gsi3pk)
+    : undefined;
 
   if (deps.db.queryGsi3) {
-    rawItems = await deps.db.queryGsi3(ctx, gsi3pk);
+    rawItems = await deps.db.queryGsi3(ctx, gsi3pk, undefined, {
+      scanIndexForward: false,
+      limit: hasPostFilter ? MAX_TRANSLATIONS_LIMIT : limit,
+      cursor: filter.cursor,
+    });
   } else if (filter.src && filter.tgt) {
     const src = validateLangCode(filter.src, 'src');
     const tgt = validateLangCode(filter.tgt, 'tgt');
@@ -526,43 +705,40 @@ export async function listTranslations(
     rawItems = await deps.db.query(ctx, pk, 'HASH#');
   }
 
-  let entries = rawItems.map(mapRawToReviewEntry);
-
-  // Lọc theo tab nếu nguồn dữ liệu truy vấn từ bảng chính thay vì GSI3
-  entries = entries.filter((item) => {
-    if (tab === 'REVIEW') return item.needsReview === true || item.GSI3PK.endsWith('#TM#REVIEW');
-    if (tab === 'HUMAN') return item.label === 'HUMAN' && !item.needsReview;
-    return item.label === 'MACHINE' && !item.needsReview;
-  });
-
-  if (filter.src) {
-    const src = filter.src.trim();
-    entries = entries.filter((item) => item.srcLang === src);
-  }
-  if (filter.tgt) {
-    const tgt = filter.tgt.trim();
-    entries = entries.filter((item) => item.tgtLang === tgt);
-  }
-  if (typeof filter.search === 'string' && filter.search.trim() !== '') {
-    const q = filter.search.normalize('NFC').trim().toLowerCase();
-    entries = entries.filter(
-      (item) =>
-        item.sourceText.normalize('NFC').toLowerCase().includes(q) ||
-        item.tgt.normalize('NFC').toLowerCase().includes(q),
-    );
-  }
-
-  entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  let entries = rawItems.map(mapRawToReviewEntry).filter(matchesFilter);
+  entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.hash.localeCompare(b.hash));
 
   const total = entries.length;
-  const limit = filter.limit && filter.limit > 0 ? Math.min(filter.limit, 200) : entries.length;
+  if (decodedCursor) {
+    const idx = entries.findIndex((item) => {
+      const itemKey = tmKey(ctx, item.srcLang, item.tgtLang, item.hash);
+      return itemKey.PK === decodedCursor.PK && itemKey.SK === decodedCursor.SK;
+    });
+    if (idx >= 0) {
+      entries = entries.slice(idx + 1);
+    }
+  }
+
+  const items = entries.slice(0, limit);
+  const lastItem = items[items.length - 1];
+  const lastItemKey = lastItem ? tmKey(ctx, lastItem.srcLang, lastItem.tgtLang, lastItem.hash) : undefined;
+  const nextCursor =
+    entries.length > limit && lastItem && lastItemKey
+      ? encodeReviewCursor({
+          PK: lastItemKey.PK,
+          SK: lastItemKey.SK,
+          GSI3PK: lastItem.GSI3PK,
+          GSI3SK: lastItem.GSI3SK,
+        })
+      : undefined;
 
   return {
-    items: entries.slice(0, limit),
+    items,
     total,
     tab,
     tenantLocked,
     glossaryVersion: currentGlossaryVersion,
+    ...(nextCursor ? { nextCursor } : {}),
   };
 }
 
@@ -1006,6 +1182,7 @@ export async function handleReviewRoute(
         tab: q.tab as ReviewTab | undefined,
         search: q.search,
         limit: q.limit ? Number(q.limit) : undefined,
+        cursor: q.cursor,
       },
       deps,
     );

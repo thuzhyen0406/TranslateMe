@@ -7,6 +7,7 @@ import {
   handleGlossaryApiGatewayRoute,
   handleSitesApiGatewayRoute,
   handleMembersApiGatewayRoute,
+  handleApiKeysApiGatewayRoute,
   toHostResponse,
   CONSOLE_ROUTE_MODULES,
   type ConsoleEvent,
@@ -91,8 +92,8 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(JSON.parse(resMismatch.body).error?.code, 'PERMISSION_DENIED');
   });
 
-  it('CONSOLE_ROUTE_MODULES mặc định đăng ký đầy đủ 5 nhóm route Console hiện có (Review, Glossary, Sites, Prewarm/Job, Members)', async () => {
-    assert.equal(CONSOLE_ROUTE_MODULES.length, 5, 'Router phải đăng ký đủ 5 module Console');
+  it('CONSOLE_ROUTE_MODULES mặc định đăng ký đầy đủ 6 nhóm route Console hiện có (Review, Glossary, Sites, Prewarm/Job, Members, ApiKeys)', async () => {
+    assert.equal(CONSOLE_ROUTE_MODULES.length, 6, 'Router phải đăng ký đủ 6 module Console');
 
     const adminCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'r1', role: 'TENANT_ADMIN', sub: 'u_1' };
 
@@ -557,5 +558,99 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(inputPayload.tenant_id, 't_a');
     assert.equal(inputPayload.slug, 'homestay-abc');
     assert.deepEqual(inputPayload.target_langs, ['en']);
+  });
+
+  it('Console router điều phối các route /console/api-keys* qua handleApiKeyRoute với Ctx từ contextFromIdTokenClaims', async () => {
+    const adminCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'r-key', role: 'TENANT_ADMIN', sub: 'u_1' };
+    const storedKeys: Array<Record<string, any>> = [
+      {
+        PK: 'TENANT#t_a#APIKEY',
+        SK: 'KEY#key_01',
+        keyId: 'key_01',
+        name: 'Production Key',
+        plan: 'Basic',
+        status: 'ACTIVE',
+        last4: '9a8b',
+        createdAt: '2026-11-07T10:00:00.000Z',
+      },
+    ];
+
+    const fakeApiKeyDeps = {
+      db: {
+        get: async (_c: Ctx, key: { PK: string; SK: string }) => {
+          if (key.SK === 'CONFIG') return { PK: key.PK, SK: 'CONFIG', status: 'ACTIVE', plan: 'Standard' };
+          if (key.SK.startsWith('MEMBER#')) return { PK: key.PK, SK: key.SK, tenantId: 't_a', userSub: 'u_1', role: 'TENANT_ADMIN', status: 'ACTIVE' };
+          if (key.SK === 'KEY#key_01') return storedKeys[0];
+          return null;
+        },
+        query: async () => storedKeys,
+        update: async () => {},
+        transactApiKey: async () => {},
+      },
+      apiGateway: {
+        createApiKey: async () => ({ id: 'key_new_02', value: 'tm_live_secret_value_1234567890abcd' }),
+        attachKey: async () => {},
+        detachKey: async () => {},
+        setKeyEnabled: async () => {},
+        deleteApiKey: async () => {},
+      },
+      usagePlanIds: { Basic: 'plan-basic', Standard: 'plan-std' },
+      now: () => new Date('2026-11-07T12:00:00.000Z'),
+    };
+
+    // 1. Đường dẫn không thuộc /console/api-keys trả null
+    const nonApiKey = await handleApiKeysApiGatewayRoute(
+      event('/console/glossary'),
+      adminCtx,
+      fakeApiKeyDeps as any,
+    );
+    assert.equal(nonApiKey, null);
+
+    // 2. Dispatch qua createConsoleHandler (GET /console/api-keys & POST /console/api-keys)
+    const handler = createConsoleHandler(undefined, {
+      apiKeyDeps: fakeApiKeyDeps as any,
+      db: {
+        get: async (_c, key) => {
+          if (key.SK.startsWith('MEMBER#')) {
+            return { PK: key.PK, SK: key.SK, tenantId: 't_a', userSub: 'u_1', status: 'ACTIVE', role: 'TENANT_ADMIN' };
+          }
+          return null;
+        },
+      },
+    });
+
+    const listRes = await handler(event('/dev/console/api-keys', claims, 'GET'));
+    assert.equal(listRes.statusCode, 200);
+    const listBody = JSON.parse(listRes.body);
+    assert.equal(listBody.request_id, 'req-console');
+    assert.equal(listBody.api_keys.length, 1);
+    assert.equal(listBody.api_keys[0].key_id, 'key_01');
+    assert.equal(listBody.api_keys[0].last4, '9a8b');
+
+    const createRes = await handler(
+      event('/console/api-keys', claims, 'POST', { name: 'Mobile Key', plan: 'Basic' }),
+    );
+    assert.equal(createRes.statusCode, 201);
+    const createBody = JSON.parse(createRes.body);
+    assert.equal(createBody.api_key.key_id, 'key_new_02');
+    assert.equal(createBody.api_key.value, 'tm_live_secret_value_1234567890abcd');
+
+    // 3. Vai trò REVIEWER không được phép tạo/xem API key -> 403 PERMISSION_DENIED
+    const reviewerHandler = createConsoleHandler(undefined, {
+      apiKeyDeps: fakeApiKeyDeps as any,
+      db: {
+        get: async (_c, key) => {
+          if (key.SK.startsWith('MEMBER#')) {
+            return { PK: key.PK, SK: key.SK, tenantId: 't_a', userSub: 'u_rev', status: 'ACTIVE', role: 'REVIEWER' };
+          }
+          return null;
+        },
+      },
+    });
+    const revRes = await reviewerHandler(
+      event('/console/api-keys', { 'custom:tenant_id': 't_a', 'custom:role': 'reviewer', sub: 'u_rev' }, 'GET'),
+    );
+    assert.equal(revRes.statusCode, 403);
+    assert.equal(JSON.parse(revRes.body).error?.code, 'PERMISSION_DENIED');
   });
 });
