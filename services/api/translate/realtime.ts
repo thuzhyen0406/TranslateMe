@@ -1,15 +1,16 @@
 /**
  * Xử lý API dịch realtime: xác thực tenant, nhận diện ngôn ngữ, tra cứu Translation Memory,
- * dịch các câu chưa có trong bộ nhớ và hạch toán mức sử dụng trước khi trả JSON.
- * Các hàm cũng cung cấp điểm tích hợp AWS Lambda cùng các tiện ích chuẩn hóa dữ liệu.
+ * kiểm tra lỗi thời thuật ngữ (sinceVersion), hậu kiểm thuật ngữ (postCheckGlossary),
+ * dịch các câu chưa có trong bộ nhớ và hạch toán mức sử dụng trước khi trả JSON (Nhiệm vụ 2.6 – TV3; 3.9 – TV4).
  */
 import { randomUUID } from 'node:crypto';
 import { ComprehendClient, DetectDominantLanguageCommand } from '@aws-sdk/client-comprehend';
 import { TranslateClient } from '@aws-sdk/client-translate';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
-import { createTenantDocumentClientRouter, createTenantS3Client } from '../../../libs/common/tenantAws.js';
+import { DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { S3Client } from '@aws-sdk/client-s3';
+import { createDynamoGlossaryReader, postCheckGlossary, type GlossaryState } from '../../../libs/common/glossary.js';
+import { createTenantDocumentClientRouter, createTenantS3Client } from '../../../libs/common/tenantAws.js';
 import { segmentBlock } from '../../../libs/common/segmenter.js';
 import { normalize_hash } from '../../../libs/common/text-utils.js';
 import { createDynamoTmDb, createTM, EMPTY_GLOSSARY_STATE, type SentenceWithHash } from '../../../libs/common/tm.js';
@@ -36,6 +37,7 @@ export interface RealtimeDeps {
   usage: Pick<UsageService, 'reserve' | 'settle' | 'refund'>;
   translate: TranslateClientLike;
   detectLanguage: (text: string) => Promise<{ language?: string; confidence?: number }>;
+  getGlossaryState?: (ctx: Ctx) => Promise<GlossaryState>;
   now?: () => Date;
 }
 /**
@@ -94,7 +96,67 @@ async function resolveTenant(event: RealtimeEvent, deps: RealtimeDeps): Promise<
 }
 
 /**
- * Tạo bộ xử lý POST realtime gồm xác thực, nhận diện, tra TM, dịch, hạch toán và trả JSON.
+ * Đọc bảng thuật ngữ của tenant cho luồng dịch realtime (3.9).
+ * Ưu tiên `deps.getGlossaryState` nếu có; ngược lại truy vấn phân trang các mục `TERM#` từ `TENANT#<t>#GLOSS`.
+ * Chỉ trả `terminologyName` khi `CONFIG.terminologyName` đã được đồng bộ và có ít nhất 1 thuật ngữ hiệu lực;
+ * nếu chưa đồng bộ hoặc chưa có thuật ngữ hiệu lực thì trả `null` để không gửi tên Custom Terminology chưa tồn tại.
+ * Ném lỗi khi truy vấn thất bại để bên gọi thử lại thay vì tiếp tục với danh sách rỗng rồi lưu TM sai.
+ */
+async function loadRealtimeGlossary(
+  ctx: Ctx,
+  configItem: Record<string, any>,
+  deps: RealtimeDeps,
+): Promise<GlossaryState> {
+  if (deps.getGlossaryState) {
+    return deps.getGlossaryState(ctx);
+  }
+  const version = Number(configItem.glossaryVersion ?? EMPTY_GLOSSARY_STATE.version);
+  const syncedTerminologyName =
+    typeof configItem.terminologyName === 'string' && configItem.terminologyName.trim() !== ''
+      ? configItem.terminologyName.trim()
+      : null;
+  if (version <= 0) {
+    return { version: 0, terminologyName: null, terms: [] };
+  }
+  const rawItems: Record<string, any>[] = [];
+  let exclusiveStartKey: Record<string, any> | undefined;
+  do {
+    const glossRes = await deps.ddb.send(
+      new QueryCommand({
+        TableName: deps.tableName,
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
+        ExpressionAttributeValues: {
+          ':pk': `TENANT#${ctx.tenantId}#GLOSS`,
+          ':skPrefix': 'TERM#',
+        },
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    if (glossRes.Items) {
+      rawItems.push(...(glossRes.Items as Record<string, any>[]));
+    }
+    exclusiveStartKey = glossRes.LastEvaluatedKey as Record<string, any> | undefined;
+  } while (exclusiveStartKey);
+
+  const terms: GlossaryState['terms'] = rawItems.map((item) => ({
+    normalized: String(item.normalized ?? String(item.SK ?? '').replace(/^TERM#/, '')),
+    sourceTerm: typeof item.sourceTerm === 'string' ? item.sourceTerm : String(item.normalized ?? ''),
+    sourceLang: typeof item.sourceLang === 'string' ? item.sourceLang : 'vi',
+    type: item.type === 'KEEP' ? 'KEEP' : 'FIXED',
+    translations: item.translations && typeof item.translations === 'object' ? { ...item.translations } : {},
+    sinceVersion: Number(item.sinceVersion ?? 1),
+    deleted: Boolean(item.deleted),
+  }));
+  const hasActiveTerms = terms.some((t) => !t.deleted);
+  return {
+    version,
+    terminologyName: hasActiveTerms ? syncedTerminologyName : null,
+    terms,
+  };
+}
+
+/**
+ * Tạo bộ xử lý POST realtime gồm xác thực, nhận diện, tra TM, dịch, hậu kiểm thuật ngữ, hạch toán và trả JSON.
  * @param deps Các phụ thuộc DynamoDB, usage, dịch máy, nhận diện ngôn ngữ và đồng hồ tùy chọn.
  * @returns Hàm xử lý sự kiện realtime và trả về phản hồi HTTP chuẩn hóa.
  */
@@ -152,10 +214,9 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
         const normalized = normalize_hash(text);
         return { id, text: normalized.normalizedText, hash: normalized.hash };
       });
-      const glossary = {
-        ...EMPTY_GLOSSARY_STATE,
-        version: Number(config.Item.glossaryVersion ?? EMPTY_GLOSSARY_STATE.version),
-      };
+      const glossary: GlossaryState = useTerminology
+        ? await loadRealtimeGlossary(ctx, config.Item, deps)
+        : { ...EMPTY_GLOSSARY_STATE, version: Number(config.Item.glossaryVersion ?? 0) };
       const lookup = useTerminology
         ? await tm.getTM(ctx, sourceLang, body.target_lang, sentenceItems, glossary)
         : { hits: new Map(), misses: sentenceItems, reviewFlags: [] };
@@ -188,7 +249,7 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
             src: sourceLang,
             tgt: body.target_lang,
             sentences: misses.map(({ id, text }) => ({ id, text })),
-            terminologyName: useTerminology ? `tm-${auth.tenantId}` : null,
+            terminologyName: useTerminology ? glossary.terminologyName : null,
             deadlineAt: Date.now() + 25_000,
             concurrency: 4,
           });
@@ -199,8 +260,12 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
           misses.forEach((item) => {
             const result = resultsById.get(item.id);
             if (!result) throw new Error('TRANSLATE_INCOMPLETE');
-            translationsById.set(item.id, { tgt: result.tgt, needsReview: result.needsReview });
-            translatedMisses.set(item.id, { tgt: result.tgt, needsReview: result.needsReview });
+            const postCheck = useTerminology
+              ? postCheckGlossary(item.text, result.tgt, body.target_lang, glossary)
+              : { passed: true, needsReview: false, missingTerms: [] };
+            const needsReview = result.needsReview || postCheck.needsReview;
+            translationsById.set(item.id, { tgt: result.tgt, needsReview });
+            translatedMisses.set(item.id, { tgt: result.tgt, needsReview });
           });
           machineChars = reserved;
         } catch (error) {
@@ -216,6 +281,19 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
         return id === undefined ? piece.text : translationsById.get(id)?.tgt ?? piece.text;
       }).join('');
       const warnings: string[] = [];
+      if (useTerminology && lookup.reviewFlags.length) {
+        try {
+          const flagReport = await tm.markHumanNeedsReview(
+            ctx,
+            sourceLang,
+            body.target_lang,
+            lookup.reviewFlags.map((hash) => ({ hash, tgt: lookup.hits.get(hash)!.tgt })),
+          );
+          if (flagReport.failed.length) warnings.push('TM_REVIEW_FLAG_FAILED');
+        } catch {
+          warnings.push('TM_REVIEW_FLAG_FAILED');
+        }
+      }
       if (useTerminology && misses.length) {
         try {
           const report = await tm.putMachineTM(ctx, sourceLang, body.target_lang, misses.map((item) => {
@@ -234,7 +312,7 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
           warnings.push('TM_WRITE_FAILED');
         }
       }
-      return realtimeJson(200, { request_id: requestId, source_lang: sourceLang, source_lang_detected: detected, ...(detected ? { detection_confidence: confidence } : {}), target_lang: body.target_lang, translated_text: translatedText, characters_machine_translated: machineChars, characters_from_memory: memoryChars, terminology_version: Number(config.Item.glossaryVersion ?? 0), ...(warnings.length ? { warnings } : {}) });
+      return realtimeJson(200, { request_id: requestId, source_lang: sourceLang, source_lang_detected: detected, ...(detected ? { detection_confidence: confidence } : {}), target_lang: body.target_lang, translated_text: translatedText, characters_machine_translated: machineChars, characters_from_memory: memoryChars, terminology_version: glossary.version, ...(warnings.length ? { warnings } : {}) });
     } catch (error) {
       if (error instanceof SyntaxError) return apiError(400, 'INVALID_REQUEST', 'JSON không hợp lệ.', requestId);
       if (error instanceof AppError) {
@@ -294,9 +372,16 @@ export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> => {
   ) as DynamoDBDocumentClient;
   const comprehend = new ComprehendClient({});
   const translate = new TranslateClient({ maxAttempts: 3 });
-  return createRealtimeHandler({ tableName, ddb, usage: new UsageService(ddb, { tableName }), translate, detectLanguage: async (text) => {
-    const result = await comprehend.send(new DetectDominantLanguageCommand({ Text: truncateUtf8(text, 5000) }));
-    const top = result.Languages?.sort((a, b) => (b.Score ?? 0) - (a.Score ?? 0))[0];
-    return { language: top?.LanguageCode, confidence: top?.Score };
-  } })(event);
+  return createRealtimeHandler({
+    tableName,
+    ddb,
+    usage: new UsageService(ddb, { tableName }),
+    translate,
+    getGlossaryState: createDynamoGlossaryReader(ddb, tableName),
+    detectLanguage: async (text) => {
+      const result = await comprehend.send(new DetectDominantLanguageCommand({ Text: truncateUtf8(text, 5000) }));
+      const top = result.Languages?.sort((a, b) => (b.Score ?? 0) - (a.Score ?? 0))[0];
+      return { language: top?.LanguageCode, confidence: top?.Score };
+    },
+  })(event);
 };

@@ -1,12 +1,15 @@
 /**
- * Hạng mục 2.8 – Phần đọc Thuật ngữ / Glossary & Kiểm tra lỗi thời B.7 dùng chung (`libs/common/glossary.ts`).
+ * Hạng mục 2.8 & 3.9 – Phần đọc Thuật ngữ / Glossary, Kiểm tra lỗi thời (`isStale`)
+ * và Hậu kiểm (`postCheckGlossary`) dùng chung (`libs/common/glossary.ts`).
  *
  * Đặt tại `libs/common/` để cả Lambda Proxy (`services/proxy`), REST API (`services/api`) và Worker
  * import trực tiếp mà không phải import chéo giữa các service và không phụ thuộc `experiments/`.
  */
 
+import { GetCommand, QueryCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { db } from './db.js';
-import { keys, type Ctx, type Lang } from './types.js';
+import { stripMarkers } from './markers.js';
+import { AppError, keys, type Ctx, type Lang } from './types.js';
 
 /** Các mã ngôn ngữ ISO 639-1 được hệ thống hỗ trợ trong MVP. */
 export const SUPPORTED_GLOSSARY_LANGUAGES = Object.freeze([
@@ -66,6 +69,52 @@ const defaultReadDeps: GlossaryReadDependencies = {
   now: () => Date.now(),
 };
 
+/**
+ * Tạo hàm `getGlossaryState` gắn với một `DynamoDBDocumentClient` và `tableName` cụ thể
+ * (dùng trong Lambda Proxy, Worker C13 và Realtime API khi khởi tạo từ biến môi trường hoặc mock test).
+ */
+export function createDynamoGlossaryReader(
+  doc: Pick<DynamoDBDocumentClient, 'send'>,
+  tableName: string,
+  opts: { now?: () => number } = {},
+): (ctx: Ctx) => Promise<GlossaryState> {
+  const assertTenant = (ctx: Ctx, pk: string) => {
+    const allowedPrefix = `TENANT#${ctx.tenantId}`;
+    if (!ctx.tenantId || ctx.tenantId === 'PLATFORM' || (pk !== allowedPrefix && !pk.startsWith(`${allowedPrefix}#`))) {
+      throw new AppError('FORBIDDEN', `Bị từ chối: Ctx Tenant (${ctx.tenantId}) không có quyền truy cập PK (${pk})`);
+    }
+  };
+  const customDeps: GlossaryReadDependencies = {
+    now: opts.now ?? (() => Date.now()),
+    db: {
+      async get(ctx, key) {
+        assertTenant(ctx, key.PK);
+        const res = await doc.send(new GetCommand({ TableName: tableName, Key: key }));
+        return (res.Item as Record<string, any> | undefined) ?? null;
+      },
+      async query(ctx, pk, skPrefix) {
+        assertTenant(ctx, pk);
+        const allItems: Record<string, any>[] = [];
+        let exclusiveStartKey: Record<string, any> | undefined;
+        do {
+          const res = await doc.send(
+            new QueryCommand({
+              TableName: tableName,
+              KeyConditionExpression: skPrefix ? 'PK = :pk AND begins_with(SK, :skPrefix)' : 'PK = :pk',
+              ExpressionAttributeValues: skPrefix ? { ':pk': pk, ':skPrefix': skPrefix } : { ':pk': pk },
+              ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+            }),
+          );
+          if (res.Items) allItems.push(...(res.Items as Record<string, any>[]));
+          exclusiveStartKey = res.LastEvaluatedKey as Record<string, any> | undefined;
+        } while (exclusiveStartKey);
+        return allItems;
+      },
+    },
+  };
+  return (ctx: Ctx) => getGlossaryState(ctx, customDeps);
+}
+
 // ============================================================================
 // Bộ nhớ đệm GlossaryState theo (tenantId, version, terminologyName) trong Lambda (60s)
 // ============================================================================
@@ -95,7 +144,7 @@ export function clearGlossaryCache(tenantId?: string): void {
 /** Loại bỏ thẻ HTML và ký hiệu nội tuyến {n} / {/n} hoặc {n/} mà không phụ thuộc experiments/. */
 export function stripTagsAndMarkers(text: string): string {
   if (typeof text !== 'string') return '';
-  return text.replace(/<[^>]*>/g, ' ').replace(/\{\/?\d+\/?\}/g, ' ');
+  return stripMarkers(text.replace(/<[^>]*>/g, ' '));
 }
 
 /** Chuẩn hóa Unicode NFC, gộp khoảng trắng liên tiếp và cắt 2 đầu (giữ nguyên chữ hoa/thường). */

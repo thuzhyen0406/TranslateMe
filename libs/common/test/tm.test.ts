@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
-import { BatchGetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { clearGlossaryCache, createDynamoGlossaryReader } from '../glossary.js';
 import {
   EMPTY_GLOSSARY_STATE,
   TM_BATCH_SIZE,
@@ -117,6 +118,15 @@ describe('isStaleDefault', () => {
   });
   it('không có thuật ngữ -> không lỗi thời', () => {
     assert.equal(isStaleDefault('bất kỳ', 0, EMPTY_GLOSSARY_STATE), false);
+  });
+  it('kiểm tra đúng ranh giới từ Latin (không báo nhầm từ con như "an" trong "ban công") và hỗ trợ CJK (3.9)', () => {
+    const gShort = glossary(3, [
+      { normalized: 'an', type: 'FIXED', sinceVersion: 2 },
+      { normalized: '東京', type: 'KEEP', sinceVersion: 3 },
+    ]);
+    assert.equal(isStaleDefault('Phòng có ban công thanh toán nhanh', 1, gShort), false);
+    assert.equal(isStaleDefault('Chúc quý khách bình an', 1, gShort), true);
+    assert.equal(isStaleDefault('Chuyến bay đi 東京タワー', 2, gShort), true);
   });
 });
 
@@ -392,5 +402,64 @@ describe('createDynamoTmDb', () => {
     assert.equal(cmd.input.TableName, 'translate-data');
     assert.deepEqual(cmd.input.Key, tmKey(ctxA, 'vi', 'en', 'aa'));
     assert.equal(cmd.input.ConditionExpression, 'attribute_not_exists(#label) OR #label = :machine');
+  });
+});
+
+describe('createDynamoGlossaryReader (3.9)', () => {
+  it('đọc CONFIG và phân trang TERM# trên DynamoDBDocumentClient, lưu đệm 60 giây', async () => {
+    clearGlossaryCache(ctxA.tenantId);
+    let queryCalls = 0;
+    let clock = 1_000_000;
+    const doc = {
+      async send(cmd: unknown) {
+        if (cmd instanceof GetCommand) {
+          return { Item: { PK: `TENANT#${ctxA.tenantId}`, SK: 'CONFIG', glossaryVersion: 4, terminologyName: `tm-${ctxA.tenantId}` } };
+        }
+        if (cmd instanceof QueryCommand) {
+          queryCalls++;
+          if (queryCalls === 1) {
+            return {
+              Items: [
+                {
+                  PK: `TENANT#${ctxA.tenantId}#GLOSS`,
+                  SK: 'TERM#homestay abc',
+                  normalized: 'homestay abc',
+                  sourceTerm: 'Homestay ABC',
+                  type: 'KEEP',
+                  sinceVersion: 2,
+                },
+              ],
+              LastEvaluatedKey: { PK: `TENANT#${ctxA.tenantId}#GLOSS`, SK: 'TERM#homestay abc' },
+            };
+          }
+          return {
+            Items: [
+              {
+                PK: `TENANT#${ctxA.tenantId}#GLOSS`,
+                SK: 'TERM#phố cổ hội an',
+                normalized: 'phố cổ hội an',
+                sourceTerm: 'phố cổ Hội An',
+                type: 'FIXED',
+                translations: { en: 'Hoi An Ancient Town' },
+                sinceVersion: 4,
+              },
+            ],
+          };
+        }
+        throw new Error('Unexpected command');
+      },
+    };
+    const readGlossary = createDynamoGlossaryReader(doc as never, 'translate-data', { now: () => clock });
+    const g1 = await readGlossary(ctxA);
+    assert.equal(g1.version, 4);
+    assert.equal(g1.terminologyName, `tm-${ctxA.tenantId}`);
+    assert.equal(g1.terms.length, 2);
+    assert.equal(queryCalls, 2);
+
+    // Trong 60s tiếp theo không cần gọi QueryCommand lại
+    clock += 30_000;
+    const g2 = await readGlossary(ctxA);
+    assert.equal(g2.terms.length, 2);
+    assert.equal(queryCalls, 2);
   });
 });
