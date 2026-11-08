@@ -16,8 +16,9 @@ import { normalize_hash } from '../../../libs/common/text-utils.js';
 import { createDynamoTmDb, createTM, EMPTY_GLOSSARY_STATE, type SentenceWithHash } from '../../../libs/common/tm.js';
 import { AppError, type Ctx } from '../../../libs/common/types.js';
 import { assertTenantWritable } from '../../../libs/common/tenant.js';
+import { contextFromIdTokenClaims } from '../auth/context.js';
 import { CharacterQuotaExceededError, UsageService, type UsageReservation } from '../../../libs/common/usage/usage.js';
-import { createTranslator, type TranslateClientLike } from '../../../libs/common/translator.js';
+import { createTranslator, DEFAULT_TRANSLATE_CONCURRENCY, type TranslateClientLike } from '../../../libs/common/translator.js';
 import { handler as batchIngressHandler } from '../batch/batchIngress.js';
 
 const MAX_TEXT_CHARS = 5000;
@@ -31,7 +32,7 @@ export interface RealtimeEvent {
   rawPath?: string;
   body?: string | null;
   headers?: Record<string, string | undefined>;
-  requestContext?: { requestId?: string; identity?: { apiKeyId?: string }; authorizer?: { keyId?: string; tenantId?: string } };
+  requestContext?: { requestId?: string; identity?: { apiKeyId?: string }; authorizer?: { keyId?: string; tenantId?: string; claims?: Record<string, unknown> } };
 }
 export interface RealtimeResponse { statusCode: number; headers: Record<string, string>; body: string }
 export interface RealtimeDeps {
@@ -39,6 +40,7 @@ export interface RealtimeDeps {
   ddb: Pick<DynamoDBDocumentClient, 'send'>;
   usage: Pick<UsageService, 'reserve' | 'settle' | 'refund'>;
   translate: TranslateClientLike;
+  translateConcurrency?: number;
   detectLanguage: (text: string) => Promise<{ language?: string; confidence?: number }>;
   getGlossaryState?: (ctx: Ctx) => Promise<GlossaryState>;
   now?: () => Date;
@@ -50,7 +52,7 @@ export interface RealtimeDeps {
  * @returns Phản hồi HTTP gồm status, headers và body.
  */
 export function realtimeJson(statusCode: number, payload: Record<string, unknown>): RealtimeResponse {
-  return { statusCode, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }, body: JSON.stringify(payload) };
+  return { statusCode, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'Authorization,Content-Type', 'access-control-allow-methods': 'POST,OPTIONS' }, body: JSON.stringify(payload) };
 }
 
 /**
@@ -89,8 +91,13 @@ function truncateUtf8(text: string, maxBytes: number): string {
  * @param deps Các phụ thuộc dịch vụ, bao gồm tên bảng và DynamoDB.
  * @returns Tenant ID và key ID đã xác thực; các trường không có nếu xác thực thất bại.
  */
-async function resolveTenant(event: RealtimeEvent, deps: RealtimeDeps): Promise<{ tenantId?: string; keyId?: string }> {
+async function resolveTenant(event: RealtimeEvent, deps: RealtimeDeps): Promise<{ tenantId?: string; keyId?: string; ctx?: Ctx }> {
   const context = event.requestContext?.authorizer;
+  if (context?.claims) {
+    const requestId = event.requestContext?.requestId ?? `req-${randomUUID()}`;
+    const ctx = await contextFromIdTokenClaims(context.claims, requestId);
+    return { tenantId: ctx.tenantId, ctx };
+  }
   if (context?.tenantId && context.keyId) return { tenantId: context.tenantId, keyId: context.keyId };
   const keyId = context?.keyId ?? event.requestContext?.identity?.apiKeyId;
   if (!keyId) return {};
@@ -173,8 +180,8 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
     const requestId = event.requestContext?.requestId ?? `req-${randomUUID()}`;
     try {
       const auth = await resolveTenant(event, deps);
-      if (!auth.tenantId || !auth.keyId) return apiError(401, 'UNAUTHORIZED', 'API key không hợp lệ hoặc không được cung cấp.', requestId);
-      const ctx: Ctx = { tenantId: auth.tenantId, via: 'KEYMAP', requestId, keyId: auth.keyId };
+      if (!auth.tenantId || (!auth.keyId && !auth.ctx)) return apiError(401, 'UNAUTHORIZED', 'API key hoặc phiên đăng nhập không hợp lệ.', requestId);
+      const ctx: Ctx = auth.ctx ?? { tenantId: auth.tenantId, via: 'KEYMAP', requestId, keyId: auth.keyId };
       await assertTenantWritable(ctx, {
         async get(_ctx, key) {
           const result = await deps.ddb.send(new GetCommand({
@@ -238,7 +245,8 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
       const reserved = misses.reduce((sum, sentence) => sum + Array.from(sentence.text).length, 0);
       let reservation: UsageReservation;
       try {
-        reservation = await deps.usage.reserve({ tenantId: auth.tenantId, requestId, n: reserved, source: { kind: 'API', keyId: auth.keyId }, now: date });
+        const source = ctx.via === 'JWT' ? { kind: 'CONSOLE' as const } : { kind: 'API' as const, keyId: auth.keyId! };
+        reservation = await deps.usage.reserve({ tenantId: auth.tenantId, requestId, n: reserved, source, now: date });
       }
       catch (error) {
         if (error instanceof CharacterQuotaExceededError) return apiError(429, 'CHAR_QUOTA_EXCEEDED', 'Tenant đã dùng hết hạn mức ký tự của tháng.', requestId);
@@ -254,8 +262,10 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
             sentences: misses.map(({ id, text }) => ({ id, text })),
             terminologyName: useTerminology ? glossary.terminologyName : null,
             deadlineAt: Date.now() + 25_000,
-            concurrency: 4,
+            concurrency: deps.translateConcurrency ?? DEFAULT_TRANSLATE_CONCURRENCY,
           });
+          const throttleFailure = translated.failed.find(({ reason }) => reason === 'ThrottlingException' || reason === 'TooManyRequestsException');
+          if (throttleFailure) throw Object.assign(new Error(throttleFailure.reason), { name: 'TranslateThrottleError' });
           if (translated.pending.length || translated.failed.length || translated.translated.length !== misses.length) {
             throw new Error('TRANSLATE_INCOMPLETE');
           }
@@ -318,6 +328,9 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
       return realtimeJson(200, { request_id: requestId, source_lang: sourceLang, source_lang_detected: detected, ...(detected ? { detection_confidence: confidence } : {}), target_lang: body.target_lang, translated_text: translatedText, characters_machine_translated: machineChars, characters_from_memory: memoryChars, terminology_version: glossary.version, ...(warnings.length ? { warnings } : {}) });
     } catch (error) {
       if (error instanceof SyntaxError) return apiError(400, 'INVALID_REQUEST', 'JSON không hợp lệ.', requestId);
+      if ((error as { name?: string })?.name === 'TranslateThrottleError') {
+        return apiError(503, 'TRANSLATE_THROTTLED', 'Dịch vụ dịch đang giới hạn tốc độ; hãy giảm concurrency rồi thử lại.', requestId);
+      }
       if (error instanceof AppError) {
         const status = error.code === 'UNAUTHORIZED' ? 401
           : error.code === 'PERMISSION_DENIED' ? 403
@@ -347,11 +360,16 @@ export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> | Retur
   ) as DynamoDBDocumentClient;
   const comprehend = new ComprehendClient({});
   const translate = new TranslateClient({ maxAttempts: 3 });
+  const configuredConcurrency = Number(process.env.TRANSLATE_CONCURRENCY);
+  const translateConcurrency = Number.isSafeInteger(configuredConcurrency) && configuredConcurrency > 0
+    ? configuredConcurrency
+    : DEFAULT_TRANSLATE_CONCURRENCY;
   return createRealtimeHandler({
     tableName,
     ddb,
     usage: new UsageService(ddb, { tableName }),
     translate,
+    translateConcurrency,
     getGlossaryState: createDynamoGlossaryReader(ddb, tableName),
     detectLanguage: async (text) => {
       const result = await comprehend.send(new DetectDominantLanguageCommand({ Text: truncateUtf8(text, 5000) }));
