@@ -1,4 +1,9 @@
 {
+  "name": "translateme-root",
+  "private": true,
+  "scripts": {
+    "test:ssrf": "npm --prefix libs/common run test:ssrf"
+  },
   "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^18.0.9",
