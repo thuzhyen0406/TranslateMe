@@ -95,7 +95,7 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: !Sub '${BatchUploadBucketArn}/batch/*/input/*'
+                Resource: !Sub '${BatchUploadBucketArn}/batch/*/*'
               - Sid: TenantBatchUploadKmsAccess
                 Effect: Allow
                 Action:
@@ -287,6 +287,10 @@ Resources:
                 Effect: Allow
                 Action: comprehend:DetectDominantLanguage
                 Resource: '*'
+              - Sid: StartBatchExecution
+                Effect: Allow
+                Action: states:StartExecution
+                Resource: !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:translateme-${StageName}-batch'
 
   PlatformApiExecutionRole:
     Type: AWS::IAM::Role

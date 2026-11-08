@@ -39,7 +39,9 @@ function setup(options: {
   const downloadedBytes = options.objectBytes ?? bytes;
   const configKey = keys.config(ctx);
   if (!options.missingConfig) {
-    records.set(`${configKey.PK}|${configKey.SK}`, { ...configKey, status: options.status ?? 'ACTIVE', charLimit: options.charLimit ?? 1000 });
+    records.set(`${configKey.PK}|${configKey.SK}`, { ...configKey, status: options.status ?? 'ACTIVE', charLimit: options.charLimit ?? 1000, ownerSub: 'owner-1' });
+    const ownerKey = keys.member(ctx, 'owner-1');
+    records.set(`${ownerKey.PK}|${ownerKey.SK}`, { ...ownerKey, userSub: 'owner-1', email: 'owner@example.com' });
   }
   const s3: BatchObjectStore = {
     async signPut(input) {
@@ -98,6 +100,7 @@ function setup(options: {
     usage,
     s3,
     bucket: 'translateme-batch-test',
+    startExecution: async ({ name, input }) => ({ executionArn: `arn:aws:states:test:execution:batch:${name}` }),
     resolveTenant: async () => {
       if (options.resolveTenantError) throw options.resolveTenantError;
       return options.tenant === undefined ? ctx : options.tenant;
@@ -191,7 +194,8 @@ describe('batch upload ingress', () => {
     assert.equal(job?.done, 0);
     assert.equal(job?.failed, 0);
     assert.equal(job?.estimatedCharacters, jobResponse.payload.estimated_characters);
-    assert.equal(job?.usageReservation?.reservedChars, job?.estimatedCharacters);
+    assert.equal(job?.usageReservation, undefined);
+    assert.deepEqual(job?.usageSource, { kind: 'API', keyId: 'key-a' });
     assert.equal(job?.ttl, Math.floor(NOW.getTime() / 1000) + 7 * 86400);
     assert.equal(h.reservations.length, 1);
     assert.equal(h.reservations[0].tenantId, 'tenant-a');
@@ -462,7 +466,7 @@ describe('batch upload ingress', () => {
     const responses = await Promise.all([submit(), submit()]);
 
     assert.deepEqual(responses.map((response) => response.statusCode).sort(), [202, 429]);
-    assert.equal(h.getReservedCharacters(), 5);
+    assert.equal(h.getReservedCharacters(), 0);
     assert.equal([...h.records.values()].filter((item) => item.entityType === 'JOB').length, 1);
   });
 
@@ -476,7 +480,7 @@ describe('batch upload ingress', () => {
     assert.equal([...h.records.values()].some((item) => item.entityType === 'JOB'), false);
   });
 
-  it('refunds the quota reservation if the shared job record cannot be created', async () => {
+  it('releases the quota preflight if the shared job record cannot be created', async () => {
     const h = setup({ failJobWrite: true });
     const upload = await request(h, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: h.bytes.length });
     const failed = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
@@ -485,8 +489,8 @@ describe('batch upload ingress', () => {
     assert.equal([...h.records.values()].some((item) => item.entityType === 'JOB'), false);
   });
 
-  it('logs a failed quota refund without exposing the underlying error', async () => {
-    const h = setup({ failJobWrite: true, failRefund: true });
+  it('logs a failed quota preflight refund without exposing the underlying error', async () => {
+    const h = setup({ failRefund: true });
     const upload = await createUpload(h);
     const previousError = console.error;
     const logLines: string[] = [];
@@ -502,7 +506,7 @@ describe('batch upload ingress', () => {
     assert.equal(h.getReservedCharacters(), h.reservations[0].n);
     assert.equal(logLines.length, 1);
     const log = JSON.parse(logLines[0]) as Record<string, unknown>;
-    assert.equal(log.event, 'BATCH_USAGE_RESERVATION_REFUND_FAILED');
+    assert.equal(log.event, 'BATCH_PREFLIGHT_REFUND_FAILED');
     assert.equal(log.request_id, ctx.requestId);
     assert.equal(log.errorName, 'Error');
     assert.equal(logLines[0].includes('DynamoDB refund unavailable'), false);
