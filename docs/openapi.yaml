@@ -257,11 +257,14 @@ paths:
         
         #### Hợp đồng API thực tế (khớp chính xác với handler `services/api/translate/batchUpload.ts`):
         - **Tham số đầu vào**: Nhận `fileName` (chuỗi tên tệp gồm đuôi) và `contentType` (chuỗi MIME type).
-        - **Định dạng được hỗ trợ**: Hệ thống chấp nhận các đuôi tệp `.txt`, `.csv`, `.json`, `.xlsx` với các Content-Type tương ứng:
-          - `text/plain` (.txt)
-          - `text/csv` (.csv)
-          - `application/json` (.json)
-          - `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` (.xlsx)
+        - **Quy tắc kiểm tra định dạng của handler**:
+          - `fileName`: Phần mở rộng (extension) phải thuộc danh sách cho phép: `.txt`, `.csv`, `.json`, `.xlsx`.
+          - `contentType`: Phải thuộc danh sách MIME type cho phép:
+            - `text/plain`
+            - `text/csv`
+            - `application/json`
+            - `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+          - *Lưu ý về kiểm duyệt*: Handler kiểm tra độc lập `fileName` và `contentType` theo 2 danh sách hợp lệ riêng biệt (chưa thực hiện so khớp cặp bắt buộc 1-1 giữa phần mở rộng và MIME type). Client được khuyến nghị gửi đúng MIME type tương ứng với tệp.
         - **Dữ liệu trả về**: Trả về `uploadId`, `bucket`, `key` (dạng `batch/{tenantId}/{uploadId}/{fileName}`), `method: "PUT"`, `expiresIn: 900` (15 phút) và `url` (Presigned S3 URL).
         - Client dùng `url` nhận được để `PUT` tệp trực tiếp lên Amazon S3, không truyền file qua Lambda.
         
@@ -707,7 +710,9 @@ components:
           example: "danh-sach-cau.csv"
         contentType:
           type: string
-          description: Chuỗi MIME type hợp lệ tương ứng với đuôi tệp
+          description: |
+            Chuỗi MIME type nằm trong danh sách cho phép (text/plain, text/csv, application/json, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet).
+            Handler hiện tại kiểm tra danh sách này độc lập với phần mở rộng của fileName.
           enum:
             - text/plain
             - text/csv
