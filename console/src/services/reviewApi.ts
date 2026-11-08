@@ -280,6 +280,91 @@ export function normalizeInvalidationPollStatus(rawStatus: unknown): 'InProgress
 }
 
 /**
+ * Trích xuất danh sách tất cả các mã invalidation ID duy nhất từ InvalidationOutcome.
+ */
+export function extractInvalidationIds(invalidation?: Partial<InvalidationOutcome> | null): string[] {
+  if (!invalidation) return [];
+  const set = new Set<string>();
+  if (Array.isArray(invalidation.invalidationIds)) {
+    for (const id of invalidation.invalidationIds) {
+      if (typeof id === 'string' && id.trim()) {
+        set.add(id.trim());
+      }
+    }
+  }
+  if (typeof invalidation.invalidationId === 'string' && invalidation.invalidationId.trim()) {
+    set.add(invalidation.invalidationId.trim());
+  }
+  return [...set];
+}
+
+export type BatchInvalidationStatus = 'InProgress' | 'Completed' | 'Failed';
+
+export interface BatchInvalidationCheckResult {
+  status: BatchInvalidationStatus;
+  completedIds: string[];
+  inProgressIds: string[];
+  failedIds: string[];
+}
+
+export interface InvalidationStatusChecker {
+  checkInvalidationStatus(
+    invalidationId: string,
+  ): Promise<{ status: unknown; invalidationId?: string }>;
+}
+
+/**
+ * Thăm dò trạng thái cho một nhóm nhiều Invalidation ID.
+ *  - Trả về 'Failed' nếu có bất kỳ ID nào thất bại;
+ *  - Chỉ trả về 'Completed' khi tất cả các ID đều đã hoàn tất;
+ *  - Trả về 'InProgress' nếu chưa có lỗi và vẫn còn ít nhất một ID đang chạy.
+ */
+export async function checkMultipleInvalidationsStatus(
+  api: InvalidationStatusChecker,
+  invalidationIds: readonly string[],
+): Promise<BatchInvalidationCheckResult> {
+  const uniqueIds = [...new Set(invalidationIds.filter((id) => typeof id === 'string' && id.trim()))];
+  if (uniqueIds.length === 0) {
+    return {
+      status: 'Completed',
+      completedIds: [],
+      inProgressIds: [],
+      failedIds: [],
+    };
+  }
+
+  const results = await Promise.all(
+    uniqueIds.map(async (id) => {
+      try {
+        const res = await api.checkInvalidationStatus(id);
+        return {
+          id,
+          status: normalizeInvalidationPollStatus(res.status),
+        };
+      } catch {
+        return {
+          id,
+          status: 'InProgress' as const,
+        };
+      }
+    }),
+  );
+
+  const completedIds = results.filter((r) => r.status === 'Completed').map((r) => r.id);
+  const failedIds = results.filter((r) => r.status === 'Failed').map((r) => r.id);
+  const inProgressIds = results.filter((r) => r.status === 'InProgress').map((r) => r.id);
+
+  let status: BatchInvalidationStatus = 'InProgress';
+  if (failedIds.length > 0) {
+    status = 'Failed';
+  } else if (inProgressIds.length === 0) {
+    status = 'Completed';
+  }
+
+  return { status, completedIds, inProgressIds, failedIds };
+}
+
+/**
  * Số lần polling tối đa cho một yêu cầu xóa cache CloudFront (~3.5 phút với khoảng cách thưa dần).
  */
 export const MAX_INVALIDATION_POLL_ATTEMPTS = 25;

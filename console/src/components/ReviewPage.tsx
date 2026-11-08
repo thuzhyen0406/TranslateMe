@@ -9,6 +9,8 @@ import {
   createMockReviewApi,
   reviewErrorMessage,
   MAX_INVALIDATION_POLL_ATTEMPTS,
+  checkMultipleInvalidationsStatus,
+  extractInvalidationIds,
   getInvalidationPollIntervalMs,
   validatePlaceholders,
   type MockReviewApi,
@@ -245,9 +247,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
   }, []);
 
   const startPolling = useCallback(
-    (hash: string, invalidation: InvalidationOutcome) => {
-      const invId = invalidation.invalidationId ?? invalidation.invalidationIds[0];
-      if (!invId) return;
+    (hash: string, invalidation: InvalidationOutcome, initialPendingIds?: string[]) => {
+      const allIds = extractInvalidationIds(invalidation);
+      if (allIds.length === 0) return;
 
       const existingTimer = activePollersRef.current.get(hash);
       if (existingTimer) {
@@ -261,26 +263,32 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       }));
 
       let attempts = 0;
+      let pendingIds = initialPendingIds && initialPendingIds.length > 0 ? [...initialPendingIds] : [...allIds];
 
       const runPoll = () => {
         attempts++;
-        void api
-          .checkInvalidationStatus(invId)
-          .then((st) => {
-            if (st.status === 'Completed') {
-              activePollersRef.current.delete(hash);
-              setCacheStatusByHash((prev) => ({
-                ...prev,
-                [hash]: { state: 'COMPLETED', outcome: invalidation },
-              }));
-            } else if (st.status === 'Failed') {
+        void checkMultipleInvalidationsStatus(api, pendingIds)
+          .then((batch) => {
+            pendingIds = batch.inProgressIds;
+
+            if (batch.status === 'Failed') {
               activePollersRef.current.delete(hash);
               setCacheStatusByHash((prev) => ({
                 ...prev,
                 [hash]: {
                   state: 'FAILED',
-                  outcome: { ...invalidation, status: 'FAILED', error: 'Làm mới bộ nhớ đệm CloudFront thất bại' },
+                  outcome: {
+                    ...invalidation,
+                    status: 'FAILED',
+                    error: 'Làm mới bộ nhớ đệm CloudFront thất bại ở một hoặc nhiều phân vùng.',
+                  },
                 },
+              }));
+            } else if (batch.status === 'Completed' || pendingIds.length === 0) {
+              activePollersRef.current.delete(hash);
+              setCacheStatusByHash((prev) => ({
+                ...prev,
+                [hash]: { state: 'COMPLETED', outcome: invalidation },
               }));
             } else if (attempts >= MAX_INVALIDATION_POLL_ATTEMPTS) {
               activePollersRef.current.delete(hash);
@@ -352,8 +360,8 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
 
   const handleCheckInvalidationAgain = async (item: ReviewSentenceItem, outcome?: InvalidationOutcome) => {
     if (!outcome) return;
-    const invId = outcome.invalidationId ?? outcome.invalidationIds[0];
-    if (!invId) return;
+    const invIds = extractInvalidationIds(outcome);
+    if (invIds.length === 0) return;
 
     setErrorMessage(null);
     setCacheStatusByHash((prev) => ({
@@ -362,23 +370,27 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     }));
 
     try {
-      const st = await api.checkInvalidationStatus(invId);
-      if (st.status === 'Completed') {
+      const batch = await checkMultipleInvalidationsStatus(api, invIds);
+      if (batch.status === 'Completed') {
         setCacheStatusByHash((prev) => ({
           ...prev,
           [item.hash]: { state: 'COMPLETED', outcome },
         }));
         setSuccessMessage('Làm mới bộ nhớ đệm CloudFront đã hoàn tất.');
-      } else if (st.status === 'Failed') {
+      } else if (batch.status === 'Failed') {
         setCacheStatusByHash((prev) => ({
           ...prev,
           [item.hash]: {
             state: 'FAILED',
-            outcome: { ...outcome, status: 'FAILED', error: 'Làm mới bộ nhớ đệm CloudFront thất bại' },
+            outcome: {
+              ...outcome,
+              status: 'FAILED',
+              error: 'Làm mới bộ nhớ đệm CloudFront thất bại ở một hoặc nhiều phân vùng.',
+            },
           },
         }));
       } else {
-        startPolling(item.hash, outcome);
+        startPolling(item.hash, outcome, batch.inProgressIds);
       }
     } catch {
       startPolling(item.hash, outcome);
