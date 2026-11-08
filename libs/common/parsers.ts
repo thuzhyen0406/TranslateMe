@@ -101,30 +101,9 @@ export interface FormatParser {
   rebuild(skeleton: Skeleton, translations: readonly (string | null | undefined)[], opts: RebuildOptions): { bytes: Uint8Array; stats: RebuildStats };
 }
 
-export const MAX_FILE_BYTES = 10 * 1024 * 1024;
-
-/** Đếm code point sau NFC, bỏ marker nội bộ và gộp khoảng trắng như quy ước tính quota. */
+/** Đếm code point sau NFC, bỏ marker và chuẩn hóa khoảng trắng. */
 export function countChars(text: string): number {
   return Array.from(stripMarkers(text).normalize('NFC').replace(/\s+/gu, ' ').trim()).length;
-}
-
-/** Định dạng không hỗ trợ (hoặc chưa cắm vào) */
-export class UnsupportedFormat extends Error {
-  override name = 'UnsupportedFormat';
-  constructor(public format: string) {
-    super(`Định dạng không hỗ trợ: ${format}`);
-  }
-}
-
-/** Tệp hỏng hoặc vi phạm giới hạn; reason dùng làm lý do FAILED của JOB */
-export class CorruptFile extends Error {
-  override name = 'CorruptFile';
-  constructor(
-    public reason: 'NOT_UTF8' | 'TOO_LARGE' | 'INVALID_SKELETON' | string,
-    message: string,
-  ) {
-    super(message);
-  }
 }
 
 const UTF8_BOM = '﻿';

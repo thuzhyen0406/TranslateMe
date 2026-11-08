@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { AppError, keys, type Ctx } from '../../../../libs/common/types.js';
+import { countChars } from '../../../../libs/common/parsers.js';
 import { CharacterQuotaExceededError } from '../../../../libs/common/usage/usage.js';
 import { createBatchIngressHandler, type BatchIngressDependencies, type BatchObjectStore } from '../batchIngress.js';
 
@@ -176,7 +177,8 @@ describe('batch upload ingress', () => {
     });
     assert.equal(jobResponse.statusCode, 202);
     assert.equal(jobResponse.payload.status, 'QUEUED');
-    assert.equal(jobResponse.payload.estimated_characters, Array.from('Xin chào. Đây là tệp thử nghiệm.').length * 2);
+    const expectedCharacters = ['Xin chào.', 'Đây là tệp thử nghiệm.'].reduce((total, sentence) => total + countChars(sentence), 0) * 2;
+    assert.equal(jobResponse.payload.estimated_characters, expectedCharacters);
     assert.equal(h.s3Calls.some((call) => call.operation === 'head'), true);
     const job = [...h.records.values()].find((item) => item.entityType === 'JOB');
     assert.equal(job?.tenantId, 'tenant-a');

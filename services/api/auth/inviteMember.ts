@@ -177,7 +177,7 @@ export async function inviteMember(
 
   const userSub = output.User?.Attributes?.find((a) => a.Name === 'sub')?.Value?.trim();
   if (!userSub) {
-    const missingSub = new AppError('INTERNAL_ERROR', 'Cognito khÃ´ng tráº£ vá» sub; khÃ´ng thá»ƒ táº¡o báº£n ghi MEMBER.');
+    const missingSub = new AppError('INTERNAL_ERROR', 'Cognito không trả về sub; không thể tạo bản ghi MEMBER.');
     await compensateCognitoUser(cleanTenantId, userPoolId, output.User?.Username ?? cleanEmail, deps.requestId ?? 'invite-member', deps, missingSub);
     throw missingSub;
   }

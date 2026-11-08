@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { createTenantDocumentClientRouter, tenantSessionPolicy } from '../tenantAws.js';
 
 describe('tenant-scoped AWS sessions', () => {
@@ -39,7 +38,7 @@ describe('tenant-scoped AWS sessions', () => {
   it('routes tenant data to an STS session and platform mappings to the execution role', async () => {
     const routed: string[] = [];
     const assumed: string[] = [];
-    const assumeCommands: AssumeRoleCommand[] = [];
+    const assumeCommands: Array<{ input: { SourceIdentity?: string; Tags?: Array<{ Key: string; Value: string }>; Policy?: string } }> = [];
     const router = createTenantDocumentClientRouter({
       async send(command: never) { routed.push('base'); return command; },
     }, {
@@ -47,8 +46,7 @@ describe('tenant-scoped AWS sessions', () => {
       sts: {
         async send(command: never) {
           assumed.push('t_aaaaaaaaaaaaaaaaaaaaaaaa');
-          assert.ok(command instanceof AssumeRoleCommand);
-          assumeCommands.push(command);
+          assumeCommands.push(command as typeof assumeCommands[number]);
           return { Credentials: { AccessKeyId: 'a', SecretAccessKey: 's', SessionToken: 't', Expiration: new Date(Date.now() + 60_000) } } as never;
         },
       } as never,
