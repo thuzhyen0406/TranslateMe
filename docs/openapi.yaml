@@ -1,0 +1,1024 @@
+openapi: 3.0.3
+info:
+  title: TranslateMe API Specification (Developer Interface)
+  version: 1.1.0
+  description: |
+    Tài liệu đặc tả kỹ thuật chính thức cho nhóm giao diện **Translate API (`/translate/*`)** của nền tảng **TranslateMe**, phục vụ tích hợp cho các ứng dụng của Developer (F9, F10, F11).
+    
+    ### Nguyên tắc thiết kế & Quy chuẩn an toàn (QC-2, QC-3, QC-9, QC-17)
+    - **Xác thực API Key**: Mọi yêu cầu bắt buộc phải truyền header `x-api-key`. Hệ thống phân giải `tenantId` độc quyền qua cấu hình IAM/DynamoDB Keymap (QC-3), không nhận `tenantId` từ client.
+    - **Mã lỗi tập trung (QC-2 & Bảng 2.10)**: Mã lỗi kỹ thuật dạng chuỗi UPPERCASE giữ nguyên không dịch; phần `message` giải thích rõ ràng bằng tiếng Việt thân thiện, không bao giờ để lộ dữ liệu người dùng khác.
+    - **Cô lập dữ liệu Tenant (QC-17)**: Truy vấn tài nguyên (công việc batch, tệp...) thuộc tenant khác trả về `404 NOT_FOUND` giống hệt tài nguyên không tồn tại, tuyệt đối không trả `403` nhằm chống quét ID.
+    - **Bảo mật nhật ký (QC-9)**: Không bao giờ in nội dung văn bản, bản dịch hoặc giá trị API key thật vào log hệ thống.
+    - **Gói cước & Hạn mức (F7, F11)**: Yêu cầu chịu sự kiểm soát của tốc độ yêu cầu (Rate Limit), hạn ngạch cuộc gọi (Usage Plan) và hạn mức ký tự dịch theo tháng (Character Quota).
+  contact:
+    name: TranslateMe Engineering Team (Nhóm 03 - INT3319_1)
+    email: support@translateme.example.com
+servers:
+  - url: https://api.translateme.example.com
+    description: Máy chủ API Production (API Gateway CloudFront Alias)
+  - url: https://{apiId}.execute-api.ap-southeast-1.amazonaws.com/{stage}
+    description: Máy chủ API AWS API Gateway trực tiếp
+    variables:
+      apiId:
+        default: abc123xyz
+        description: Mã định danh REST API Gateway
+      stage:
+        default: dev
+        enum:
+          - dev
+          - staging
+          - prod
+        description: Môi trường triển khai
+  - url: http://localhost:3000
+    description: Máy chủ kiểm thử cục bộ (Local Mock / SAM Local)
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /translate/realtime:
+    post:
+      summary: Dịch văn bản thời gian thực (Realtime Translation - F9)
+      description: |
+        Dịch đoạn văn bản ngắn (tối đa 5.000 ký tự) tức thời. Hệ thống tự động:
+        1. Phân tách câu theo chuẩn ngữ pháp và chuẩn hóa NFC (F2, `translateme-core`).
+        2. Tra cứu Bộ nhớ dịch (**Translation Memory - TM**) của tenant để tái sử dụng bản dịch cũ.
+        3. Áp dụng Bảng thuật ngữ chuyên ngành (**Glossary**) đồng bộ theo phiên bản mới nhất (`terminology_version`).
+        4. Tự động nhận diện ngôn ngữ nguồn qua Amazon Comprehend nếu không truyền `source_lang` (độ tin cậy ≥ 0,70).
+        5. Đặt trước hạn mức ký tự (`reserveChars`), gọi dịch máy qua Amazon Translate với các câu trượt TM và hạch toán chính xác (`settleUsage`).
+        
+        #### Ví dụ gọi qua cURL (Có chỉ định ngôn ngữ nguồn):
+        ```bash
+        curl -X POST "https://api.translateme.example.com/translate/realtime" \
+          -H "Content-Type: application/json" \
+          -H "x-api-key: tm_live_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6" \
+          -d '{
+            "text": "Phòng có ban công nhìn ra sông Hoài và trang bị máy lạnh.",
+            "source_lang": "vi",
+            "target_lang": "en",
+            "use_terminology": true
+          }'
+        ```
+        
+        #### Ví dụ gọi qua cURL (Tự động nhận diện ngôn ngữ nguồn):
+        ```bash
+        curl -X POST "https://api.translateme.example.com/translate/realtime" \
+          -H "Content-Type: application/json" \
+          -H "x-api-key: tm_live_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6" \
+          -d '{
+            "text": "The hotel offers free breakfast and high-speed Wi-Fi.",
+            "target_lang": "vi"
+          }'
+        ```
+      operationId: translateRealtime
+      requestBody:
+        required: true
+        description: Dữ liệu văn bản nguồn và cấu hình dịch thuật
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RealtimeTranslateRequest'
+            examples:
+              withSourceLang:
+                summary: Yêu cầu có source_lang chỉ định sẵn
+                value:
+                  text: "Phòng có ban công nhìn ra sông Hoài."
+                  source_lang: "vi"
+                  target_lang: "en"
+                  use_terminology: true
+              autoDetectSourceLang:
+                summary: Yêu cầu tự động nhận diện ngôn ngữ nguồn
+                value:
+                  text: "Welcome to Hoi An Ancient Town!"
+                  target_lang: "vi"
+                  use_terminology: true
+      responses:
+        '200':
+          description: Dịch văn bản thành công. Trả về kết quả dịch kèm số liệu thống kê TM/máy dịch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RealtimeTranslateResponse'
+              examples:
+                fromMemory:
+                  summary: Câu dịch trúng 100% Bộ nhớ dịch (0 ký tự dịch máy)
+                  value:
+                    request_id: "req-5f2c1a9e"
+                    source_lang: "vi"
+                    source_lang_detected: false
+                    target_lang: "en"
+                    translated_text: "The room has a balcony overlooking the Hoai River."
+                    characters_machine_translated: 0
+                    characters_from_memory: 36
+                    terminology_version: 7
+                withAutoDetection:
+                  summary: Dịch có tự động nhận diện ngôn ngữ nguồn
+                  value:
+                    request_id: "req-8b1e4c3d"
+                    source_lang: "en"
+                    source_lang_detected: true
+                    detection_confidence: 0.99
+                    target_lang: "vi"
+                    translated_text: "Chào mừng bạn đến với Phố cổ Hội An!"
+                    characters_machine_translated: 33
+                    characters_from_memory: 0
+                    terminology_version: 7
+        '400':
+          description: |
+            Yêu cầu không hợp lệ. Các mã lỗi có thể trả về:
+            - `INVALID_REQUEST`: Thiếu trường bắt buộc, JSON sai cú pháp hoặc kiểu dữ liệu không đúng.
+            - `UNSUPPORTED_LANGUAGE`: Mã ngôn ngữ `target_lang` hoặc `source_lang` không nằm trong danh sách hỗ trợ.
+            - `TEXT_TOO_LONG`: Độ dài văn bản vượt quá giới hạn thiết kế 5.000 ký tự.
+            - `LANGUAGE_NOT_DETECTED`: Điểm tin cậy nhận diện ngôn ngữ của Amazon Comprehend < 0,70 hoặc phát hiện ngôn ngữ không hỗ trợ.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                textTooLong:
+                  summary: Lỗi vượt quá 5.000 ký tự (TEXT_TOO_LONG)
+                  value:
+                    request_id: "req-9c8a7b6d"
+                    error:
+                      code: "TEXT_TOO_LONG"
+                      message: "Văn bản vượt quá 5.000 ký tự. Vui lòng sử dụng tính năng dịch tệp hàng loạt (/translate/batch)."
+                unsupportedLang:
+                  summary: Lỗi mã ngôn ngữ ngoài danh sách (UNSUPPORTED_LANGUAGE)
+                  value:
+                    request_id: "req-1a2b3c4d"
+                    error:
+                      code: "UNSUPPORTED_LANGUAGE"
+                      message: "Mã ngôn ngữ không được hỗ trợ. Vui lòng kiểm tra mã ngôn ngữ theo chuẩn ISO 639-1."
+                languageNotDetected:
+                  summary: Lỗi không nhận diện được ngôn ngữ (LANGUAGE_NOT_DETECTED)
+                  value:
+                    request_id: "req-2b3c4d5e"
+                    error:
+                      code: "LANGUAGE_NOT_DETECTED"
+                      message: "Không nhận diện được ngôn ngữ nguồn với độ tin cậy từ 0,70. Vui lòng truyền source_lang cụ thể."
+        '401':
+          description: |
+            Không có quyền truy cập (`UNAUTHORIZED`). Phát sinh do thiếu header `x-api-key`, API key sai cú pháp hoặc khóa đã bị thu hồi.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-unauth-001"
+                error:
+                  code: "UNAUTHORIZED"
+                  message: "API key không hợp lệ hoặc không được cung cấp."
+        '403':
+          description: |
+            Từ chối quyền truy cập do tổ chức bị khóa (`TENANT_SUSPENDED`). Khi tenant bị Platform Admin tạm ngừng dịch vụ, mọi thao tác tiêu tốn hạn mức đều bị chặn.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-suspended-001"
+                error:
+                  code: "TENANT_SUSPENDED"
+                  message: "Tổ chức của bạn đang bị tạm khóa. Vui lòng liên hệ Quản trị viên hệ thống."
+        '404':
+          description: |
+            Không tìm thấy tài nguyên (`NOT_FOUND`). Xảy ra khi cấu hình tenant của API key chưa được kích hoạt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-404-001"
+                error:
+                  code: "NOT_FOUND"
+                  message: "Không tìm thấy tài nguyên hoặc cấu hình tổ chức."
+        '429':
+          description: |
+            Vượt ngưỡng giới hạn gọi API. Có 3 trường hợp theo quy ước QC-2:
+            - `RATE_LIMITED`: Vượt quá số lượng yêu cầu mỗi giây (TPS) của gói cước API (Usage Plan Throttling).
+            - `REQUEST_QUOTA_EXCEEDED`: Vượt quá tổng số yêu cầu gọi API cho phép trong chu kỳ tháng của gói.
+            - `CHAR_QUOTA_EXCEEDED`: Hết hạn mức ký tự dịch máy trong tháng của tenant. (Lưu ý: Nếu mọi câu đều có trong TM thì yêu cầu vẫn trả về 200 OK thành công).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                charQuotaExceeded:
+                  summary: Hết hạn mức ký tự tháng (CHAR_QUOTA_EXCEEDED)
+                  value:
+                    request_id: "req-quota-char-01"
+                    error:
+                      code: "CHAR_QUOTA_EXCEEDED"
+                      message: "Tổ chức đã dùng hết hạn mức ký tự của tháng. Hãy nâng cấp gói dịch vụ để tiếp tục."
+                rateLimited:
+                  summary: Vượt tốc độ gọi yêu cầu (RATE_LIMITED)
+                  value:
+                    request_id: "req-throttle-01"
+                    error:
+                      code: "RATE_LIMITED"
+                      message: "Vượt tốc độ yêu cầu của gói API. Vui lòng giãn cách thời gian giữa các lần gọi."
+                requestQuotaExceeded:
+                  summary: Hết hạn ngạch số lần gọi (REQUEST_QUOTA_EXCEEDED)
+                  value:
+                    request_id: "req-quota-req-01"
+                    error:
+                      code: "REQUEST_QUOTA_EXCEEDED"
+                      message: "Hết hạn ngạch số yêu cầu của gói API trong kỳ."
+        '500':
+          description: |
+            Lỗi máy chủ nội bộ tạm thời (`INTERNAL_ERROR`). Xảy ra khi dịch vụ DynamoDB, Translate hoặc Lambda gặp sự cố kết nối. Client nên thực hiện cơ chế gửi lại có thời gian chờ tăng dần (Exponential Backoff).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-err-500"
+                error:
+                  code: "INTERNAL_ERROR"
+                  message: "Lỗi tạm thời phía hệ thống. Vui lòng thử lại sau giây lát."
+
+  /translate/batch/upload-url:
+    post:
+      summary: Lấy URL tải tệp dịch hàng loạt (Get Presigned Upload URL - F10 Bước 1)
+      description: |
+        Tạo địa chỉ tải lên có chữ ký (**Amazon S3 Presigned URL**) cho phương thức `PUT`.
+        
+        #### Cơ chế hoạt động:
+        1. Client gửi thông tin tên tệp (`file_name`) và kích thước dự kiến (`size_bytes`).
+        2. Hệ thống kiểm tra: chỉ chấp nhận tệp định dạng `.txt`, `.html`, `.docx` với dung lượng ≤ 10 MB (10.485.760 bytes).
+        3. Hệ thống sinh `file_key` độc quyền gắn với phân vùng S3 của tenant (`batch/{tenantId}/{uploadId}/{fileName}`) và tạo Presigned URL có thời hạn **15 phút (900 giây)**.
+        4. Client dùng Presigned URL này để `PUT` tệp trực tiếp lên S3 (C12), hoàn toàn không truyền file nhị phân qua Lambda nhằm tiết kiệm băng thông và tối ưu hiệu năng.
+        
+        #### Ví dụ gọi qua cURL:
+        ```bash
+        curl -X POST "https://api.translateme.example.com/translate/batch/upload-url" \
+          -H "Content-Type: application/json" \
+          -H "x-api-key: tm_live_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6" \
+          -d '{
+            "file_name": "gioi-thieu-homestay.docx",
+            "size_bytes": 1048576,
+            "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          }'
+        ```
+        
+        #### Tải tệp lên S3 sau khi nhận phản hồi:
+        ```bash
+        curl -X PUT "<upload_url_nhận_được>" \
+          -H "Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document" \
+          --data-binary @"gioi-thieu-homestay.docx"
+        ```
+      operationId: getBatchUploadUrl
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchUploadUrlRequest'
+            example:
+              file_name: "huong-dan-du-lich.docx"
+              size_bytes: 2097152
+              content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      responses:
+        '200':
+          description: Tạo presigned URL tải lên thành công.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchUploadUrlResponse'
+              example:
+                request_id: "req-upload-001"
+                file_key: "batch/tenant-u4821/d9a8-uuid/huong-dan-du-lich.docx"
+                upload_url: "https://translateme-dev-batch-files.s3.ap-southeast-1.amazonaws.com/batch/tenant-u4821/d9a8-uuid/huong-dan-du-lich.docx?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE..."
+                expires_in: 900
+                method: "PUT"
+        '400':
+          description: |
+            Yêu cầu tải lên không hợp lệ (`INVALID_REQUEST`):
+            - Định dạng tệp không được hỗ trợ (chỉ chấp nhận `.txt`, `.html`, `.docx`).
+            - Dung lượng tệp vượt quá giới hạn tối đa 10 MB.
+            - Tên tệp chứa ký tự nguy hiểm hoặc đường dẫn không an toàn.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-err-upload-size"
+                error:
+                  code: "INVALID_REQUEST"
+                  message: "Kích thước tệp vượt quá 10 MB hoặc định dạng tệp không được hỗ trợ (chỉ nhận TXT, HTML, DOCX)."
+        '401':
+          description: Thiếu hoặc sai API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-unauth-002"
+                error:
+                  code: "UNAUTHORIZED"
+                  message: "API key không hợp lệ hoặc không được cung cấp."
+        '403':
+          description: Tenant bị khóa (`TENANT_SUSPENDED`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-suspend-002"
+                error:
+                  code: "TENANT_SUSPENDED"
+                  message: "Tổ chức của bạn đang bị tạm khóa."
+        '429':
+          description: Vượt tốc độ gọi API (`RATE_LIMITED`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-rate-002"
+                error:
+                  code: "RATE_LIMITED"
+                  message: "Vượt tốc độ yêu cầu của gói API."
+        '500':
+          description: Lỗi máy chủ nội bộ không thể khởi tạo chữ ký S3.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-err-sign"
+                error:
+                  code: "INTERNAL_ERROR"
+                  message: "Lỗi tạm thời phía hệ thống. Không thể tạo địa chỉ tải lên."
+
+  /translate/batch:
+    post:
+      summary: Khởi tạo công việc dịch tệp hàng loạt (Create Batch Translation Job - F10 Bước 3)
+      description: |
+        Tạo công việc dịch tệp tài liệu bất đồng bộ. Hệ thống sẽ:
+        1. Kiểm tra sự tồn tại của tệp trên S3 qua `HeadObject`. Nếu chưa tải tệp lên hoặc URL tải lên đã hết hạn, trả mã `400 FILE_NOT_UPLOADED`.
+        2. Kiểm tra định dạng tệp thực tế và kích thước thực tế (chống giả mạo đuôi tệp, chống zip bomb DOCX).
+        3. Đọc nhanh văn bản, ước tính tổng số ký tự cần dịch (nhân với số lượng ngôn ngữ đích yêu cầu).
+        4. Đối soát với hạn mức ký tự còn lại trong tháng của tenant. Nếu ước tính vượt hạn mức, trả `429 CHAR_QUOTA_EXCEEDED` ngay lập tức và **chưa trừ bất kỳ ký tự nào**.
+        5. Tạo bản ghi trạng thái công việc với mã `job_id`, khởi chạy **AWS Step Functions State Machine** xử lý hàng đợi và trả về HTTP **202 Accepted**.
+        
+        #### Ví dụ gọi qua cURL:
+        ```bash
+        curl -X POST "https://api.translateme.example.com/translate/batch" \
+          -H "Content-Type: application/json" \
+          -H "x-api-key: tm_live_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6" \
+          -d '{
+            "file_key": "batch/tenant-u4821/d9a8-uuid/huong-dan-du-lich.docx",
+            "source_lang": "vi",
+            "target_langs": ["en", "ko"],
+            "send_email": false
+          }'
+        ```
+      operationId: createBatchJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchCreateJobRequest'
+            example:
+              file_key: "batch/tenant-u4821/d9a8-uuid/huong-dan-du-lich.docx"
+              source_lang: "vi"
+              target_langs: ["en", "ko", "ja"]
+              send_email: true
+      responses:
+        '202':
+          description: Đã tiếp nhận công việc dịch tệp thành công. Công việc được đưa vào hàng đợi xử lý.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchCreateJobResponse'
+              example:
+                request_id: "req-batch-create-01"
+                job_id: "job-20261108-0007"
+                status: "QUEUED"
+                estimated_characters: 15420
+                created_at: "2026-11-08T15:30:00.000Z"
+        '400':
+          description: |
+            Yêu cầu không hợp lệ:
+            - `FILE_NOT_UPLOADED`: `file_key` chưa tồn tại trên S3 hoặc presigned URL tải lên đã hết hạn mà chưa hoàn tất tải tệp.
+            - `INVALID_REQUEST`: Tệp rỗng, danh sách `target_langs` rỗng, hoặc tệp bị hỏng cấu trúc ZIP/XML.
+            - `UNSUPPORTED_LANGUAGE`: Một trong các ngôn ngữ đích không được hệ thống hỗ trợ.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                fileNotUploaded:
+                  summary: Chưa tải tệp lên S3 (FILE_NOT_UPLOADED)
+                  value:
+                    request_id: "req-err-nofile"
+                    error:
+                      code: "FILE_NOT_UPLOADED"
+                      message: "file_key chưa có tệp trên máy chủ hoặc địa chỉ tải lên đã hết hạn. Vui lòng tải lại tệp."
+                invalidRequest:
+                  summary: Định dạng tệp hoặc tham số không đúng (INVALID_REQUEST)
+                  value:
+                    request_id: "req-err-badparam"
+                    error:
+                      code: "INVALID_REQUEST"
+                      message: "Tệp DOCX không hợp lệ hoặc danh sách ngôn ngữ đích target_langs không được để trống."
+        '401':
+          description: Thiếu hoặc sai API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-unauth-003"
+                error:
+                  code: "UNAUTHORIZED"
+                  message: "API key không hợp lệ hoặc không được cung cấp."
+        '403':
+          description: Tenant bị khóa thao tác ghi (`TENANT_SUSPENDED`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-suspend-003"
+                error:
+                  code: "TENANT_SUSPENDED"
+                  message: "Tổ chức của bạn đang bị tạm khóa."
+        '429':
+          description: |
+            Ước tính số ký tự của tệp vượt quá hạn mức ký tự còn lại trong tháng của tenant (`CHAR_QUOTA_EXCEEDED`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-err-batch-quota"
+                error:
+                  code: "CHAR_QUOTA_EXCEEDED"
+                  message: "Ước tính số ký tự của công việc vượt quá hạn mức còn lại trong tháng của tổ chức."
+        '500':
+          description: Lỗi máy chủ nội bộ khi khởi chạy hàng đợi Step Functions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-err-sfn"
+                error:
+                  code: "INTERNAL_ERROR"
+                  message: "Lỗi tạm thời phía hệ thống. Không thể khởi tạo tiến trình dịch tệp."
+
+  /translate/batch/{job_id}:
+    get:
+      summary: Tra cứu tiến độ & kết quả công việc dịch tệp (Get Batch Job Status - F10 Bước 6)
+      description: |
+        Truy vấn trạng thái tiến độ xử lý và lấy đường dẫn tải về các tệp đã hoàn thành.
+        
+        #### Các trạng thái của công việc:
+        - `QUEUED`: Đang chờ trong hàng đợi phân phối tài nguyên.
+        - `RUNNING`: Đang trong tiến trình bóc tách khối văn bản, tra cứu TM và gọi dịch song song (kèm `progress` từ 0% đến 99%).
+        - `SUCCEEDED`: Đã hoàn tất 100%. Trả về danh sách `results` chứa Presigned GET URL tải về tệp kết quả (URL có hiệu lực 24 giờ).
+        - `FAILED`: Công việc thất bại trong quá trình thực thi, kèm trường `error_reason` giải thích lý do cụ thể.
+        
+        #### Quy ước bảo mật cô lập Tenant (QC-17):
+        Nếu `job_id` không tồn tại hoặc thuộc về một tenant khác, hệ thống đều trả về mã **`404 NOT_FOUND`** với nội dung thông báo đồng nhất.
+        
+        #### Ví dụ gọi qua cURL:
+        ```bash
+        curl -X GET "https://api.translateme.example.com/translate/batch/job-20261108-0007" \
+          -H "x-api-key: tm_live_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+        ```
+      operationId: getBatchJobStatus
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Mã công việc dịch tệp (nhận được khi gọi `POST /translate/batch`)
+          schema:
+            type: string
+            pattern: '^job-[0-9]{8}-[0-9]{4,}$'
+            example: "job-20261108-0007"
+      responses:
+        '200':
+          description: Trả về trạng thái tiến độ hoặc kết quả hoàn thành của công việc.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchJobStatusResponse'
+              examples:
+                running:
+                  summary: Công việc đang xử lý (RUNNING)
+                  value:
+                    request_id: "req-poll-01"
+                    job_id: "job-20261108-0007"
+                    status: "RUNNING"
+                    progress: 65
+                    total_sentences: 240
+                    completed_sentences: 156
+                    created_at: "2026-11-08T15:30:00.000Z"
+                    updated_at: "2026-11-08T15:31:15.000Z"
+                succeeded:
+                  summary: Công việc đã hoàn tất (SUCCEEDED)
+                  value:
+                    request_id: "req-poll-02"
+                    job_id: "job-20261108-0007"
+                    status: "SUCCEEDED"
+                    progress: 100
+                    total_sentences: 240
+                    completed_sentences: 240
+                    created_at: "2026-11-08T15:30:00.000Z"
+                    updated_at: "2026-11-08T15:32:05.000Z"
+                    results:
+                      - target_lang: "en"
+                        file_name: "huong-dan-du-lich.en.docx"
+                        download_url: "https://translateme-dev-batch-files.s3.ap-southeast-1.amazonaws.com/batch/tenant-u4821/results/huong-dan-du-lich.en.docx?X-Amz-Signature=..."
+                        characters_machine_translated: 8400
+                        characters_from_memory: 3200
+                        warnings: []
+                      - target_lang: "ko"
+                        file_name: "huong-dan-du-lich.ko.docx"
+                        download_url: "https://translateme-dev-batch-files.s3.ap-southeast-1.amazonaws.com/batch/tenant-u4821/results/huong-dan-du-lich.ko.docx?X-Amz-Signature=..."
+                        characters_machine_translated: 11600
+                        characters_from_memory: 0
+                        warnings:
+                          - "DOCX_SHAPES_PRESERVED_NOT_TRANSLATED"
+                failed:
+                  summary: Công việc thất bại (FAILED)
+                  value:
+                    request_id: "req-poll-03"
+                    job_id: "job-20261108-0007"
+                    status: "FAILED"
+                    progress: 42
+                    error_reason: "CHAR_QUOTA_EXCEEDED"
+                    error_message: "Hạn mức ký tự của tổ chức đã cạn kiệt trong quá trình thực thi khối dịch."
+                    created_at: "2026-11-08T15:30:00.000Z"
+                    updated_at: "2026-11-08T15:31:45.000Z"
+                    results: []
+        '401':
+          description: Thiếu hoặc sai API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-unauth-004"
+                error:
+                  code: "UNAUTHORIZED"
+                  message: "API key không hợp lệ hoặc không được cung cấp."
+        '404':
+          description: |
+            Không tìm thấy công việc (`NOT_FOUND`).
+            Áp dụng theo quy ước QC-17: trả về cùng một thông báo lỗi khi job không tồn tại hoặc job thuộc sở hữu của một tenant khác.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-404-job"
+                error:
+                  code: "NOT_FOUND"
+                  message: "Không tìm thấy công việc dịch tệp yêu cầu hoặc bạn không có quyền truy cập."
+        '500':
+          description: Lỗi máy chủ nội bộ khi tra cứu cơ sở dữ liệu DynamoDB.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-err-ddb"
+                error:
+                  code: "INTERNAL_ERROR"
+                  message: "Lỗi tạm thời phía hệ thống. Vui lòng thử lại sau giây lát."
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: |
+        Khóa xác thực API của Developer được cấp phát tại thẻ API Keys trên Web Console.
+        Header: `x-api-key: tm_live_<chuỗi_khóa_bí_mật>`
+
+  schemas:
+    # ---------------------------------------------------------
+    # Schemas Dùng Chung & Lỗi Chuẩn QC-2 (Bảng 2.10)
+    # ---------------------------------------------------------
+    ErrorResponse:
+      type: object
+      required:
+        - request_id
+        - error
+      properties:
+        request_id:
+          type: string
+          description: Mã định danh duy nhất của yêu cầu để tra cứu vết nhật ký trên CloudWatch
+          example: "req-5f2c1a9e"
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              description: Mã lỗi kỹ thuật tập trung theo Bảng 2.10
+              enum:
+                - INVALID_REQUEST
+                - UNSUPPORTED_LANGUAGE
+                - TEXT_TOO_LONG
+                - LANGUAGE_NOT_DETECTED
+                - FILE_NOT_UPLOADED
+                - PLACEHOLDER_MISMATCH
+                - VERIFICATION_FAILED
+                - UNAUTHORIZED
+                - TENANT_SUSPENDED
+                - PERMISSION_DENIED
+                - NOT_FOUND
+                - VERSION_CONFLICT
+                - RATE_LIMITED
+                - REQUEST_QUOTA_EXCEEDED
+                - CHAR_QUOTA_EXCEEDED
+                - INTERNAL_ERROR
+              example: "CHAR_QUOTA_EXCEEDED"
+            message:
+              type: string
+              description: Thông điệp giải thích lỗi bằng tiếng Việt thân thiện, rõ nghĩa theo quy ước QC-2
+              example: "Tổ chức đã dùng hết hạn mức ký tự của tháng."
+
+    # ---------------------------------------------------------
+    # Schemas cho Dịch Thời Gian Thực (/translate/realtime)
+    # ---------------------------------------------------------
+    RealtimeTranslateRequest:
+      type: object
+      required:
+        - text
+        - target_lang
+      properties:
+        text:
+          type: string
+          description: Đoạn văn bản cần dịch. Giới hạn tối đa 5.000 ký tự Unicode (tính theo code point).
+          minLength: 1
+          maxLength: 5000
+          example: "Phòng có ban công nhìn ra sông Hoài."
+        target_lang:
+          type: string
+          description: Mã ngôn ngữ đích theo chuẩn mã hai chữ cái ISO 639-1.
+          enum:
+            - ar
+            - de
+            - en
+            - es
+            - fr
+            - hi
+            - id
+            - it
+            - ja
+            - ko
+            - nl
+            - pl
+            - pt
+            - ru
+            - sv
+            - th
+            - tr
+            - vi
+            - zh
+          example: "en"
+        source_lang:
+          type: string
+          description: |
+            Mã ngôn ngữ nguồn theo chuẩn ISO 639-1.
+            Nếu bỏ trống, hệ thống tự động nhận diện ngôn ngữ bằng Amazon Comprehend (yêu cầu độ tin cậy ≥ 0,70).
+          enum:
+            - ar
+            - de
+            - en
+            - es
+            - fr
+            - hi
+            - id
+            - it
+            - ja
+            - ko
+            - nl
+            - pl
+            - pt
+            - ru
+            - sv
+            - th
+            - tr
+            - vi
+            - zh
+          example: "vi"
+        use_terminology:
+          type: boolean
+          description: |
+            Tùy chọn áp dụng Bộ nhớ dịch (TM) và Bảng thuật ngữ chuyên ngành (Glossary):
+            - `true` (mặc định): Tra cứu và ghi nhớ câu dịch vào TM, áp dụng các thuật ngữ đã định nghĩa.
+            - `false`: Bỏ qua hoàn toàn TM và thuật ngữ; toàn bộ ký tự sẽ được gửi dịch máy trực tiếp.
+          default: true
+          example: true
+
+    RealtimeTranslateResponse:
+      type: object
+      required:
+        - request_id
+        - source_lang
+        - source_lang_detected
+        - target_lang
+        - translated_text
+        - characters_machine_translated
+        - characters_from_memory
+        - terminology_version
+      properties:
+        request_id:
+          type: string
+          description: Mã định danh yêu cầu phục vụ tra cứu log
+          example: "req-5f2c1a9e"
+        source_lang:
+          type: string
+          description: Mã ngôn ngữ nguồn đã dùng để dịch
+          example: "vi"
+        source_lang_detected:
+          type: boolean
+          description: Cờ thông báo ngôn ngữ nguồn có phải do hệ thống tự nhận diện hay không
+          example: false
+        detection_confidence:
+          type: number
+          format: float
+          description: Điểm độ tin cậy của thuật toán nhận diện ngôn ngữ (chỉ xuất hiện khi `source_lang_detected` là true)
+          minimum: 0.70
+          maximum: 1.00
+          example: 0.99
+        target_lang:
+          type: string
+          description: Mã ngôn ngữ đích
+          example: "en"
+        translated_text:
+          type: string
+          description: Văn bản kết quả sau khi dịch thuật và ghép nối câu
+          example: "The room has a balcony overlooking the Hoai River."
+        characters_machine_translated:
+          type: integer
+          description: Số lượng ký tự Unicode thực tế đã gửi sang máy dịch Amazon Translate (bị trừ vào hạn mức tháng)
+          example: 0
+        characters_from_memory:
+          type: integer
+          description: Số lượng ký tự Unicode lấy được trực tiếp từ Bộ nhớ dịch TM (tiết kiệm chi phí, không tính tiền dịch máy)
+          example: 36
+        terminology_version:
+          type: integer
+          description: Số phiên bản Bảng thuật ngữ của tenant đã được áp dụng trong lượt dịch này
+          example: 7
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Danh sách các cảnh báo nội bộ không gây lỗi dừng luồng (ví dụ gắn cờ xem lại TM)
+          example: []
+
+    # ---------------------------------------------------------
+    # Schemas cho Lấy Upload URL (/translate/batch/upload-url)
+    # ---------------------------------------------------------
+    BatchUploadUrlRequest:
+      type: object
+      required:
+        - file_name
+        - size_bytes
+      properties:
+        file_name:
+          type: string
+          description: Tên tệp gốc kèm phần mở rộng. Chỉ chấp nhận các đuôi `.txt`, `.html`, `.docx`.
+          pattern: '^[a-zA-Z0-9_\.\-]+\.(txt|html|docx)$'
+          example: "gioi-thieu-homestay.docx"
+        size_bytes:
+          type: integer
+          description: Dung lượng thực tế của tệp tính bằng byte (tối đa 10 MB = 10.485.760 bytes).
+          minimum: 1
+          maximum: 10485760
+          example: 2097152
+        content_type:
+          type: string
+          description: Chuỗi MIME type của tệp tải lên
+          enum:
+            - text/plain
+            - text/html
+            - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+          example: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    BatchUploadUrlResponse:
+      type: object
+      required:
+        - request_id
+        - file_key
+        - upload_url
+        - expires_in
+        - method
+      properties:
+        request_id:
+          type: string
+          example: "req-upload-001"
+        file_key:
+          type: string
+          description: Khóa định danh tệp độc quyền trong S3 Bucket của tenant, dùng làm tham số cho bước tạo Job
+          example: "batch/tenant-u4821/d9a8-uuid/gioi-thieu-homestay.docx"
+        upload_url:
+          type: string
+          description: Đường dẫn S3 Presigned URL có chữ ký bảo mật cho phép tải tệp lên trực tiếp bằng phương thức PUT
+          example: "https://translateme-dev-batch-files.s3.ap-southeast-1.amazonaws.com/batch/tenant-u4821/d9a8-uuid/gioi-thieu-homestay.docx?X-Amz-Algorithm=..."
+        expires_in:
+          type: integer
+          description: Thời gian hiệu lực của đường dẫn tính bằng giây (900 giây = 15 phút)
+          example: 900
+        method:
+          type: string
+          description: Phương thức HTTP bắt buộc sử dụng khi tải tệp lên
+          enum:
+            - PUT
+          example: "PUT"
+
+    # ---------------------------------------------------------
+    # Schemas cho Tạo Công Việc Dịch Tệp (/translate/batch)
+    # ---------------------------------------------------------
+    BatchCreateJobRequest:
+      type: object
+      required:
+        - file_key
+        - target_langs
+      properties:
+        file_key:
+          type: string
+          description: Khóa tệp nhận được từ kết quả gọi API `POST /translate/batch/upload-url`
+          example: "batch/tenant-u4821/d9a8-uuid/gioi-thieu-homestay.docx"
+        target_langs:
+          type: array
+          description: Danh sách các mã ngôn ngữ đích cần dịch sang (tối thiểu 1 ngôn ngữ)
+          minItems: 1
+          items:
+            type: string
+            enum:
+              - ar
+              - de
+              - en
+              - es
+              - fr
+              - hi
+              - id
+              - it
+              - ja
+              - ko
+              - nl
+              - pl
+              - pt
+              - ru
+              - sv
+              - th
+              - tr
+              - vi
+              - zh
+          example:
+            - "en"
+            - "ko"
+        source_lang:
+          type: string
+          description: Mã ngôn ngữ nguồn của tệp. Nếu bỏ trống, hệ thống sẽ tự nhận diện qua mẫu văn bản đầu trang.
+          example: "vi"
+        send_email:
+          type: boolean
+          description: Tùy chọn gửi thông báo email tới địa chỉ quản trị viên tổ chức khi công việc hoàn thành
+          default: false
+          example: true
+
+    BatchCreateJobResponse:
+      type: object
+      required:
+        - request_id
+        - job_id
+        - status
+        - estimated_characters
+      properties:
+        request_id:
+          type: string
+          example: "req-batch-001"
+        job_id:
+          type: string
+          description: Mã định danh công việc dịch tệp duy nhất, định dạng `job-YYYYMMDD-XXXX`
+          example: "job-20261108-0007"
+        status:
+          type: string
+          description: Trạng thái khởi tạo ban đầu của công việc
+          enum:
+            - QUEUED
+          example: "QUEUED"
+        estimated_characters:
+          type: integer
+          description: Tổng số ký tự văn bản ước tính của tệp nhân với số lượng ngôn ngữ đích
+          example: 18450
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-11-08T15:30:00.000Z"
+
+    # ---------------------------------------------------------
+    # Schemas cho Trạng Thái & Tải Tệp (/translate/batch/{job_id})
+    # ---------------------------------------------------------
+    BatchJobStatusResponse:
+      type: object
+      required:
+        - request_id
+        - job_id
+        - status
+        - progress
+      properties:
+        request_id:
+          type: string
+          example: "req-poll-01"
+        job_id:
+          type: string
+          example: "job-20261108-0007"
+        status:
+          type: string
+          description: Trạng thái hiện tại của công việc
+          enum:
+            - QUEUED
+            - RUNNING
+            - SUCCEEDED
+            - FAILED
+          example: "SUCCEEDED"
+        progress:
+          type: integer
+          description: Tiến độ hoàn thành tính theo phần trăm (0 đến 100)
+          minimum: 0
+          maximum: 100
+          example: 100
+        total_sentences:
+          type: integer
+          description: Tổng số câu được bóc tách từ tệp tài liệu
+          example: 185
+        completed_sentences:
+          type: integer
+          description: Số câu đã hoàn tất xử lý (tra cứu TM + dịch máy)
+          example: 185
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-11-08T15:30:00.000Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-11-08T15:32:05.000Z"
+        error_reason:
+          type: string
+          description: Mã lỗi kỹ thuật giải thích nguyên nhân thất bại (chỉ có khi status là FAILED)
+          example: "CHAR_QUOTA_EXCEEDED"
+        error_message:
+          type: string
+          description: Thông điệp lỗi chi tiết bằng tiếng Việt (chỉ có khi status là FAILED)
+          example: "Tổ chức không đủ hạn mức ký tự để hoàn tất toàn bộ khối dịch."
+        results:
+          type: array
+          description: Danh sách đường dẫn tải về kết quả tương ứng với từng ngôn ngữ đích
+          items:
+            $ref: '#/components/schemas/BatchJobResultItem'
+
+    BatchJobResultItem:
+      type: object
+      required:
+        - target_lang
+        - file_name
+        - download_url
+      properties:
+        target_lang:
+          type: string
+          description: Ngôn ngữ đích của tệp kết quả
+          example: "en"
+        file_name:
+          type: string
+          description: Tên tệp kết quả sau khi dựng lại cấu trúc gốc
+          example: "gioi-thieu-homestay.en.docx"
+        download_url:
+          type: string
+          description: Đường dẫn S3 Presigned URL có chữ ký để tải tệp đã dịch (có thời hạn 24 giờ)
+          example: "https://translateme-dev-batch-files.s3.ap-southeast-1.amazonaws.com/batch/tenant-u4821/results/gioi-thieu-homestay.en.docx?X-Amz-Algorithm=..."
+        characters_machine_translated:
+          type: integer
+          description: Số ký tự của ngôn ngữ này đã dịch qua máy dịch Amazon Translate
+          example: 7200
+        characters_from_memory:
+          type: integer
+          description: Số ký tự của ngôn ngữ này được tái sử dụng từ Bộ nhớ dịch TM
+          example: 2025
+        warnings:
+          type: array
+          items:
+            type: string
+          description: |
+            Các cảnh báo kỹ thuật về định dạng tài liệu được bảo lưu nguyên gốc:
+            - `DOCX_SHAPES_PRESERVED_NOT_TRANSLATED`: Giữ nguyên hình vẽ/hộp văn bản không dịch
+            - `DOCX_HEADER_FOOTER_PRESERVED`: Giữ nguyên đầu trang/chân trang
+          example:
+            - "DOCX_SHAPES_PRESERVED_NOT_TRANSLATED"
