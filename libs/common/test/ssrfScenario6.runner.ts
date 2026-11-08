@@ -1,10 +1,16 @@
 /**
- * CLI Runner cho Bộ thử SSRF – Kịch bản 6 (Nhiệm vụ Tuần 5 – TV4).
+ * CLI Runner cho Bộ thử hồi quy mô phỏng SSRF – Kịch bản 6 (Nhiệm vụ Tuần 5 – TV4).
  *
  * Chạy trực tiếp từ dòng lệnh:
  *   npm --prefix libs/common run test:ssrf
  * hoặc:
- *   node dist/test/ssrfScenario6.runner.js [--save]
+ *   node dist/test/ssrfScenario6.runner.js [--save-simulation]
+ *
+ * Lưu ý:
+ *  Bộ thử này chạy với mock resolver và mock transport trong môi trường kiểm thử đơn vị,
+ *  xác minh tính đúng đắn của logic safeFetch.
+ *  Để đảm bảo tính khách quan và trung thực kỹ thuật, runner mặc định KHÔNG ghi đè tài liệu
+ *  chứng cứ nghiệm thu demo. Bằng chứng nghiệm thu thực tế sẽ được đo đạc trên bản demo (Hạng mục 5.9).
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -15,16 +21,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 async function main() {
-  const saveEvidence = process.argv.includes('--save') || !process.argv.includes('--no-save');
+  const saveSimulation = process.argv.includes('--save-simulation');
 
-  console.log('Đang khởi chạy Bộ kiểm thử an toàn SSRF – Kịch bản 6...\n');
+  console.log('Đang khởi chạy Bộ kiểm thử hồi quy mô phỏng an toàn SSRF – Kịch bản 6...\n');
   const report = await runSsrfScenario6();
 
   console.log(report.formattedLog);
+  console.log('\n[LƯU Ý QUAN TRỌNG VỀ BẰNG CHỨNG NGHIỆM THU]');
+  console.log('  * Kết quả trên là kiểm thử hồi quy đơn vị mô phỏng (Offline Mock Regression) với fakeResolver/fakeTransport.');
+  console.log('  * Kết quả "0 kết nối socket tới IP nội bộ" biểu thị mock transport không ghi nhận kết nối nào.');
+  console.log('  * Bằng chứng nghiệm thu chính thức của Kịch bản 6 (Phụ lục C) sẽ được thu thập trên bản demo thực tế ở Hạng mục 5.9.\n');
 
-  if (saveEvidence) {
+  if (saveSimulation) {
     try {
-      // Tìm thư mục docs của repository
       const candidateDirs = [
         path.resolve(process.cwd(), 'docs'),
         path.resolve(process.cwd(), '../../docs'),
@@ -35,66 +44,39 @@ async function main() {
       if (!fs.existsSync(docsDir)) {
         fs.mkdirSync(docsDir, { recursive: true });
       }
-        const evidencePath = path.join(docsDir, 'ssrf-scenario6-evidence.md');
-        const content = [
-          '# Bằng Chứng Nghiệm Thu: Bộ Thử Chống SSRF (Kịch bản 6)',
-          '',
-          '> **Căn cứ:** Nhiệm vụ Tuần 5 – TV4 (Phạm Kim Tùng), Bảng 3.2, Phụ lục C (Bảng chứng cứ nghiệm thu) và Báo cáo kiến trúc TranslateMe.',
-          '> **Người thực hiện:** TV4 – Phạm Kim Tùng',
-          `> **Thời gian nghiệm thu:** ${report.timestamp}`,
-          '',
-          '## 1. Tiêu chí Đánh giá & Kết quả Tổng quan',
-          '',
-          `- **Số lượng phép thử:** ${report.totalTests} đích bắt buộc`,
-          `- **Kết quả đạt:** **${report.passCount}/${report.totalTests} PASS** (${((report.passCount / report.totalTests) * 100).toFixed(1)}%)`,
-          `- **Đích bị chặn:** **${report.blockedCount}/${report.totalTests}**`,
-          `- **Số kết nối tới IP nội bộ:** **${report.internalIpsContactedCount} (0 kết nối)**`,
-          `- **Số sự cố rò rỉ Header Cookie/Auth:** **${report.sensitiveHeadersLeakedCount} (0 sự cố)**`,
-          `- **Đánh giá chung:** **${report.allPassed ? '✅ ĐẠT 100% TIÊU CHÍ AN TOÀN' : '❌ CHƯA ĐẠT'}**`,
-          '',
-          '## 2. Bảng Tổng Hợp 9 Đích Tấn Công SSRF',
-          '',
-          report.markdownTable,
-          '',
-          '## 3. Phân Tích Kỹ Thuật Các Chốt Chặn',
-          '',
-          '### 3.1. Chặn IP Literal Link-Local & Loopback (6.1, 6.3, 6.4, 6.5, 6.6)',
-          '- **Nguyên lý:** Phân tích cú pháp URL ngay tại hàm `validateUrl()` và `isBlockedIp()`.',
-          '- Các dải địa chỉ bị chặn tuyệt đối gồm: `169.254.0.0/16` (AWS IMDS metadata), `127.0.0.0/8` (IPv4 loopback), `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` (RFC 1918), `::1` (IPv6 loopback), `fc00::/7` (IPv6 ULA).',
-          '- **Kết quả:** Bị chặn ngay từ bước kiểm tra URL, **hoàn toàn không gọi DNS và không mở bất kỳ socket TCP nào**.',
-          '',
-          '### 3.2. Chặn Tên Miền Phân Giải Ra IP Nội Bộ (6.2 - localhost)',
-          '- **Nguyên lý:** Sau khi kiểm tra tên miền hợp lệ, hệ thống thực hiện phân giải DNS độc lập thông qua `resolver` (lấy tất cả địa chỉ A và AAAA).',
-          '- Mọi IP trả về từ DNS đều được đối soát qua hàm `isBlockedIp()`. Nếu có bất kỳ IP nào thuộc dải cấm, toàn bộ yêu cầu bị hủy bỏ.',
-          '- **Kết quả:** `localhost` phân giải ra `127.0.0.1` bị từ chối ngay với mã `PRIVATE_IP`, không có kết nối nào được tạo.',
-          '',
-          '### 3.3. Chống Tấn Công DNS Rebinding (6.7)',
-          '- **Kỹ thuật tấn công:** Kẻ tấn công cấu hình máy chủ DNS trả về IP công khai ở lần tra cứu 1 (để qua mặt bộ lọc), nhưng trả về `127.0.0.1` ở lần tra cứu 2 khi client tạo kết nối TCP.',
-          '- **Giải pháp Pinned Lookup (Ghim IP):** `safeFetch` chỉ hỏi DNS đúng **1 lần duy nhất** cho mỗi lần nhảy. Sau khi IP công khai được kiểm duyệt an toàn, hàm tạo ra một `lookup` function tùy biến ghim trực tiếp IP này vào cấu hình kết nối của Node.js `http`/`https` Agent.',
-          '- **Kết quả:** Khi mở kết nối TCP, Node.js sử dụng trực tiếp IP công khai đã ghim, **tuyệt đối không phân giải lại DNS lần 2**. Thêm vào đó, tại tầng lookup ghim có thêm lớp phòng thủ chiều sâu từ chối IP nội bộ nếu có lỗi bất thường.',
-          '',
-          '### 3.4. Chống Tấn Công Chuyển Hướng Kép (6.8 - Open Redirect)',
-          '- **Kỹ thuật tấn công:** Lợi dụng một trang web công khai hợp lệ trả về mã chuyển hướng HTTP `302 Found` với header `Location: http://10.0.0.1/`.',
-          '- **Giải pháp:** Tắt chế độ tự động chuyển hướng (`follow redirect`) mặc định của thư viện HTTP. `safeFetch` tự kiểm soát vòng lặp chuyển hướng thủ công (tối đa 5 lần). Mỗi khi nhận mã 3xx, URL trong `Location` được bóc tách và chạy lại **toàn bộ quy trình kiểm duyệt an toàn SSRF từ đầu**.',
-          '- **Vệ sinh Header:** Khi gửi yêu cầu và khi chuyển hướng, các header nhạy cảm như `Cookie`, `Cookie2`, `Authorization`, `Proxy-Authorization` bị loại bỏ 100% bằng cả bộ lọc Allowlist và Blacklist chủ động.',
-          '- **Kết quả:** Yêu cầu chuyển hướng tới `10.0.0.1` bị chặn ngay lập tức; không có bất kỳ kết nối socket nào được mở tới `10.0.0.1`.',
-          '',
-          '### 3.5. Chặn Cổng Dịch Vụ Không Phải Web (6.9 - Cổng 22 SSH)',
-          '- **Nguyên lý:** Chỉ cho phép cổng 80 (`http`) và cổng 443 (`https`). Bất kỳ cổng nào khác (cổng 22, 21, 25, 3306, 6379...) đều bị loại ngay tại hàm `validateUrl()`.',
-          '- **Kết quả:** URL có cổng 22 bị chặn với mã `PORT` ngay lập tức, không phân giải DNS và không mở kết nối.',
-          '',
-          '## 4. Toàn Văn Nhật Ký Thực Thi (Execution Log)',
-          '',
-          '```text',
-          report.formattedLog,
-          '```',
-          '',
-        ].join('\n');
+      const simulationPath = path.join(docsDir, 'ssrf-scenario6-simulation.md');
+      const content = [
+        '# Báo Cáo Kiểm Thử Hồi Quy Mô Phỏng: Kịch Bản 6 SSRF',
+        '',
+        '> **Phạm vi:** Kiểm thử hồi quy đơn vị (Unit / Regression Test) sử dụng mock dependencies (`fakeResolver`, `fakeTransport`).',
+        '> **Lưu ý:** Đây là kết quả mô phỏng logic nội bộ của `safeFetch`, KHÔNG PHẢI là bằng chứng đo đạc mạng thực tế trên bản demo.',
+        '> **Người thực hiện:** TV4 – Phạm Kim Tùng',
+        `> **Thời gian chạy mô phỏng:** ${report.timestamp}`,
+        '',
+        '## 1. Kết Quả Kiểm Thử Hồi Quy Mô Phỏng',
+        '',
+        `- **Số lượng tình huống:** ${report.totalTests} đích`,
+        `- **Kết quả logic:** **${report.passCount}/${report.totalTests} PASS** (${((report.passCount / report.totalTests) * 100).toFixed(1)}%)`,
+        `- **Tình huống được chặn:** **${report.blockedCount}/${report.totalTests}**`,
+        `- **Yêu cầu chuyển tới mock transport:** **${report.internalIpsContactedCount} (0 kết nối)**`,
+        `- **Rò rỉ Header Cookie/Auth tới mock:** **${report.sensitiveHeadersLeakedCount} (0 sự cố)**`,
+        '',
+        '## 2. Bảng Chi Tiết 9 Tình Huống Mô Phỏng',
+        '',
+        report.markdownTable,
+        '',
+        '## 3. Nhật Ký Kiểm Thử Mô Phỏng',
+        '',
+        '```text',
+        report.formattedLog,
+        '```',
+        '',
+      ].join('\n');
 
-        fs.writeFileSync(evidencePath, content, 'utf8');
-        console.log(`\n📄 Đã lưu báo cáo bằng chứng nghiệm thu thành công tại: ${evidencePath}`);
+      fs.writeFileSync(simulationPath, content, 'utf8');
+      console.log(`📄 Đã lưu báo cáo mô phỏng kiểm thử tại: ${simulationPath}`);
     } catch (err: any) {
-      console.warn(`Không thể ghi file bằng chứng: ${err.message}`);
+      console.warn(`Không thể ghi file báo cáo mô phỏng: ${err.message}`);
     }
   }
 

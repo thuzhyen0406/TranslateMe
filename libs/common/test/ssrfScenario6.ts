@@ -1,5 +1,15 @@
 /**
- * Bộ kiểm thử SSRF – Kịch bản 6 (Nhiệm vụ Tuần 5 – TV4: Phạm Kim Tùng).
+ * Bộ kiểm thử hồi quy mô phỏng an toàn SSRF – Kịch bản 6 (Nhiệm vụ Tuần 5 – TV4: Phạm Kim Tùng).
+ *
+ * LƯU Ý QUAN TRỌNG VỀ PHẠM VI (SCOPE):
+ *  - Bộ thử này sử dụng `fakeResolver` và `fakeTransport` (Dependency Injection) phục vụ
+ *    kiểm thử hồi quy đơn vị (Unit / Regression Testing) đối với logic của `safeFetch`.
+ *  - Kết quả "0 kết nối socket tới IP nội bộ" ở đây phản ánh rằng mock transport không ghi nhận
+ *    bất kỳ kết nối nào do URL/IP đã bị safeFetch chặn trước khi gửi yêu cầu.
+ *  - ĐÂY LÀ KẾT QUẢ MÔ PHỎNG KIỂM THỬ ĐƠN VỊ, KHÔNG DÙNG LÀM BẰNG CHỨNG NGHIỆM THU TRÊN MÔI TRƯỜNG THỰC TẾ.
+ *  - Bằng chứng nghiệm thu chính thức của Kịch bản 6 (Phụ lục C) sẽ được đo đạc và thu thập
+ *    trên bản demo đã triển khai thực tế (Hạng mục 5.9) với cách ghi nhận phù hợp (CloudWatch Logs,
+ *    VPC Flow Logs hoặc HTTP status phản hồi từ API Gateway / Proxy).
  *
  * Kiểm tra 9/9 đích tấn công SSRF bắt buộc theo Bảng 3.2, Phụ lục C và Báo cáo kiến trúc:
  *  [6.1] 169.254.169.254 (AWS IMDS metadata)
@@ -11,12 +21,6 @@
  *  [6.7] DNS rebinding (Lần 1 IP công khai, lần 2 127.0.0.1)
  *  [6.8] URL chuyển hướng (HTTP 302) về địa chỉ nội bộ
  *  [6.9] Cổng không hợp lệ (Cổng 22 - SSH)
- *
- * Tiêu chí nghiệm thu cốt lõi:
- *  1. 9/9 đích bị chặn (hoặc ngăn chặn triệt để không kết nối tới IP nội bộ).
- *  2. 0 kết nối socket/TCP nào tới bất kỳ IP nội bộ nào.
- *  3. Không chuyển tiếp Cookie hay Header xác thực (Authorization / Proxy-Authorization).
- *  4. Không bao giờ nới lỏng quy tắc chặn SSRF.
  */
 import {
   buildNodeRequestOptions,
@@ -500,29 +504,31 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
   const sensitiveHeadersLeakedCount = results.filter((r) => !r.headersSanitized).length;
   const allPassed = passCount === 9 && internalIpsContactedCount === 0 && sensitiveHeadersLeakedCount === 0;
 
-  // Xây dựng bảng Markdown và Log định dạng
+  // Xây dựng bảng Markdown và Log định dạng (Ghi rõ phạm vi kiểm thử hồi quy mô phỏng)
   const markdownLines: string[] = [
-    '| ID | Đích kiểm thử | Mục tiêu tấn công | Kết quả | Lý do chặn | Kết nối nội bộ | Vệ sinh Header |',
+    '| ID | Đích kiểm thử | Mục tiêu tấn công | Kết quả mô phỏng | Lý do chặn | Kết nối tới Mock | Vệ sinh Header |',
     '| :---: | :--- | :--- | :---: | :---: | :---: | :---: |',
   ];
 
   const logLines: string[] = [
     '========================================================================================================',
-    '                      BỘ KIỂM THỬ AN TOÀN SSRF (KỊCH BẢN 6 – NHIỆM VỤ TUẦN 5 – TV4)                     ',
+    '             BỘ KIỂM THỬ HỒI QUY MÔ PHỎNG AN TOÀN SSRF (KỊCH BẢN 6 – MOCK SIMULATION)                  ',
     '========================================================================================================',
     `Thời gian thực thi: ${timestamp}`,
+    'Chế độ kiểm thử:    Mô phỏng đơn vị (Mock Dependencies: fakeResolver + fakeTransport)',
+    'Phạm vi áp dụng:    Kiểm thử hồi quy logic safeFetch (Không dùng làm bằng chứng nghiệm thu demo)',
     `Tổng số phép thử:   ${results.length}`,
-    `Đích bị chặn:       ${blockedCount}/${results.length} (100%)`,
-    `Kết nối nội bộ:     ${internalIpsContactedCount} (0 kết nối)`,
-    `Header nhạy cảm:    ${sensitiveHeadersLeakedCount} rò rỉ (100% được làm sạch)`,
-    `Trạng thái:         ${allPassed ? '✅ TẤT CẢ PHÉP THỬ ĐẠT (9/9 PASS)' : '❌ CÓ PHÉP THỬ THẤT BẠI'}`,
+    `Đích mô phỏng chặn: ${blockedCount}/${results.length} (100%)`,
+    `Kết nối tới mock:   ${internalIpsContactedCount} IP nội bộ (Mock transport không nhận kết nối)`,
+    `Header nhạy cảm:    ${sensitiveHeadersLeakedCount} rò rỉ (100% được làm sạch trước transport)`,
+    `Trạng thái:         ${allPassed ? '✅ TẤT CẢ PHÉP THỬ MÔ PHỎNG ĐẠT (9/9 PASS)' : '❌ CÓ PHÉP THỬ THẤT BẠI'}`,
     '--------------------------------------------------------------------------------------------------------',
   ];
 
   for (const r of results) {
     const statusIcon = r.passed ? '✅ PASS' : '❌ FAIL';
     markdownLines.push(
-      `| **${r.id}** | \`${r.targetUrl}\` | ${r.category} | ${statusIcon} | \`${r.actualReason}\` | 0 IP nội bộ (${r.contactedIps.join(', ') || 'None'}) | Đã loại bỏ Cookie/Auth |`,
+      `| **${r.id}** | \`${r.targetUrl}\` | ${r.category} | ${statusIcon} | \`${r.actualReason}\` | 0 IP nội bộ (Mock: ${r.contactedIps.join(', ') || 'None'}) | Đã loại bỏ Cookie/Auth |`,
     );
 
     logLines.push(
@@ -530,18 +536,18 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
       `  - URL đích:          ${r.targetUrl}`,
       `  - Danh mục tấn công: ${r.category}`,
       `  - Outcome nhận được: ${r.actualOutcome} (Lý do: ${r.actualReason})`,
-      `  - Bị chặn SSRF:      ${r.blocked ? 'CÓ (Chặn thành công)' : 'KHÔNG'}`,
-      `  - Kết nối IP nội bộ: ${r.noInternalConnection ? 'KHÔNG (An toàn 100%)' : 'CÓ (NGUY HIỂM)'}`,
+      `  - Bị chặn SSRF:      ${r.blocked ? 'CÓ (Chặn thành công ở bước kiểm duyệt)' : 'KHÔNG'}`,
+      `  - Kết nối IP nội bộ: ${r.noInternalConnection ? 'KHÔNG (Mock transport không ghi nhận kết nối)' : 'CÓ (NGUY HIỂM)'}`,
       `  - Vệ sinh Header:    ${r.headersSanitized ? 'ĐẠT (Không chuyển tiếp Cookie/Auth)' : 'KHÔNG ĐẠT'}`,
-      `  - IP đã kết nối:     [${r.contactedIps.join(', ') || 'Không có kết nối nào'}]`,
-      `  - DNS queries:       [${r.dnsCalls.join(', ') || 'Không có DNS query'}]`,
-      `  - Kết quả:           ${statusIcon}`,
+      `  - IP mock kết nối:   [${r.contactedIps.join(', ') || 'Không có kết nối nào tới transport'}]`,
+      `  - DNS mock queries:  [${r.dnsCalls.join(', ') || 'Không có DNS query'}]`,
+      `  - Kết quả mô phỏng:  ${statusIcon}`,
       `  - Chi tiết:          ${r.detail}`,
       '--------------------------------------------------------------------------------------------------------',
     );
   }
 
-  const summary = `Kịch bản 6: ${blockedCount}/9 đích bị chặn. 0 kết nối socket ra địa chỉ nội bộ. 0 rò rỉ Cookie/Authorization.`;
+  const summary = `Kịch bản 6 (Mô phỏng hồi quy): ${blockedCount}/9 đích bị chặn theo logic safeFetch. 0 kết nối socket được chuyển tới mock transport. 0 rò rỉ Cookie/Authorization. Lưu ý: Bằng chứng nghiệm thu chính thức sẽ được đo đạc trên bản demo (Hạng mục 5.9).`;
   logLines.push(`KẾT LUẬN: ${summary}`, '========================================================================================================');
 
   return {

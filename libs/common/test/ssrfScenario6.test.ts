@@ -6,25 +6,25 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { runSsrfScenario6 } from './ssrfScenario6.js';
 
-describe('Kịch bản 6 – Bộ thử SSRF 9 đích bắt buộc (Nhiệm vụ Tuần 5 – TV4)', async () => {
+describe('Kịch bản 6 – Bộ thử hồi quy mô phỏng SSRF 9 đích (Unit Regression Test)', async () => {
   const report = await runSsrfScenario6();
 
-  it('tổng số test case phải đúng 9 đích bắt buộc', () => {
+  it('tổng số test case mô phỏng phải đúng 9 đích bắt buộc', () => {
     assert.equal(report.totalTests, 9);
     assert.equal(report.results.length, 9);
   });
 
-  it('9/9 đích phải đạt tiêu chuẩn (allPassed = true, passCount = 9, failCount = 0)', () => {
+  it('9/9 đích mô phỏng phải đạt tiêu chuẩn (allPassed = true, passCount = 9, failCount = 0)', () => {
     assert.equal(report.passCount, 9, `Chỉ có ${report.passCount}/9 phép thử đạt`);
     assert.equal(report.failCount, 0);
     assert.equal(report.allPassed, true);
   });
 
-  it('9/9 đích bị chặn hoặc không bao giờ chạm tới IP nội bộ (blockedCount = 9)', () => {
+  it('9/9 đích mô phỏng bị chặn hoặc không bao giờ chạm tới IP nội bộ (blockedCount = 9)', () => {
     assert.equal(report.blockedCount, 9);
   });
 
-  it('tuyệt đối không có bất kỳ kết nối socket/TCP nào tới địa chỉ IP nội bộ (internalIpsContactedCount = 0)', () => {
+  it('tuyệt đối không có kết nối nào tới IP nội bộ được chuyển tới mock transport (internalIpsContactedCount = 0)', () => {
     assert.equal(report.internalIpsContactedCount, 0, 'Phát hiện có kết nối socket tới IP nội bộ!');
   });
 
