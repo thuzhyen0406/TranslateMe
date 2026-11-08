@@ -3,6 +3,7 @@ import { getVisibleMenuItems, ROLE_DISPLAY_LABEL } from '../services/cognitoAuth
 import type { AuthenticatedSession, ConsoleMenuKey } from '../types/auth.js';
 import { GlossaryPage } from './GlossaryPage.js';
 import { MembersPage } from './MembersPage.js';
+import { ReviewPage } from './ReviewPage.js';
 import { WebsitePage } from './WebsitePage.js';
 
 interface ConsoleLayoutProps {
@@ -72,6 +73,8 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session }) => {
           <WebsitePage session={session} />
         ) : activeMenu === 'glossary' ? (
           <GlossaryPage session={session} />
+        ) : activeMenu === 'review' ? (
+          <ReviewPage session={session} />
         ) : (
           <div className="p-8 max-w-4xl">
             <div className="bg-white rounded-xl border border-gray-200 p-8 shadow-sm">
