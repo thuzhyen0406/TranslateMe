@@ -18,7 +18,7 @@
 | **6.4** | `http://10.0.0.1/` | Dải mạng riêng nội bộ VPC RFC 1918 Class A | Chặn IP literal dải riêng `10.0.0.0/8` tại `validateUrl` | `BLOCKED (PRIVATE_IP)` |
 | **6.5** | `http://[::1]/` | Địa chỉ IPv6 Loopback `::1` | Chặn IP literal IPv6 loopback tại `validateUrl` | `BLOCKED (PRIVATE_IP)` |
 | **6.6** | `http://[fd00::1]/` | Địa chỉ IPv6 Unique Local Address (ULA) | Chặn dải IPv6 ULA `fc00::/7` tại `validateUrl` | `BLOCKED (PRIVATE_IP)` |
-| **6.7** | `http://rebind.attacker.test/` | Tấn công DNS Rebinding (TOCTOU) | Ghim IP công khai qua Pinned Lookup, không hỏi DNS lần 2 | `PINNED_LOOKUP_NO_REBIND` |
+| **6.7** | `http://rebind.attacker.test/` | Tấn công DNS Rebinding (TOCTOU) | Ghim IP công khai qua Pinned Lookup, cho phép kết nối an toàn tới IP công khai và ngăn tuyệt đối kết nối tới 127.0.0.1 | `OK (PINNED_LOOKUP_PUBLIC_ALLOWED)` |
 | **6.8** | `http://public.test/redirect-to-private` | Chuỗi chuyển hướng HTTP 302 về IP nội bộ | Chặn chuyển hướng tự động, kiểm duyệt lại URL Location | `BLOCKED (PRIVATE_IP)` |
 | **6.9** | `http://example.test:22/` | Tấn công quét cổng dịch vụ (SSH port 22) | Chỉ cho phép cổng 80 và 443; chặn các cổng khác | `BLOCKED (PORT)` |
 
@@ -28,20 +28,22 @@
 
 Bộ kiểm thử đơn vị hồi quy được thực thi thông qua module [`libs/common/test/ssrfScenario6.ts`](file:///c:/TranslateMe/libs/common/test/ssrfScenario6.ts) với `fakeResolver` và `fakeTransport`:
 
-| ID | Đích kiểm thử | Mục tiêu tấn công | Kết quả mô phỏng | Lý do chặn | Kết nối tới Mock | Vệ sinh Header |
+| ID | Đích kiểm thử | Mục tiêu tấn công | Kết quả mô phỏng | Phân loại xử lý | Ngăn truy cập nội bộ | Vệ sinh Header |
 | :---: | :--- | :--- | :---: | :---: | :---: | :---: |
-| **6.1** | `http://169.254.169.254/latest/meta-data/` | AWS Instance Metadata (Link-Local) | ✅ **PASS** | `PRIVATE_IP` | 0 IP nội bộ (None) | Đã loại bỏ Cookie/Auth |
-| **6.2** | `http://localhost/` | Loopback Hostname (DNS) | ✅ **PASS** | `PRIVATE_IP` | 0 IP nội bộ (None) | Đã loại bỏ Cookie/Auth |
-| **6.3** | `http://127.0.0.1/` | IPv4 Loopback (127.0.0.0/8) | ✅ **PASS** | `PRIVATE_IP` | 0 IP nội bộ (None) | Đã loại bỏ Cookie/Auth |
-| **6.4** | `http://10.0.0.1/` | Private Network RFC 1918 Class A | ✅ **PASS** | `PRIVATE_IP` | 0 IP nội bộ (None) | Đã loại bỏ Cookie/Auth |
-| **6.5** | `http://[::1]/` | IPv6 Loopback | ✅ **PASS** | `PRIVATE_IP` | 0 IP nội bộ (None) | Đã loại bỏ Cookie/Auth |
-| **6.6** | `http://[fd00::1]/` | IPv6 Unique Local Address (fc00::/7) | ✅ **PASS** | `PRIVATE_IP` | 0 IP nội bộ (None) | Đã loại bỏ Cookie/Auth |
-| **6.7** | `http://rebind.attacker.test/` | DNS Rebinding Time-of-Check to Time-of-Use | ✅ **PASS** | `PINNED_LOOKUP_NO_REBIND` | 0 IP nội bộ (Mock: 93.184.216.34) | Đã loại bỏ Cookie/Auth |
-| **6.8** | `http://public.test/redirect-to-private` | Open Redirect Chaining to SSRF | ✅ **PASS** | `PRIVATE_IP` | 0 IP nội bộ (Mock: 93.184.216.34) | Đã loại bỏ Cookie/Auth |
-| **6.9** | `http://example.test:22/` | Restricted Port Protocol Smuggling | ✅ **PASS** | `PORT` | 0 IP nội bộ (None) | Đã loại bỏ Cookie/Auth |
+| **6.1** | `http://169.254.169.254/latest/meta-data/` | AWS Instance Metadata (Link-Local) | ✅ **PASS** | Bị chặn hoàn toàn (`PRIVATE_IP`) | ✅ Đạt (0 IP nội bộ) | Đã loại bỏ Cookie/Auth |
+| **6.2** | `http://localhost/` | Loopback Hostname (DNS) | ✅ **PASS** | Bị chặn hoàn toàn (`PRIVATE_IP`) | ✅ Đạt (0 IP nội bộ) | Đã loại bỏ Cookie/Auth |
+| **6.3** | `http://127.0.0.1/` | IPv4 Loopback (127.0.0.0/8) | ✅ **PASS** | Bị chặn hoàn toàn (`PRIVATE_IP`) | ✅ Đạt (0 IP nội bộ) | Đã loại bỏ Cookie/Auth |
+| **6.4** | `http://10.0.0.1/` | Private Network RFC 1918 Class A | ✅ **PASS** | Bị chặn hoàn toàn (`PRIVATE_IP`) | ✅ Đạt (0 IP nội bộ) | Đã loại bỏ Cookie/Auth |
+| **6.5** | `http://[::1]/` | IPv6 Loopback | ✅ **PASS** | Bị chặn hoàn toàn (`PRIVATE_IP`) | ✅ Đạt (0 IP nội bộ) | Đã loại bỏ Cookie/Auth |
+| **6.6** | `http://[fd00::1]/` | IPv6 Unique Local Address (fc00::/7) | ✅ **PASS** | Bị chặn hoàn toàn (`PRIVATE_IP`) | ✅ Đạt (0 IP nội bộ) | Đã loại bỏ Cookie/Auth |
+| **6.7** | `http://rebind.attacker.test/` | DNS Rebinding Time-of-Check to Time-of-Use | ✅ **PASS** | Cho phép IP công khai ghim (`93.184.216.34`) | ✅ Đạt (0 IP nội bộ) | Đã loại bỏ Cookie/Auth |
+| **6.8** | `http://public.test/redirect-to-private` | Open Redirect Chaining to SSRF | ✅ **PASS** | Bị chặn hoàn toàn (`PRIVATE_IP`) | ✅ Đạt (0 IP nội bộ) | Đã loại bỏ Cookie/Auth |
+| **6.9** | `http://example.test:22/` | Restricted Port Protocol Smuggling | ✅ **PASS** | Bị chặn hoàn toàn (`PORT`) | ✅ Đạt (0 IP nội bộ) | Đã loại bỏ Cookie/Auth |
 
 - **Tổng số tình huống mô phỏng:** 9/9 tình huống.
-- **Kết quả logic `safeFetch`:** 9/9 tình huống xử lý đúng chuẩn (100%).
+- **Ngăn chặn truy cập nội bộ:** **9/9 tình huống (100% đạt chuẩn an toàn)**.
+- **Yêu cầu bị chặn hoàn toàn:** **8/9** (gồm 6.1–6.6, 6.8, 6.9 bị chặn tại bước kiểm tra URL/DNS/Redirect với mã `PRIVATE_IP` hoặc `PORT`).
+- **Yêu cầu an toàn được phép:** **1/9** (tình huống 6.7 DNS rebinding kết nối an toàn tới IP công khai đã ghim `93.184.216.34`, vô hiệu hóa hoàn toàn nỗ lực trỏ về `127.0.0.1`).
 - **Làm sạch Header nhạy cảm:** Header `Cookie`, `Authorization`, `Proxy-Authorization` bị loại bỏ hoàn toàn trước khi tạo request (cả ở request ban đầu và khi redirect).
 
 ---
@@ -76,7 +78,10 @@ Khi môi trường demo được triển khai hoàn chỉnh (khi các hạng m�
 ### 4.3. Chống Tấn Công DNS Rebinding (6.7)
 - **Kỹ thuật tấn công:** Kẻ tấn công cấu hình máy chủ DNS trả về IP công khai ở lần tra cứu 1 (để qua mặt bộ lọc), nhưng trả về `127.0.0.1` ở lần tra cứu 2 khi client tạo kết nối TCP.
 - **Giải pháp Pinned Lookup (Ghim IP):** `safeFetch` chỉ hỏi DNS đúng **1 lần duy nhất** cho mỗi lần nhảy. Sau khi IP công khai được kiểm duyệt an toàn, hàm tạo ra một `lookup` function tùy biến ghim trực tiếp IP này vào cấu hình kết nối của Node.js `http`/`https` Agent.
-- **Kết quả:** Khi mở kết nối TCP, Node.js sử dụng trực tiếp IP công khai đã ghim, **tuyệt đối không phân giải lại DNS lần 2**. Thêm vào đó, tại tầng lookup ghim có thêm lớp phòng thủ chiều sâu từ chối IP nội bộ nếu có lỗi bất thường.
+- **Phân loại xử lý & Kết quả:**
+  - Kết nối tới IP công khai hợp lệ đã kiểm duyệt (`93.184.216.34`) được phép hoàn tất với `outcome: OK`. Đây là hành vi đúng chuẩn của HTTP client khi tải nội dung web công khai an toàn.
+  - Tuyệt đối **không kết nối tới `127.0.0.1`**: Khi mở kết nối TCP, Node.js sử dụng trực tiếp IP công khai đã ghim, **tuyệt đối không phân giải lại DNS lần 2**. Thêm vào đó, tại tầng lookup ghim có thêm lớp phòng thủ chiều sâu từ chối IP nội bộ nếu có lỗi bất thường.
+  - Do đó, tình huống này được phân loại là **yêu cầu an toàn được phép đi tới IP công khai**, đồng thời **ngăn chặn thành công 100% nỗ lực truy cập vào IP nội bộ**.
 
 ### 4.4. Chống Tấn Công Chuyển Hướng Kép (6.8 - Open Redirect)
 - **Kỹ thuật tấn công:** Lợi dụng một trang web công khai hợp lệ trả về mã chuyển hướng HTTP `302 Found` với header `Location: http://10.0.0.1/`.
@@ -96,122 +101,125 @@ Khi môi trường demo được triển khai hoàn chỉnh (khi các hạng m�
 ========================================================================================================
              BỘ KIỂM THỬ HỒI QUY MÔ PHỎNG AN TOÀN SSRF (KỊCH BẢN 6 – MOCK SIMULATION)                  
 ========================================================================================================
-Chế độ kiểm thử:    Mô phỏng đơn vị (Mock Dependencies: fakeResolver + fakeTransport)
-Phạm vi áp dụng:    Kiểm thử hồi quy logic safeFetch (Không dùng làm bằng chứng nghiệm thu demo)
-Tổng số phép thử:   9
-Đích mô phỏng chặn: 9/9 (100%)
-Kết nối tới mock:   0 IP nội bộ (Mock transport không nhận kết nối)
-Header nhạy cảm:    0 rò rỉ (100% được làm sạch trước transport)
-Trạng thái:         ✅ TẤT CẢ PHÉP THỬ MÔ PHỎNG ĐẠT (9/9 PASS)
+Thời gian thực thi:          2026-11-08T15:00:00.000Z
+Chế độ kiểm thử:             Mô phỏng đơn vị (Mock Dependencies: fakeResolver + fakeTransport)
+Phạm vi áp dụng:             Kiểm thử hồi quy logic safeFetch (Không dùng làm bằng chứng nghiệm thu demo)
+Tổng số tình huống:          9
+Ngăn chặn truy cập nội bộ:   9/9 tình huống (100% đạt chuẩn an toàn)
+  + Yêu cầu bị chặn hoàn toàn:     8/9 (6.1-6.6, 6.8, 6.9 bị chặn tại URL/DNS/Redirect)
+  + Yêu cầu an toàn được phép:     1/9 (6.7 DNS rebinding kết nối an toàn tới IP công khai đã ghim)
+Kết nối tới IP nội bộ:       0 kết nối (Mock transport không nhận kết nối nào tới IP nội bộ)
+Header nhạy cảm:             0 rò rỉ (100% được làm sạch trước transport)
+Trạng thái:                  ✅ TẤT CẢ PHÉP THỬ MÔ PHỎNG ĐẠT (9/9 PASS)
 --------------------------------------------------------------------------------------------------------
 [6.1] AWS IMDS Metadata IP (169.254.169.254)
-  - URL đích:          http://169.254.169.254/latest/meta-data/
-  - Danh mục tấn công: AWS Instance Metadata (Link-Local)
-  - Outcome nhận được: BLOCKED (Lý do: PRIVATE_IP)
-  - Bị chặn SSRF:      CÓ (Chặn thành công ở bước kiểm duyệt)
-  - Kết nối IP nội bộ: KHÔNG (Mock transport không ghi nhận kết nối)
-  - Vệ sinh Header:    ĐẠT (Không chuyển tiếp Cookie/Auth)
-  - IP mock kết nối:   [Không có kết nối nào tới transport]
-  - DNS mock queries:  [Không có DNS query]
-  - Kết quả mô phỏng:  ✅ PASS
-  - Chi tiết:          IP bị chặn: 169.254.169.254
+  - URL đích:                  http://169.254.169.254/latest/meta-data/
+  - Danh mục tấn công:         AWS Instance Metadata (Link-Local)
+  - Outcome nhận được:         BLOCKED (Lý do: PRIVATE_IP)
+  - Phân loại xử lý:           Bị chặn hoàn toàn bởi safeFetch
+  - Ngăn truy cập nội bộ:      ĐẠT (Mock transport không nhận kết nối nội bộ)
+  - Vệ sinh Header:            ĐẠT (Không chuyển tiếp Cookie/Auth)
+  - IP mock kết nối:           [Không có kết nối nào tới transport]
+  - DNS mock queries:          [Không có DNS query]
+  - Kết quả mô phỏng:          ✅ PASS
+  - Chi tiết:                  IP bị chặn: 169.254.169.254
 --------------------------------------------------------------------------------------------------------
 [6.2] Tên miền localhost
-  - URL đích:          http://localhost/
-  - Danh mục tấn công: Loopback Hostname (DNS)
-  - Outcome nhận được: BLOCKED (Lý do: PRIVATE_IP)
-  - Bị chặn SSRF:      CÓ (Chặn thành công ở bước kiểm duyệt)
-  - Kết nối IP nội bộ: KHÔNG (Mock transport không ghi nhận kết nối)
-  - Vệ sinh Header:    ĐẠT (Không chuyển tiếp Cookie/Auth)
-  - IP mock kết nối:   [Không có kết nối nào tới transport]
-  - DNS mock queries:  [localhost]
-  - Kết quả mô phỏng:  ✅ PASS
-  - Chi tiết:          localhost phân giải ra IP bị chặn: 127.0.0.1
+  - URL đích:                  http://localhost/
+  - Danh mục tấn công:         Loopback Hostname (DNS)
+  - Outcome nhận được:         BLOCKED (Lý do: PRIVATE_IP)
+  - Phân loại xử lý:           Bị chặn hoàn toàn bởi safeFetch
+  - Ngăn truy cập nội bộ:      ĐẠT (Mock transport không nhận kết nối nội bộ)
+  - Vệ sinh Header:            ĐẠT (Không chuyển tiếp Cookie/Auth)
+  - IP mock kết nối:           [Không có kết nối nào tới transport]
+  - DNS mock queries:          [localhost]
+  - Kết quả mô phỏng:          ✅ PASS
+  - Chi tiết:                  localhost phân giải ra IP bị chặn: 127.0.0.1
 --------------------------------------------------------------------------------------------------------
 [6.3] IPv4 Loopback (127.0.0.1)
-  - URL đích:          http://127.0.0.1/
-  - Danh mục tấn công: IPv4 Loopback (127.0.0.0/8)
-  - Outcome nhận được: BLOCKED (Lý do: PRIVATE_IP)
-  - Bị chặn SSRF:      CÓ (Chặn thành công ở bước kiểm duyệt)
-  - Kết nối IP nội bộ: KHÔNG (Mock transport không ghi nhận kết nối)
-  - Vệ sinh Header:    ĐẠT (Không chuyển tiếp Cookie/Auth)
-  - IP mock kết nối:   [Không có kết nối nào tới transport]
-  - DNS mock queries:  [Không có DNS query]
-  - Kết quả mô phỏng:  ✅ PASS
-  - Chi tiết:          IP bị chặn: 127.0.0.1
+  - URL đích:                  http://127.0.0.1/
+  - Danh mục tấn công:         IPv4 Loopback (127.0.0.0/8)
+  - Outcome nhận được:         BLOCKED (Lý do: PRIVATE_IP)
+  - Phân loại xử lý:           Bị chặn hoàn toàn bởi safeFetch
+  - Ngăn truy cập nội bộ:      ĐẠT (Mock transport không nhận kết nối nội bộ)
+  - Vệ sinh Header:            ĐẠT (Không chuyển tiếp Cookie/Auth)
+  - IP mock kết nối:           [Không có kết nối nào tới transport]
+  - DNS mock queries:          [Không có DNS query]
+  - Kết quả mô phỏng:          ✅ PASS
+  - Chi tiết:                  IP bị chặn: 127.0.0.1
 --------------------------------------------------------------------------------------------------------
 [6.4] IPv4 Private Class A (10.0.0.1)
-  - URL đích:          http://10.0.0.1/
-  - Danh mục tấn công: Private Network RFC 1918 Class A
-  - Outcome nhận được: BLOCKED (Lý do: PRIVATE_IP)
-  - Bị chặn SSRF:      CÓ (Chặn thành công ở bước kiểm duyệt)
-  - Kết nối IP nội bộ: KHÔNG (Mock transport không ghi nhận kết nối)
-  - Vệ sinh Header:    ĐẠT (Không chuyển tiếp Cookie/Auth)
-  - IP mock kết nối:   [Không có kết nối nào tới transport]
-  - DNS mock queries:  [Không có DNS query]
-  - Kết quả mô phỏng:  ✅ PASS
-  - Chi tiết:          IP bị chặn: 10.0.0.1
+  - URL đích:                  http://10.0.0.1/
+  - Danh mục tấn công:         Private Network RFC 1918 Class A
+  - Outcome nhận được:         BLOCKED (Lý do: PRIVATE_IP)
+  - Phân loại xử lý:           Bị chặn hoàn toàn bởi safeFetch
+  - Ngăn truy cập nội bộ:      ĐẠT (Mock transport không nhận kết nối nội bộ)
+  - Vệ sinh Header:            ĐẠT (Không chuyển tiếp Cookie/Auth)
+  - IP mock kết nối:           [Không có kết nối nào tới transport]
+  - DNS mock queries:          [Không có DNS query]
+  - Kết quả mô phỏng:          ✅ PASS
+  - Chi tiết:                  IP bị chặn: 10.0.0.1
 --------------------------------------------------------------------------------------------------------
 [6.5] IPv6 Loopback ([::1])
-  - URL đích:          http://[::1]/
-  - Danh mục tấn công: IPv6 Loopback
-  - Outcome nhận được: BLOCKED (Lý do: PRIVATE_IP)
-  - Bị chặn SSRF:      CÓ (Chặn thành công ở bước kiểm duyệt)
-  - Kết nối IP nội bộ: KHÔNG (Mock transport không ghi nhận kết nối)
-  - Vệ sinh Header:    ĐẠT (Không chuyển tiếp Cookie/Auth)
-  - IP mock kết nối:   [Không có kết nối nào tới transport]
-  - DNS mock queries:  [Không có DNS query]
-  - Kết quả mô phỏng:  ✅ PASS
-  - Chi tiết:          IP bị chặn: ::1
+  - URL đích:                  http://[::1]/
+  - Danh mục tấn công:         IPv6 Loopback
+  - Outcome nhận được:         BLOCKED (Lý do: PRIVATE_IP)
+  - Phân loại xử lý:           Bị chặn hoàn toàn bởi safeFetch
+  - Ngăn truy cập nội bộ:      ĐẠT (Mock transport không nhận kết nối nội bộ)
+  - Vệ sinh Header:            ĐẠT (Không chuyển tiếp Cookie/Auth)
+  - IP mock kết nối:           [Không có kết nối nào tới transport]
+  - DNS mock queries:          [Không có DNS query]
+  - Kết quả mô phỏng:          ✅ PASS
+  - Chi tiết:                  IP bị chặn: ::1
 --------------------------------------------------------------------------------------------------------
 [6.6] IPv6 Unique Local Address ([fd00::1])
-  - URL đích:          http://[fd00::1]/
-  - Danh mục tấn công: IPv6 Unique Local Address (fc00::/7)
-  - Outcome nhận được: BLOCKED (Lý do: PRIVATE_IP)
-  - Bị chặn SSRF:      CÓ (Chặn thành công ở bước kiểm duyệt)
-  - Kết nối IP nội bộ: KHÔNG (Mock transport không ghi nhận kết nối)
-  - Vệ sinh Header:    ĐẠT (Không chuyển tiếp Cookie/Auth)
-  - IP mock kết nối:   [Không có kết nối nào tới transport]
-  - DNS mock queries:  [Không có DNS query]
-  - Kết quả mô phỏng:  ✅ PASS
-  - Chi tiết:          IP bị chặn: fd00::1
+  - URL đích:                  http://[fd00::1]/
+  - Danh mục tấn công:         IPv6 Unique Local Address (fc00::/7)
+  - Outcome nhận được:         BLOCKED (Lý do: PRIVATE_IP)
+  - Phân loại xử lý:           Bị chặn hoàn toàn bởi safeFetch
+  - Ngăn truy cập nội bộ:      ĐẠT (Mock transport không nhận kết nối nội bộ)
+  - Vệ sinh Header:            ĐẠT (Không chuyển tiếp Cookie/Auth)
+  - IP mock kết nối:           [Không có kết nối nào tới transport]
+  - DNS mock queries:          [Không có DNS query]
+  - Kết quả mô phỏng:          ✅ PASS
+  - Chi tiết:                  IP bị chặn: fd00::1
 --------------------------------------------------------------------------------------------------------
 [6.7] Tấn công DNS Rebinding
-  - URL đích:          http://rebind.attacker.test/
-  - Danh mục tấn công: DNS Rebinding Time-of-Check to Time-of-Use
-  - Outcome nhận được: OK (Lý do: PINNED_LOOKUP_NO_REBIND)
-  - Bị chặn SSRF:      CÓ (Chặn thành công ở bước kiểm duyệt)
-  - Kết nối IP nội bộ: KHÔNG (Mock transport không ghi nhận kết nối)
-  - Vệ sinh Header:    ĐẠT (Không chuyển tiếp Cookie/Auth)
-  - IP mock kết nối:   [93.184.216.34]
-  - DNS mock queries:  [rebind.attacker.test]
-  - Kết quả mô phỏng:  ✅ PASS
-  - Chi tiết:          DNS chỉ phân giải 1 lần. Socket ghim trực tiếp IP công khai đã kiểm duyệt. Địa chỉ 127.0.0.1 hoàn toàn không bao giờ được kết nối.
+  - URL đích:                  http://rebind.attacker.test/
+  - Danh mục tấn công:         DNS Rebinding Time-of-Check to Time-of-Use
+  - Outcome nhận được:         OK (Lý do: PINNED_LOOKUP_PUBLIC_ALLOWED)
+  - Phân loại xử lý:           Cho phép kết nối an toàn tới IP công khai đã ghim
+  - Ngăn truy cập nội bộ:      ĐẠT (Mock transport không nhận kết nối nội bộ)
+  - Vệ sinh Header:            ĐẠT (Không chuyển tiếp Cookie/Auth)
+  - IP mock kết nối:           [93.184.216.34]
+  - DNS mock queries:          [rebind.attacker.test]
+  - Kết quả mô phỏng:          ✅ PASS
+  - Chi tiết:                  DNS chỉ phân giải 1 lần. Socket ghim trực tiếp IP công khai đã kiểm duyệt (93.184.216.34). Địa chỉ nội bộ 127.0.0.1 hoàn toàn không bao giờ được kết nối.
 --------------------------------------------------------------------------------------------------------
 [6.8] URL chuyển hướng HTTP 302 về địa chỉ nội bộ
-  - URL đích:          http://public.test/redirect-to-private
-  - Danh mục tấn công: Open Redirect Chaining to SSRF
-  - Outcome nhận được: BLOCKED (Lý do: PRIVATE_IP)
-  - Bị chặn SSRF:      CÓ (Chặn thành công ở bước kiểm duyệt)
-  - Kết nối IP nội bộ: KHÔNG (Mock transport không ghi nhận kết nối)
-  - Vệ sinh Header:    ĐẠT (Không chuyển tiếp Cookie/Auth)
-  - IP mock kết nối:   [93.184.216.34]
-  - DNS mock queries:  [public.test]
-  - Kết quả mô phỏng:  ✅ PASS
-  - Chi tiết:          Chuyển hướng 302 tới 10.0.0.1 bị chặn ngay lập tức. Header Cookie và Authorization bị xóa bỏ 100%, không chuyển tiếp.
+  - URL đích:                  http://public.test/redirect-to-private
+  - Danh mục tấn công:         Open Redirect Chaining to SSRF
+  - Outcome nhận được:         BLOCKED (Lý do: PRIVATE_IP)
+  - Phân loại xử lý:           Bị chặn hoàn toàn bởi safeFetch
+  - Ngăn truy cập nội bộ:      ĐẠT (Mock transport không nhận kết nối nội bộ)
+  - Vệ sinh Header:            ĐẠT (Không chuyển tiếp Cookie/Auth)
+  - IP mock kết nối:           [93.184.216.34]
+  - DNS mock queries:          [public.test]
+  - Kết quả mô phỏng:          ✅ PASS
+  - Chi tiết:                  Chuyển hướng 302 tới 10.0.0.1 bị chặn ngay lập tức. Header Cookie và Authorization bị xóa bỏ 100%, không chuyển tiếp.
 --------------------------------------------------------------------------------------------------------
 [6.9] Cổng không hợp lệ (Cổng 22 - SSH)
-  - URL đích:          http://example.test:22/
-  - Danh mục tấn công: Restricted Port Protocol Smuggling
-  - Outcome nhận được: BLOCKED (Lý do: PORT)
-  - Bị chặn SSRF:      CÓ (Chặn thành công ở bước kiểm duyệt)
-  - Kết nối IP nội bộ: KHÔNG (Mock transport không ghi nhận kết nối)
-  - Vệ sinh Header:    ĐẠT (Không chuyển tiếp Cookie/Auth)
-  - IP mock kết nối:   [Không có kết nối nào tới transport]
-  - DNS mock queries:  [Không có DNS query]
-  - Kết quả mô phỏng:  ✅ PASS
-  - Chi tiết:          Cổng 22 bị chặn ở bước validateUrl trước khi gọi DNS và trước khi kết nối mạng. Chỉ cho phép cổng 80 và 443.
+  - URL đích:                  http://example.test:22/
+  - Danh mục tấn công:         Restricted Port Protocol Smuggling
+  - Outcome nhận được:         BLOCKED (Lý do: PORT)
+  - Phân loại xử lý:           Bị chặn hoàn toàn bởi safeFetch
+  - Ngăn truy cập nội bộ:      ĐẠT (Mock transport không nhận kết nối nội bộ)
+  - Vệ sinh Header:            ĐẠT (Không chuyển tiếp Cookie/Auth)
+  - IP mock kết nối:           [Không có kết nối nào tới transport]
+  - DNS mock queries:          [Không có DNS query]
+  - Kết quả mô phỏng:          ✅ PASS
+  - Chi tiết:                  Cổng 22 bị chặn ở bước validateUrl trước khi gọi DNS và trước khi kết nối mạng. Chỉ cho phép cổng 80 và 443.
 --------------------------------------------------------------------------------------------------------
-KẾT LUẬN: Kịch bản 6 (Mô phỏng hồi quy): 9/9 tình huống được safeFetch xử lý đúng logic mô phỏng. 0 kết nối socket được chuyển tới mock transport. 0 rò rỉ Cookie/Authorization. Lưu ý: Bằng chứng nghiệm thu chính thức sẽ được đo đạc trên bản demo (Hạng mục 5.9).
+KẾT LUẬN: Kịch bản 6 (Mô phỏng hồi quy): 9/9 tình huống ngăn chặn thành công truy cập nội bộ (gồm 8 yêu cầu bị chặn hoàn toàn và 1 yêu cầu an toàn được phép đi tới IP công khai đã ghim). 0 kết nối socket tới IP nội bộ. 0 rò rỉ Cookie/Authorization. Lưu ý: Bằng chứng nghiệm thu chính thức sẽ được đo đạc trên bản demo (Hạng mục 5.9).
 ========================================================================================================
 ```

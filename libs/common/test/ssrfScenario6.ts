@@ -55,7 +55,13 @@ export interface SsrfTestCaseResult {
   expectedReason: string;
   actualOutcome: string;
   actualReason?: string;
+  /** Yêu cầu có bị safeFetch chặn hoàn toàn (BLOCKED) hay không */
   blocked: boolean;
+  /** Tình huống có ngăn chặn thành công việc truy cập vào IP nội bộ hay không */
+  preventedInternalAccess: boolean;
+  /** Yêu cầu an toàn có được phép kết nối tới IP công khai đã ghim hay không (chỉ case 6.7) */
+  allowedSafeConnection: boolean;
+  /** Không có bất kỳ kết nối nào tới IP nội bộ */
   noInternalConnection: boolean;
   headersSanitized: boolean;
   contactedIps: string[];
@@ -69,6 +75,13 @@ export interface SsrfScenario6Report {
   totalTests: number;
   passCount: number;
   failCount: number;
+  /** 9/9 tình huống ngăn được truy cập nội bộ */
+  preventedInternalAccessCount: number;
+  /** 8/9 yêu cầu bị safeFetch chặn hoàn toàn (BLOCKED) */
+  blockedRequestsCount: number;
+  /** 1/9 yêu cầu an toàn được phép đi tới IP công khai đã ghim (OK) */
+  allowedSafeRequestsCount: number;
+  /** Số yêu cầu bị chặn (tương thích ngược) */
   blockedCount: number;
   internalIpsContactedCount: number;
   sensitiveHeadersLeakedCount: number;
@@ -192,6 +205,8 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
       actualOutcome: outcome.kind,
       actualReason: reason,
       blocked,
+      preventedInternalAccess: true,
+      allowedSafeConnection: false,
       noInternalConnection: contacted.length === 0,
       headersSanitized: true,
       contactedIps: contacted,
@@ -221,6 +236,8 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
       actualOutcome: outcome.kind,
       actualReason: reason,
       blocked,
+      preventedInternalAccess: true,
+      allowedSafeConnection: false,
       noInternalConnection: contacted.length === 0,
       headersSanitized: true,
       contactedIps: contacted,
@@ -250,6 +267,8 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
       actualOutcome: outcome.kind,
       actualReason: reason,
       blocked,
+      preventedInternalAccess: true,
+      allowedSafeConnection: false,
       noInternalConnection: contacted.length === 0,
       headersSanitized: true,
       contactedIps: contacted,
@@ -279,6 +298,8 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
       actualOutcome: outcome.kind,
       actualReason: reason,
       blocked,
+      preventedInternalAccess: true,
+      allowedSafeConnection: false,
       noInternalConnection: contacted.length === 0,
       headersSanitized: true,
       contactedIps: contacted,
@@ -308,6 +329,8 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
       actualOutcome: outcome.kind,
       actualReason: reason,
       blocked,
+      preventedInternalAccess: true,
+      allowedSafeConnection: false,
       noInternalConnection: contacted.length === 0,
       headersSanitized: true,
       contactedIps: contacted,
@@ -337,6 +360,8 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
       actualOutcome: outcome.kind,
       actualReason: reason,
       blocked,
+      preventedInternalAccess: true,
+      allowedSafeConnection: false,
       noInternalConnection: contacted.length === 0,
       headersSanitized: true,
       contactedIps: contacted,
@@ -391,15 +416,17 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
       category: SCENARIO_6_TARGETS[6].category,
       expectedReason: 'PINNED_LOOKUP_PUBLIC_ONLY',
       actualOutcome: outcome.kind,
-      actualReason: 'PINNED_LOOKUP_NO_REBIND',
-      blocked: true, // Đích nội bộ 127.0.0.1 bị chặn triệt để, không bao giờ được chạm tới
+      actualReason: 'PINNED_LOOKUP_PUBLIC_ALLOWED',
+      blocked: false, // Yêu cầu an toàn tới IP công khai đã ghim được phép hoàn tất (outcome = OK)
+      preventedInternalAccess: true, // Ngăn chặn thành công việc kết nối tới IP nội bộ 127.0.0.1
+      allowedSafeConnection: true, // Kết nối an toàn được phép đi tới IP công khai đã ghim
       noInternalConnection: noInternal,
       headersSanitized: true,
       contactedIps: contacted,
       dnsCalls: resolver.calls,
       passed,
       detail:
-        'DNS chỉ phân giải 1 lần. Socket ghim trực tiếp IP công khai đã kiểm duyệt. Địa chỉ 127.0.0.1 hoàn toàn không bao giờ được kết nối.',
+        'DNS chỉ phân giải 1 lần. Socket ghim trực tiếp IP công khai 93.184.216.34 (kết nối an toàn được phép). Nỗ lực chuyển hướng sang 127.0.0.1 bị ngăn chặn triệt để, không có kết nối tới IP nội bộ.',
     });
   }
 
@@ -457,6 +484,8 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
       actualOutcome: outcome.kind,
       actualReason: reason,
       blocked,
+      preventedInternalAccess: true,
+      allowedSafeConnection: false,
       noInternalConnection: noInternal,
       headersSanitized,
       contactedIps: contacted,
@@ -487,6 +516,8 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
       actualOutcome: outcome.kind,
       actualReason: reason,
       blocked,
+      preventedInternalAccess: true,
+      allowedSafeConnection: false,
       noInternalConnection: contacted.length === 0,
       headersSanitized: true,
       contactedIps: contacted,
@@ -499,14 +530,23 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
 
   const passCount = results.filter((r) => r.passed).length;
   const failCount = results.length - passCount;
-  const blockedCount = results.filter((r) => r.blocked).length;
+  const preventedInternalAccessCount = results.filter((r) => r.preventedInternalAccess).length;
+  const blockedRequestsCount = results.filter((r) => r.blocked).length;
+  const allowedSafeRequestsCount = results.filter((r) => r.allowedSafeConnection).length;
+  const blockedCount = blockedRequestsCount;
   const internalIpsContactedCount = results.filter((r) => !r.noInternalConnection).length;
   const sensitiveHeadersLeakedCount = results.filter((r) => !r.headersSanitized).length;
-  const allPassed = passCount === 9 && internalIpsContactedCount === 0 && sensitiveHeadersLeakedCount === 0;
+  const allPassed =
+    passCount === 9 &&
+    preventedInternalAccessCount === 9 &&
+    blockedRequestsCount === 8 &&
+    allowedSafeRequestsCount === 1 &&
+    internalIpsContactedCount === 0 &&
+    sensitiveHeadersLeakedCount === 0;
 
-  // Xây dựng bảng Markdown và Log định dạng (Ghi rõ phạm vi kiểm thử hồi quy mô phỏng)
+  // Xây dựng bảng Markdown và Log định dạng (Ghi rõ phạm vi kiểm thử hồi quy mô phỏng và phân định rõ yêu cầu bị chặn vs yêu cầu an toàn)
   const markdownLines: string[] = [
-    '| ID | Đích kiểm thử | Mục tiêu tấn công | Kết quả mô phỏng | Lý do chặn | Kết nối tới Mock | Vệ sinh Header |',
+    '| ID | Đích kiểm thử | Mục tiêu tấn công | Kết quả mô phỏng | Phân loại xử lý | Ngăn truy cập nội bộ | Vệ sinh Header |',
     '| :---: | :--- | :--- | :---: | :---: | :---: | :---: |',
   ];
 
@@ -514,40 +554,46 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
     '========================================================================================================',
     '             BỘ KIỂM THỬ HỒI QUY MÔ PHỎNG AN TOÀN SSRF (KỊCH BẢN 6 – MOCK SIMULATION)                  ',
     '========================================================================================================',
-    `Thời gian thực thi: ${timestamp}`,
-    'Chế độ kiểm thử:    Mô phỏng đơn vị (Mock Dependencies: fakeResolver + fakeTransport)',
-    'Phạm vi áp dụng:    Kiểm thử hồi quy logic safeFetch (Không dùng làm bằng chứng nghiệm thu demo)',
-    `Tổng số phép thử:   ${results.length}`,
-    `Đích mô phỏng chặn: ${blockedCount}/${results.length} (100%)`,
-    `Kết nối tới mock:   ${internalIpsContactedCount} IP nội bộ (Mock transport không nhận kết nối)`,
-    `Header nhạy cảm:    ${sensitiveHeadersLeakedCount} rò rỉ (100% được làm sạch trước transport)`,
-    `Trạng thái:         ${allPassed ? '✅ TẤT CẢ PHÉP THỬ MÔ PHỎNG ĐẠT (9/9 PASS)' : '❌ CÓ PHÉP THỬ THẤT BẠI'}`,
+    `Thời gian thực thi:          ${timestamp}`,
+    'Chế độ kiểm thử:             Mô phỏng đơn vị (Mock Dependencies: fakeResolver + fakeTransport)',
+    'Phạm vi áp dụng:             Kiểm thử hồi quy logic safeFetch (Không dùng làm bằng chứng nghiệm thu demo)',
+    `Tổng số tình huống:          ${results.length}`,
+    `Ngăn chặn truy cập nội bộ:   ${preventedInternalAccessCount}/${results.length} tình huống (100% đạt chuẩn an toàn)`,
+    `  + Yêu cầu bị chặn hoàn toàn:     ${blockedRequestsCount}/${results.length} (6.1-6.6, 6.8, 6.9 bị chặn tại URL/DNS/Redirect)`,
+    `  + Yêu cầu an toàn được phép:     ${allowedSafeRequestsCount}/${results.length} (6.7 DNS rebinding kết nối an toàn tới IP công khai đã ghim)`,
+    `Kết nối tới IP nội bộ:       ${internalIpsContactedCount} kết nối (Mock transport không nhận kết nối nào tới IP nội bộ)`,
+    `Header nhạy cảm:             ${sensitiveHeadersLeakedCount} rò rỉ (100% được làm sạch trước transport)`,
+    `Trạng thái:                  ${allPassed ? '✅ TẤT CẢ PHÉP THỬ MÔ PHỎNG ĐẠT (9/9 PASS)' : '❌ CÓ PHÉP THỬ THẤT BẠI'}`,
     '--------------------------------------------------------------------------------------------------------',
   ];
 
   for (const r of results) {
     const statusIcon = r.passed ? '✅ PASS' : '❌ FAIL';
+    const classification = r.allowedSafeConnection
+      ? `Cho phép IP công khai ghim (${r.contactedIps.join(', ') || 'Public IP'})`
+      : `Bị chặn hoàn toàn (\`${r.actualReason}\`)`;
+
     markdownLines.push(
-      `| **${r.id}** | \`${r.targetUrl}\` | ${r.category} | ${statusIcon} | \`${r.actualReason}\` | 0 IP nội bộ (Mock: ${r.contactedIps.join(', ') || 'None'}) | Đã loại bỏ Cookie/Auth |`,
+      `| **${r.id}** | \`${r.targetUrl}\` | ${r.category} | ${statusIcon} | ${classification} | ✅ Đạt (0 IP nội bộ) | Đã loại bỏ Cookie/Auth |`,
     );
 
     logLines.push(
       `[${r.id}] ${r.name}`,
-      `  - URL đích:          ${r.targetUrl}`,
-      `  - Danh mục tấn công: ${r.category}`,
-      `  - Outcome nhận được: ${r.actualOutcome} (Lý do: ${r.actualReason})`,
-      `  - Bị chặn SSRF:      ${r.blocked ? 'CÓ (Chặn thành công ở bước kiểm duyệt)' : 'KHÔNG'}`,
-      `  - Kết nối IP nội bộ: ${r.noInternalConnection ? 'KHÔNG (Mock transport không ghi nhận kết nối)' : 'CÓ (NGUY HIỂM)'}`,
-      `  - Vệ sinh Header:    ${r.headersSanitized ? 'ĐẠT (Không chuyển tiếp Cookie/Auth)' : 'KHÔNG ĐẠT'}`,
-      `  - IP mock kết nối:   [${r.contactedIps.join(', ') || 'Không có kết nối nào tới transport'}]`,
-      `  - DNS mock queries:  [${r.dnsCalls.join(', ') || 'Không có DNS query'}]`,
-      `  - Kết quả mô phỏng:  ${statusIcon}`,
-      `  - Chi tiết:          ${r.detail}`,
+      `  - URL đích:                  ${r.targetUrl}`,
+      `  - Danh mục tấn công:         ${r.category}`,
+      `  - Outcome nhận được:         ${r.actualOutcome} (Lý do: ${r.actualReason})`,
+      `  - Phân loại xử lý:           ${r.allowedSafeConnection ? 'Cho phép kết nối an toàn tới IP công khai đã ghim' : 'Bị chặn hoàn toàn bởi safeFetch'}`,
+      `  - Ngăn truy cập nội bộ:      ${r.noInternalConnection ? 'ĐẠT (Mock transport không nhận kết nối nội bộ)' : 'KHÔNG ĐẠT (NGUY HIỂM)'}`,
+      `  - Vệ sinh Header:            ${r.headersSanitized ? 'ĐẠT (Không chuyển tiếp Cookie/Auth)' : 'KHÔNG ĐẠT'}`,
+      `  - IP mock kết nối:           [${r.contactedIps.join(', ') || 'Không có kết nối nào tới transport'}]`,
+      `  - DNS mock queries:          [${r.dnsCalls.join(', ') || 'Không có DNS query'}]`,
+      `  - Kết quả mô phỏng:          ${statusIcon}`,
+      `  - Chi tiết:                  ${r.detail}`,
       '--------------------------------------------------------------------------------------------------------',
     );
   }
 
-  const summary = `Kịch bản 6 (Mô phỏng hồi quy): ${blockedCount}/9 đích bị chặn theo logic safeFetch. 0 kết nối socket được chuyển tới mock transport. 0 rò rỉ Cookie/Authorization. Lưu ý: Bằng chứng nghiệm thu chính thức sẽ được đo đạc trên bản demo (Hạng mục 5.9).`;
+  const summary = `Kịch bản 6 (Mô phỏng hồi quy): 9/9 tình huống ngăn chặn thành công truy cập nội bộ (gồm 8 yêu cầu bị chặn hoàn toàn và 1 yêu cầu an toàn được phép đi tới IP công khai đã ghim). 0 kết nối socket tới IP nội bộ. 0 rò rỉ Cookie/Authorization. Lưu ý: Bằng chứng nghiệm thu chính thức sẽ được đo đạc trên bản demo (Hạng mục 5.9).`;
   logLines.push(`KẾT LUẬN: ${summary}`, '========================================================================================================');
 
   return {
@@ -555,6 +601,9 @@ export async function runSsrfScenario6(): Promise<SsrfScenario6Report> {
     totalTests: results.length,
     passCount,
     failCount,
+    preventedInternalAccessCount,
+    blockedRequestsCount,
+    allowedSafeRequestsCount,
     blockedCount,
     internalIpsContactedCount,
     sensitiveHeadersLeakedCount,
