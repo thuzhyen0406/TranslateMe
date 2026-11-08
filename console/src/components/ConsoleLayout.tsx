@@ -3,6 +3,9 @@ import { getVisibleMenuItems, ROLE_DISPLAY_LABEL } from '../services/cognitoAuth
 import type { AuthenticatedSession, ConsoleMenuKey } from '../types/auth.js';
 import { MembersPage } from './MembersPage.js';
 import { WebsitePage } from './WebsitePage.js';
+import { ApiKeysPage } from './ApiKeysPage.js';
+import { PlaygroundPage } from './PlaygroundPage.js';
+import { BatchTranslatePage } from './BatchTranslatePage.js';
 
 interface ConsoleLayoutProps {
   session: AuthenticatedSession;
@@ -67,6 +70,12 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session }) => {
           <MembersPage session={session} />
         ) : activeMenu === 'website' ? (
           <WebsitePage session={session} />
+        ) : activeMenu === 'apikey' ? (
+          <ApiKeysPage session={session} />
+        ) : activeMenu === 'playground' ? (
+          <PlaygroundPage session={session} />
+        ) : activeMenu === 'doc-translate' ? (
+          <BatchTranslatePage session={session} />
         ) : (
           <div className="p-8 max-w-4xl">
             <div className="bg-white rounded-xl border border-gray-200 p-8 shadow-sm">
