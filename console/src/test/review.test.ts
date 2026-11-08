@@ -4,7 +4,9 @@ import {
   ReviewApiError,
   createHttpReviewApi,
   createMockReviewApi,
+  extractInvalidationIds,
   extractPlaceholderTokens,
+  checkMultipleInvalidationsStatus,
   invalidationFromJson,
   MAX_INVALIDATION_POLL_ATTEMPTS,
   getInvalidationPollIntervalMs,
@@ -594,3 +596,136 @@ describe('createMockReviewApi – toàn bộ luồng duyệt Q4 trong chế đ�
     assert.deepEqual(retried.paths, ['/homestay-abc/en/bang-gia']);
   });
 });
+
+describe('Theo dõi toàn bộ Invalidation IDs CloudFront & xử lý hoàn tất/lỗi đa batch (Task 4.10)', () => {
+  it('extractInvalidationIds trích xuất đủ ID từ invalidationIds và invalidationId, loại trùng và chuỗi rỗng', () => {
+    // Rỗng / undefined
+    assert.deepEqual(extractInvalidationIds(undefined), []);
+    assert.deepEqual(
+      extractInvalidationIds({
+        status: 'SKIPPED_NO_PAGES',
+        mode: 'PATHS',
+        paths: [],
+        invalidationIds: [],
+      }),
+      [],
+    );
+
+    // Chỉ có invalidationId đơn lẻ
+    assert.deepEqual(
+      extractInvalidationIds({
+        status: 'SUBMITTED',
+        mode: 'PATHS',
+        paths: ['/a'],
+        invalidationId: 'inv-single',
+      }),
+      ['inv-single'],
+    );
+
+    // Có invalidationIds mảng nhiều phần tử kèm trùng lặp và invalidationId đơn
+    assert.deepEqual(
+      extractInvalidationIds({
+        status: 'SUBMITTED',
+        mode: 'PATHS',
+        paths: ['/a', '/b'],
+        invalidationIds: ['inv-1', 'inv-2', 'inv-1', '  '],
+        invalidationId: 'inv-2',
+      }),
+      ['inv-1', 'inv-2'],
+    );
+  });
+
+  it('checkMultipleInvalidationsStatus theo dõi nhiều ID với tiến độ so le: inv-1 hoàn tất trước, chỉ báo hoàn tất khi tất cả hoàn tất', async () => {
+    // Giả lập trạng thái từng ID qua các lần thăm dò
+    let pollCount1 = 0;
+    let pollCount2 = 0;
+
+    const mockApi = {
+      async checkInvalidationStatus(id: string) {
+        if (id === 'inv-1') {
+          pollCount1++;
+          // inv-1 hoàn tất ngay ở lần poll đầu tiên
+          return { invalidationId: 'inv-1', status: 'COMPLETED' as const };
+        }
+        if (id === 'inv-2') {
+          pollCount2++;
+          // inv-2 ở lần poll 1 vẫn đang chạy (InProgress), sang lần poll 2 mới hoàn tất (COMPLETED)
+          return {
+            invalidationId: 'inv-2',
+            status: pollCount2 >= 2 ? ('COMPLETED' as const) : ('IN_PROGRESS' as const),
+          };
+        }
+        return { invalidationId: id, status: 'InProgress' as const };
+      },
+    };
+
+    const ids = ['inv-1', 'inv-2'];
+
+    // Lần poll 1: inv-1 COMPLETED, inv-2 IN_PROGRESS -> tổng thể phải là InProgress, chưa được báo hoàn tất
+    const result1 = await checkMultipleInvalidationsStatus(mockApi, ids);
+    assert.equal(result1.status, 'InProgress', 'Khi còn ID đang chạy thì tổng thể vẫn là InProgress');
+    assert.deepEqual(result1.completedIds, ['inv-1']);
+    assert.deepEqual(result1.inProgressIds, ['inv-2']);
+    assert.deepEqual(result1.failedIds, []);
+
+    // Lần poll 2: tiếp tục thăm dò ID còn dở dang (pendingIds = ['inv-2'])
+    const result2 = await checkMultipleInvalidationsStatus(mockApi, result1.inProgressIds);
+    assert.equal(result2.status, 'Completed', 'Khi ID còn lại hoàn tất thì tổng thể báo Completed');
+    assert.deepEqual(result2.completedIds, ['inv-2']);
+    assert.deepEqual(result2.inProgressIds, []);
+    assert.deepEqual(result2.failedIds, []);
+
+    // Kiểm tra khi truyền cả 2 ID ở lần 2 (đảm bảo hàm idempotent và gộp kết quả đúng)
+    const resultFull = await checkMultipleInvalidationsStatus(mockApi, ids);
+    assert.equal(resultFull.status, 'Completed');
+    assert.deepEqual(resultFull.completedIds, ['inv-1', 'inv-2']);
+    assert.deepEqual(resultFull.inProgressIds, []);
+    assert.deepEqual(resultFull.failedIds, []);
+  });
+
+  it('checkMultipleInvalidationsStatus báo Failed ngay khi có bất kỳ ID nào thất bại', async () => {
+    const mockApi = {
+      async checkInvalidationStatus(id: string) {
+        if (id === 'inv-ok') return { invalidationId: 'inv-ok', status: 'Completed' as const };
+        if (id === 'inv-err') return { invalidationId: 'inv-err', status: 'Failed' as const };
+        return { invalidationId: id, status: 'InProgress' as const };
+      },
+    };
+
+    const res = await checkMultipleInvalidationsStatus(mockApi, ['inv-ok', 'inv-err']);
+    assert.equal(res.status, 'Failed');
+    assert.deepEqual(res.completedIds, ['inv-ok']);
+    assert.deepEqual(res.failedIds, ['inv-err']);
+    assert.deepEqual(res.inProgressIds, []);
+  });
+
+  it('checkMultipleInvalidationsStatus chịu lỗi mạng tạm thời mà không làm sập tiến trình thăm dò', async () => {
+    const mockApi = {
+      async checkInvalidationStatus(id: string) {
+        if (id === 'inv-flaky') {
+          throw new Error('Network timeout / 503 Service Unavailable');
+        }
+        return { invalidationId: id, status: 'Completed' as const };
+      },
+    };
+
+    // Khi có lỗi mạng, ID đó được giữ ở InProgress để lần thăm dò tiếp theo thử lại
+    const res = await checkMultipleInvalidationsStatus(mockApi, ['inv-flaky', 'inv-ok']);
+    assert.equal(res.status, 'InProgress');
+    assert.deepEqual(res.completedIds, ['inv-ok']);
+    assert.deepEqual(res.inProgressIds, ['inv-flaky']);
+    assert.deepEqual(res.failedIds, []);
+  });
+
+  it('checkMultipleInvalidationsStatus trả về Completed khi mảng rỗng', async () => {
+    const mockApi = {
+      async checkInvalidationStatus(id: string) {
+        return { invalidationId: id, status: 'Completed' as const };
+      },
+    };
+    const res = await checkMultipleInvalidationsStatus(mockApi, []);
+    assert.equal(res.status, 'Completed');
+    assert.deepEqual(res.completedIds, []);
+  });
+});
+
