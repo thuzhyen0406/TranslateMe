@@ -35,7 +35,7 @@ function collectPartitionKeys(value: unknown, keys: Set<string>): void {
 /** Restricts an STS session to one tenant partition and its payload object prefixes. */
 export function tenantSessionPolicy(
   tenantId: string,
-  buckets: { payloadBucketArn?: string; batchUploadBucketArn?: string } = {},
+  buckets: { payloadBucketArn?: string; batchUploadBucketArn?: string; batchUploadKmsKeyArn?: string } = {},
 ): string {
   if (!/^t_[A-Za-z0-9_-]{1,64}$/.test(tenantId)) throw new TypeError('Invalid tenant ID');
   const statements: Array<Record<string, unknown>> = [{
@@ -56,7 +56,24 @@ export function tenantSessionPolicy(
     statements.push({ Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject'], Resource: `${buckets.payloadBucketArn}/worker/${tenantId}/*` });
   }
   if (buckets.batchUploadBucketArn) {
-    statements.push({ Effect: 'Allow', Action: 's3:PutObject', Resource: `${buckets.batchUploadBucketArn}/batch/${tenantId}/*` });
+    statements.push({
+      Effect: 'Allow',
+      Action: ['s3:GetObject', 's3:PutObject'],
+      Resource: `${buckets.batchUploadBucketArn}/batch/${tenantId}/input/*`,
+    });
+    if (buckets.batchUploadKmsKeyArn) {
+      statements.push({
+        Effect: 'Allow',
+        Action: ['kms:Decrypt', 'kms:GenerateDataKey'],
+        Resource: buckets.batchUploadKmsKeyArn,
+        Condition: {
+          StringEquals: {
+            'kms:ViaService': `s3.${process.env.AWS_REGION ?? 'ap-southeast-1'}.amazonaws.com`,
+            'kms:EncryptionContext:aws:s3:arn': buckets.batchUploadBucketArn,
+          },
+        },
+      });
+    }
   }
   return JSON.stringify({
     Version: '2012-10-17',
@@ -79,6 +96,8 @@ export function createTenantCredentialsProvider(
       const result = await sts.send(new AssumeRoleCommand({
         RoleArn: roleArn,
         RoleSessionName: `${sessionName}-${tenantId}`.slice(0, 64),
+        SourceIdentity: tenantId,
+        Tags: [{ Key: 'tenantId', Value: tenantId }],
         Policy: policy,
       })) as { Credentials?: { AccessKeyId?: string; SecretAccessKey?: string; SessionToken?: string; Expiration?: Date } };
       const c = result.Credentials;
@@ -151,10 +170,11 @@ export function createTenantS3Client(
   bucketArn: string,
   prefix: 'worker' | 'batch',
   sessionName = 'tenant-s3',
+  batchUploadKmsKeyArn?: string,
 ): S3Client {
   const buckets = prefix === 'worker'
     ? { payloadBucketArn: bucketArn }
-    : { batchUploadBucketArn: bucketArn };
+    : { batchUploadBucketArn: bucketArn, batchUploadKmsKeyArn };
   const policy = tenantSessionPolicy(tenantId, buckets);
   return new S3Client({ credentials: createTenantCredentialsProvider(roleArn, tenantId, policy, undefined, sessionName) });
 }

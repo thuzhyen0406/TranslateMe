@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: TranslateMe REST API — Cognito-protected console and API-key-protected translation routes.
+Description: TranslateMe REST API — Cognito-protected console/batch-session and API-key-protected translation routes.
 
 Metadata:
   AWSToolsMetrics:
@@ -107,6 +107,40 @@ Resources:
       ParentId: !Ref TranslateResource
       PathPart: '{proxy+}'
 
+  BatchResource:
+    Type: AWS::ApiGateway::Resource
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Parent resource for authenticated batch web-session routes.
+        must:
+          - Keep beneath TranslateResource so the route path starts with /translate/batch.
+        mutable: change-with-constraints
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref TranslateResource
+      PathPart: batch
+
+  BatchSessionResource:
+    Type: AWS::ApiGateway::Resource
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Session-authenticated batch submission endpoint for browser users.
+        must:
+          - Keep Cognito authorization and dispatch to TranslateFunction.
+          - Do not require an API key for the web-session route.
+        mutable: change-with-constraints
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref BatchResource
+      PathPart: session
+
+  BatchSessionUploadUrlResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref BatchSessionResource
+      PathPart: upload-url
+
   PlatformResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -161,6 +195,30 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConsoleFunctionArn}/invocations'
 
+  ConsoleProxyOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ConsoleProxyResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode":200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PATCH,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
   PlatformTenantStatusMethod:
     Type: AWS::ApiGateway::Method
     Properties:
@@ -200,6 +258,84 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TranslateFunctionArn}/invocations'
 
+  BatchSessionMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref BatchSessionResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ConsoleAuthorizer
+      ApiKeyRequired: false
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TranslateFunctionArn}/invocations'
+
+  BatchSessionOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref BatchSessionResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode":200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  BatchSessionUploadUrlMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref BatchSessionUploadUrlResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ConsoleAuthorizer
+      ApiKeyRequired: false
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TranslateFunctionArn}/invocations'
+
+  BatchSessionUploadUrlOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref BatchSessionUploadUrlResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode":200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
   ConsoleInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -229,9 +365,14 @@ Resources:
     DependsOn:
       - ConsoleMethod
       - ConsoleProxyMethod
+      - ConsoleProxyOptionsMethod
       - PlatformTenantStatusMethod
       - TranslateMethod
       - TranslateProxyMethod
+      - BatchSessionMethod
+      - BatchSessionUploadUrlMethod
+      - BatchSessionOptionsMethod
+      - BatchSessionUploadUrlOptionsMethod
     Properties:
       RestApiId: !Ref RestApi
       Description: Initial API deployment snapshot.
@@ -282,7 +423,7 @@ Resources:
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
       ResponseTemplates:
-        application/json: '{"request_id":"$context.requestId","error":{"code":"UNAUTHORIZED","message":"API key không hợp lệ hoặc không được cung cấp."}}'
+        application/json: '{"request_id":"$context.requestId","error":{"code":"UNAUTHORIZED","message":"Thiếu hoặc không hợp lệ thông tin xác thực."}}'
 
   InvalidApiKeyGatewayResponse:
     Type: AWS::ApiGateway::GatewayResponse

@@ -170,4 +170,5 @@ Sau khi TV1 deploy hạ tầng lên AWS, chạy lần lượt 6 kịch bản dư
 - [ ] **6. Mời thành viên -> Đăng nhập mật khẩu tạm -> Buộc đổi mật khẩu:**
   - Gọi hàm `inviteMember(tenantId, "reviewer1@example.com", "REVIEWER")`.
   - Kiểm tra hộp thư `reviewer1@example.com` nhận được email chứa mật khẩu tạm; trạng thái user trên Cognito là `FORCE_CHANGE_PASSWORD`, có sẵn `custom:tenant_id` và `custom:role = "reviewer"`.
+  - Xác nhận DynamoDB có bản ghi `MEMBER` với `PK = TENANT#<tenantId>`, `SK = MEMBER#<sub>`, `userSub = <sub>`, role `REVIEWER` và trạng thái `ACTIVE`.
   - Dùng mật khẩu tạm đăng nhập trên Web Console -> Cognito trả về challenge `NEW_PASSWORD_REQUIRED` buộc người dùng đặt mật khẩu mới trước khi cấp token.

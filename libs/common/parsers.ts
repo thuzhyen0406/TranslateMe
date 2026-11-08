@@ -101,6 +101,11 @@ export interface FormatParser {
   rebuild(skeleton: Skeleton, translations: readonly (string | null | undefined)[], opts: RebuildOptions): { bytes: Uint8Array; stats: RebuildStats };
 }
 
+/** Đếm code point sau NFC, bỏ marker và chuẩn hóa khoảng trắng. */
+export function countChars(text: string): number {
+  return Array.from(stripMarkers(text).normalize('NFC').replace(/\s+/gu, ' ').trim()).length;
+}
+
 const UTF8_BOM = '﻿';
 
 function decodeUtf8(bytes: Uint8Array): string {

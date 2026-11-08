@@ -12,8 +12,8 @@ invocation permissions remain in `api-gateway.yaml`.
 | --- | --- | --- |
 | `ProxyExecutionRoleArn` | Website proxy Lambda | Tenant data/TM/usage, `GSI2`, proxy payload prefix, async worker invoke, Translate |
 | `WorkerExecutionRoleArn` | Async translation worker Lambda | Tenant data/TM/usage, `GSI2`, worker payload prefix, Translate |
-| `ConsoleApiExecutionRoleArn` | Console API Lambda | Tenant data, `GSI2`/`GSI3`, invite members, import glossary terminology, cache invalidation |
-| `TranslateApiExecutionRoleArn` | API-key translation Lambda | Tenant data/TM/usage, `GSI2`, Translate and Comprehend |
+| `ConsoleApiExecutionRoleArn` | Console API Lambda | Tenant data, invite/compensate member creation, API Gateway API key/Usage Plan operations, import glossary terminology, cache invalidation |
+| `TranslateApiExecutionRoleArn` | Translation and batch ingress Lambda | Tenant data/TM/usage, platform KEYMAP lookup, tenant-scoped batch S3/KMS, Translate and Comprehend |
 | `PlatformApiExecutionRoleArn` | Platform Admin Lambda | Read site rows, update tenant CONFIG, cache invalidation |
 | `PostConfirmationExecutionRoleArn` | Cognito PostConfirmation trigger | Create tenant/mapping records and set Cognito claims |
 | `TenantDataAccessRoleArn` | Assumed per request by tenant-facing functions | DynamoDB access constrained by the STS session policy to one tenant partition |
@@ -46,13 +46,15 @@ invocation permissions remain in `api-gateway.yaml`.
   required. Its `DeleteItem` permission is for implemented tenant operations
   such as glossary deletion/member removal and must not be used to add DELETE
   routes for websites, TM, or API keys.
-- API-key create/rotate/revoke code is not present in this checkout. Add the
-  exact API Gateway control-plane actions to a dedicated policy only after its
-  implementation is known. In particular, do not grant `apigateway:GET` for
-  API key resources, which could expose a stored key value.
-- `lambdas.yaml` supplies the tenant role ARN and table/bucket settings. S3/KMS
-  configuration remains owned by the data stack. DynamoDB uses service-side
-  encryption, so ordinary DynamoDB calls do not need direct KMS permissions.
+- API-key create/rotate/revoke/plan-change controls use only the required
+  API Gateway `POST`/`PATCH`/`DELETE` actions. Do not grant `apigateway:GET`
+  for API key resources, which could expose a stored key value.
+- `lambdas.yaml` supplies the tenant role ARN and table/bucket/KMS settings.
+  Batch S3 calls assume the tenant-data role with `GetObject`/`PutObject` scoped
+  to `batch/<tenantId>/input/*`; the same session is allowed KMS decrypt/data-key
+  calls only through S3 for the batch bucket's SSE-KMS encryption context.
+  DynamoDB uses service-side encryption, so ordinary DynamoDB calls do not need
+  direct KMS permissions.
 - `translate:TranslateText` and `comprehend:DetectDominantLanguage` require
   `Resource: '*'` in their supported IAM authorization model. Keep these
   actions separate from DynamoDB/S3 statements.

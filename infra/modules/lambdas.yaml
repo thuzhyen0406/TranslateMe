@@ -1,6 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: TranslateMe application Lambda functions, wired to the least-privilege IAM role outputs.
 
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
 Parameters:
   ArtifactBucket:
     Type: String
@@ -25,6 +29,12 @@ Parameters:
   PayloadBucketArn:
     Type: String
   BatchUploadBucketArn:
+    Type: String
+  BatchUploadKmsKeyArn:
+    Type: String
+  BasicUsagePlanId:
+    Type: String
+  StandardUsagePlanId:
     Type: String
   UserPoolArn:
     Type: String
@@ -141,6 +151,7 @@ Resources:
           BATCH_UPLOAD_BUCKET: !Ref BatchUploadBucketName
           TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
           TENANT_BATCH_UPLOAD_BUCKET_ARN: !Ref BatchUploadBucketArn
+          TENANT_BATCH_UPLOAD_KMS_KEY_ARN: !Ref BatchUploadKmsKeyArn
 
   PlatformFunction:
     Type: AWS::Lambda::Function

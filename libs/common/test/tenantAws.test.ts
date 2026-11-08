@@ -21,6 +21,8 @@ describe('tenant-scoped AWS sessions', () => {
   it('IAM tenant role grants TransactWriteItems', () => {
     const iamTemplate = readFileSync(resolve(process.cwd(), '../../infra/modules/iam.yaml'), 'utf8');
     assert.match(iamTemplate, /dynamodb:TransactWriteItems/);
+    assert.match(iamTemplate, /sts:SetSourceIdentity/);
+    assert.match(iamTemplate, /sts:TagSession/);
   });
 
   it('session policy scopes S3 objects to the requesting tenant prefix', () => {
@@ -29,12 +31,14 @@ describe('tenant-scoped AWS sessions', () => {
       batchUploadBucketArn: 'arn:aws:s3:::uploads',
     }));
     assert.equal(policy.Statement[1].Resource, 'arn:aws:s3:::payloads/worker/t_aaaaaaaaaaaaaaaaaaaaaaaa/*');
-    assert.equal(policy.Statement[2].Resource, 'arn:aws:s3:::uploads/batch/t_aaaaaaaaaaaaaaaaaaaaaaaa/*');
+    assert.equal(policy.Statement[2].Resource, 'arn:aws:s3:::uploads/batch/t_aaaaaaaaaaaaaaaaaaaaaaaa/input/*');
+    assert.deepEqual(policy.Statement[2].Action, ['s3:GetObject', 's3:PutObject']);
   });
 
   it('routes tenant data to an STS session and platform mappings to the execution role', async () => {
     const routed: string[] = [];
     const assumed: string[] = [];
+    const assumeCommands: Array<{ input: { SourceIdentity?: string; Tags?: Array<{ Key: string; Value: string }>; Policy?: string } }> = [];
     const router = createTenantDocumentClientRouter({
       async send(command: never) { routed.push('base'); return command; },
     }, {
@@ -42,6 +46,7 @@ describe('tenant-scoped AWS sessions', () => {
       sts: {
         async send(command: never) {
           assumed.push('t_aaaaaaaaaaaaaaaaaaaaaaaa');
+          assumeCommands.push(command as typeof assumeCommands[number]);
           return { Credentials: { AccessKeyId: 'a', SecretAccessKey: 's', SessionToken: 't', Expiration: new Date(Date.now() + 60_000) } } as never;
         },
       } as never,
@@ -52,6 +57,9 @@ describe('tenant-scoped AWS sessions', () => {
     await router.send({ input: { Key: { PK: 'TENANT#PLATFORM#SLUG#site-a', SK: 'META' } } } as never);
     assert.deepEqual(routed, ['tenant', 'base']);
     assert.deepEqual(assumed, ['t_aaaaaaaaaaaaaaaaaaaaaaaa']);
+    assert.equal(assumeCommands[0].input.SourceIdentity, 't_aaaaaaaaaaaaaaaaaaaaaaaa');
+    assert.deepEqual(assumeCommands[0].input.Tags, [{ Key: 'tenantId', Value: 't_aaaaaaaaaaaaaaaaaaaaaaaa' }]);
+    assert.ok(assumeCommands[0].input.Policy);
   });
 
   it('từ chối giao dịch có partition key của nhiều tenant', async () => {

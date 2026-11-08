@@ -15,10 +15,10 @@ import { segmentBlock } from '../../../libs/common/segmenter.js';
 import { normalize_hash } from '../../../libs/common/text-utils.js';
 import { createDynamoTmDb, createTM, EMPTY_GLOSSARY_STATE, type SentenceWithHash } from '../../../libs/common/tm.js';
 import { AppError, type Ctx } from '../../../libs/common/types.js';
+import { assertTenantWritable } from '../../../libs/common/tenant.js';
 import { CharacterQuotaExceededError, UsageService, type UsageReservation } from '../../../libs/common/usage/usage.js';
 import { createTranslator, type TranslateClientLike } from '../../../libs/common/translator.js';
-import { assertTenantWritable } from '../../../libs/common/tenant.js';
-import { createBatchUploadUrlHandler } from './batchUpload.js';
+import { handler as batchIngressHandler } from '../batch/batchIngress.js';
 
 const MAX_TEXT_CHARS = 5000;
 const MAX_TRANSLATE_BYTES = 10_000;
@@ -26,6 +26,9 @@ const CONFIDENCE_THRESHOLD = 0.70;
 const SUPPORTED_LANGUAGES = new Set(['ar','de','en','es','fr','hi','id','it','ja','ko','nl','pl','pt','ru','sv','th','tr','vi','zh']);
 
 export interface RealtimeEvent {
+  httpMethod?: string;
+  path?: string;
+  rawPath?: string;
   body?: string | null;
   headers?: Record<string, string | undefined>;
   requestContext?: { requestId?: string; identity?: { apiKeyId?: string }; authorizer?: { keyId?: string; tenantId?: string } };
@@ -333,37 +336,9 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
  * @param event Sự kiện Lambda/API Gateway cần xử lý.
  * @returns Promise phản hồi HTTP JSON cho yêu cầu dịch.
  */
-export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> => {
-  const rawPath = (event as RealtimeEvent & { rawPath?: string }).rawPath;
-  const resourcePath = (event as RealtimeEvent & { resourcePath?: string }).resourcePath;
-  if (rawPath === '/translate/batch/upload-url' || resourcePath === '/translate/batch/upload-url') {
-    const tableName = process.env.TABLE_NAME;
-    const batchBucket = process.env.BATCH_UPLOAD_BUCKET;
-    if (!tableName || !batchBucket) {
-      const requestId = event.requestContext?.requestId ?? 'unknown';
-      return Promise.resolve(realtimeJson(500, { request_id: requestId, error: { code: 'INTERNAL_ERROR', message: 'Thiếu cấu hình upload batch.' } }));
-    }
-    const ddb = createTenantDocumentClientRouter(
-      DynamoDBDocumentClient.from(new DynamoDBClient(), { marshallOptions: { removeUndefinedValues: true } }),
-      { roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN, sessionName: 'translate-api' },
-    ) as DynamoDBDocumentClient;
-    return createBatchUploadUrlHandler({
-      tableName,
-      batchBucket,
-      ddb,
-      s3: new S3Client({}),
-      tenantS3Client: (tenantId) => createTenantS3Client(
-        process.env.TENANT_DATA_ACCESS_ROLE_ARN ?? '',
-        tenantId,
-        process.env.TENANT_BATCH_UPLOAD_BUCKET_ARN ?? '',
-        'batch',
-        'batch-upload',
-      ) as unknown as S3Client,
-    })({
-      body: event.body,
-      requestContext: event.requestContext,
-    }) as Promise<RealtimeResponse>;
-  }
+export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> | ReturnType<typeof batchIngressHandler> => {
+  const requestPath = event.path ?? event.rawPath ?? '';
+  if (/(?:^|\/)translate\/batch(?:\/|$)/u.test(requestPath)) return batchIngressHandler(event);
   const tableName = process.env.TABLE_NAME;
   if (!tableName) return Promise.resolve(apiError(500, 'INTERNAL_ERROR', 'Thiếu cấu hình bảng dữ liệu.', event.requestContext?.requestId ?? 'unknown'));
   const ddb = createTenantDocumentClientRouter(

@@ -20,8 +20,10 @@
   },
   "include": [
     "auth/**/*.ts",
+    "console/**/*.ts",
     "sites/**/*.ts",
     "glossary/**/*.ts",
+    "batch/**/*.ts",
     "keys/**/*.ts",
     "review/**/*.ts",
     "console/**/*.ts",
@@ -40,6 +42,12 @@
     "../../libs/common/tm.ts",
     "../../libs/common/jobs.ts",
     "../../libs/common/text-utils.ts",
+    "../../libs/common/parsers.ts",
+    "../../libs/common/markers.ts",
+    "../../libs/common/extract.ts",
+    "../../libs/common/rebuild.ts",
+    "../../libs/common/htmlDom.ts",
+    "../../libs/common/tenantAws.ts",
     "../../libs/common/usage/usage.ts"
   ],
   "exclude": ["dist", "node_modules"]

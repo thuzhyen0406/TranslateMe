@@ -2,24 +2,20 @@
  * Hàm mời thành viên vào Tenant trên Cognito User Pool (Nhiệm vụ 1.11 - Mục C).
  *
  * Trách nhiệm của hàm này:
- *  - Chỉ xử lý phần Cognito (`AdminCreateUser`): tạo user với mật khẩu tạm đủ mạnh,
+ *  - Tạo user trên Cognito với mật khẩu tạm đủ mạnh,
  *    gán ngay `custom:tenant_id`, `custom:role`, đánh dấu `email_verified = "true"`,
  *    để Cognito tự gửi email mời và đặt trạng thái `FORCE_CHANGE_PASSWORD`.
+ *  - Ghi bản ghi MEMBER theo Cognito `sub` để các lần đăng nhập sau xác thực được thành viên.
  *  - Chỉ cho phép vai trò `Developer` hoặc `Reviewer` (từ chối `Tenant Admin`, `Platform Admin` hoặc chuỗi lạ).
- *
- * LƯU Ý KIẾN TRÚC (tách biệt tầng):
- *  - Hàm này KHÔNG ghi DynamoDB.
- *  - Việc ghi bản ghi `MEMBER` (PK = "TENANT#<tenantId>", SK = "MEMBER#<sub_hoặc_email>",
- *    status = "PENDING_FIRST_LOGIN" / chờ đăng nhập lần đầu) thuộc trách nhiệm của tầng API
- *    (service gọi `inviteMember` sẽ lấy `userSub` trả về từ đây để ghi bản ghi MEMBER).
  */
 
 import { randomInt } from 'node:crypto';
 import {
   AdminCreateUserCommand,
+  AdminDeleteUserCommand,
   CognitoIdentityProviderClient,
-  type AdminCreateUserCommandOutput,
 } from '@aws-sdk/client-cognito-identity-provider';
+import { db } from '../../../libs/common/db.js';
 import {
   COGNITO_CUSTOM_ATTRIBUTES,
   INVITABLE_ROLES,
@@ -27,6 +23,7 @@ import {
   isInvitableRole,
   type InvitableRole,
 } from '../../../libs/common/roles.js';
+import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
 
 export interface CognitoAdminCreateClient {
   send(command: AdminCreateUserCommand): Promise<{
@@ -40,17 +37,49 @@ export interface CognitoAdminCreateClient {
 
 export interface InviteMemberDeps {
   cognitoClient?: CognitoAdminCreateClient;
+  db?: Pick<typeof db, 'put'>;
+  deleteUser?: (userPoolId: string, username: string) => Promise<void>;
   userPoolId?: string;
   tempPasswordGenerator?: () => string;
+  now?: () => Date;
+  requestId?: string;
 }
 
 export interface InviteMemberResult {
   username: string;
-  userSub?: string;
+  userSub: string;
   userStatus?: string;
   tenantId: string;
   email: string;
   role: InvitableRole;
+}
+
+/** Xóa Cognito user vừa tạo nếu không hoàn tất được MEMBER; log metadata an toàn khi thao tác bù thất bại. */
+async function compensateCognitoUser(
+  tenantId: string,
+  userPoolId: string,
+  username: string,
+  requestId: string,
+  deps: InviteMemberDeps,
+  cause: unknown,
+): Promise<void> {
+  try {
+    if (deps.deleteUser) {
+      await deps.deleteUser(userPoolId, username);
+      return;
+    }
+    if (deps.cognitoClient) throw new Error('Injected Cognito client has no AdminDeleteUser adapter');
+    await getDefaultCognitoClient().send(new AdminDeleteUserCommand({ UserPoolId: userPoolId, Username: username }));
+  } catch (cleanupError) {
+    console.error(JSON.stringify({
+      level: 'ERROR',
+      event: 'INVITE_MEMBER_COMPENSATION_FAILED',
+      tenantId,
+      request_id: requestId,
+      causeName: cause instanceof Error ? cause.name : 'UnknownError',
+      cleanupErrorName: cleanupError instanceof Error ? cleanupError.name : 'UnknownError',
+    }));
+  }
 }
 
 const UPPER = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -96,7 +125,7 @@ function getDefaultCognitoClient(): CognitoIdentityProviderClient {
  * @param tenantId Mã tenant của người mời (không được rỗng)
  * @param email    Địa chỉ email của thành viên được mời
  * @param role     Vai trò được mời (chỉ chấp nhận `DEVELOPER` hoặc `REVIEWER`)
- * @param deps     Tham số tùy chọn để tiêm client/userPoolId khi test
+ * @param deps     Tham số tùy chọn để tiêm Cognito, DB, thời gian và request ID khi test
  */
 export async function inviteMember(
   tenantId: string,
@@ -146,11 +175,40 @@ export async function inviteMember(
     }),
   );
 
-  const subAttr = output.User?.Attributes?.find((a) => a.Name === 'sub')?.Value;
+  const userSub = output.User?.Attributes?.find((a) => a.Name === 'sub')?.Value?.trim();
+  if (!userSub) {
+    const missingSub = new AppError('INTERNAL_ERROR', 'Cognito không trả về sub; không thể tạo bản ghi MEMBER.');
+    await compensateCognitoUser(cleanTenantId, userPoolId, output.User?.Username ?? cleanEmail, deps.requestId ?? 'invite-member', deps, missingSub);
+    throw missingSub;
+  }
+
+  const memberCtx: Ctx = {
+    tenantId: cleanTenantId,
+    via: 'JWT',
+    requestId: deps.requestId ?? 'invite-member',
+  };
+  try {
+    await (deps.db ?? db).put(
+      memberCtx,
+      {
+        ...keys.member(memberCtx, userSub),
+        tenantId: cleanTenantId,
+        userSub,
+        email: cleanEmail,
+        role,
+        status: 'ACTIVE',
+        createdAt: (deps.now ?? (() => new Date()))().toISOString(),
+      },
+      'attribute_not_exists(PK) AND attribute_not_exists(SK)',
+    );
+  } catch (error) {
+    await compensateCognitoUser(cleanTenantId, userPoolId, output.User?.Username ?? cleanEmail, deps.requestId ?? 'invite-member', deps, error);
+    throw error;
+  }
 
   return {
     username: output.User?.Username ?? cleanEmail,
-    userSub: subAttr,
+    userSub,
     userStatus: output.User?.UserStatus,
     tenantId: cleanTenantId,
     email: cleanEmail,

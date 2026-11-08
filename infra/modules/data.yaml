@@ -1,6 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: TranslateMe - khoa KMS (C11) va bang DynamoDB mot bang (C3)
 
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
 Parameters:
   TableName:
     Type: String
@@ -90,6 +94,66 @@ Resources:
       Tags:
         - { Key: project, Value: translateme }
 
+  BatchFilesBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Private encrypted object storage for tenant batch input and result files.
+        must:
+          - Keep public access blocked and default SSE-KMS encryption enabled.
+          - Expire tenant batch objects after seven days.
+          - Keep the object key namespace under batch/<tenantId>/.
+        mutable: change-with-constraints
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt DataKey.Arn
+            BucketKeyEnabled: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [PUT]
+            AllowedOrigins: ['*']
+            AllowedHeaders: [Content-Type]
+            MaxAge: 300
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireTenantBatchFilesAfterSevenDays
+            Status: Enabled
+            Filter:
+              Prefix: batch/
+            ExpirationInDays: 7
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+      Tags:
+        - { Key: project, Value: translateme }
+
+  BatchFilesBucketTlsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BatchFilesBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt BatchFilesBucket.Arn
+              - !Sub '${BatchFilesBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
 Outputs:
   TableName:
     Value: !Ref Table
@@ -105,3 +169,9 @@ Outputs:
       Name: !Sub "${AWS::StackName}-KeyArn"
   KeyAlias:
     Value: !Ref DataKeyAlias
+  BatchFilesBucketName:
+    Description: S3 bucket for tenant batch uploads/results; configure as BATCH_UPLOAD_BUCKET on the Translate API Lambda.
+    Value: !Ref BatchFilesBucket
+  BatchFilesBucketArn:
+    Description: Grant the API/worker roles object access only to this bucket and tenant prefixes.
+    Value: !GetAtt BatchFilesBucket.Arn
