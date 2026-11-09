@@ -52,7 +52,6 @@ Resources:
               - sts:AssumeRole
               - sts:SetSourceIdentity
               - sts:TagSession
-              - sts:SetSourceIdentity
             Condition:
               ArnLike:
                 aws:PrincipalArn:
@@ -86,12 +85,11 @@ Resources:
                   - dynamodb:Query
                   - dynamodb:ConditionCheckItem
                   - dynamodb:BatchWriteItem
-                  - dynamodb:TransactWriteItems
                 Resource:
                   - !Ref TableArn
                   - !Sub '${TableArn}/index/GSI2'
                   - !Sub '${TableArn}/index/GSI3'
-                                Condition:
+                Condition:
                   ForAllValues:StringLike:
                     dynamodb:LeadingKeys:
                       - 'TENANT#${aws:PrincipalTag/TenantId}'
@@ -102,22 +100,22 @@ Resources:
                   - s3:GetObject
                   - s3:PutObject
                 Resource: !Sub '${BatchUploadBucketArn}/batch/${!aws:PrincipalTag/TenantId}/input/*'
-              - Sid: TenantBatchUploadKmsAccess
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                  - kms:GenerateDataKey
-                Resource: !Ref BatchUploadKmsKeyArn
-                Condition:
-                  StringEquals:
-                    kms:ViaService: !Sub 's3.${AWS::Region}.amazonaws.com'
-                    kms:EncryptionContext:aws:s3:arn: !Ref BatchUploadBucketArn
               - Sid: TenantDataKmsUse
                 Effect: Allow
                 Action:
                   - kms:Decrypt
-                  - kms:GenerateDataKey
-                Resource: !Ref BatchUploadKmsKeyArn
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                  - kms:CreateGrant
+                Resource: !Ref KmsKeyArn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'dynamodb.${AWS::Region}.amazonaws.com'
+                    kms:EncryptionContext:aws:dynamodb:tableName: !Select [1, !Split ['/', !Ref TableArn]]
+                    kms:EncryptionContext:aws:dynamodb:subscriberId: !Ref AWS::AccountId
+              - Sid: TenantBatchUploadKmsAccess
                 Effect: Allow
                 Action:
                   - kms:Decrypt
@@ -138,7 +136,7 @@ Resources:
           - Effect: Allow
             Principal:
               AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
-                        Action:
+            Action:
               - sts:AssumeRole
               - sts:TagSession
               - sts:SetSourceIdentity
@@ -208,7 +206,6 @@ Resources:
               - Sid: WebsiteTenantAndSlugTransaction
                 Effect: Allow
                 Action:
-                  - dynamodb:TransactWriteItems
                   - dynamodb:PutItem
                   - dynamodb:ConditionCheckItem
                 Resource: !Ref TableArn
@@ -222,8 +219,17 @@ Resources:
                 Effect: Allow
                 Action:
                   - kms:Decrypt
-                  - kms:GenerateDataKey
+                  - kms:Encrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                  - kms:CreateGrant
                 Resource: !Ref KmsKeyArn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'dynamodb.${AWS::Region}.amazonaws.com'
+                    kms:EncryptionContext:aws:dynamodb:tableName: !Select [1, !Split ['/', !Ref TableArn]]
+                    kms:EncryptionContext:aws:dynamodb:subscriberId: !Ref AWS::AccountId
 
   ProxyExecutionRole:
     Type: AWS::IAM::Role
@@ -256,7 +262,6 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
-                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InvokeAsyncWorker
                 Effect: Allow
@@ -306,7 +311,6 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
-                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: TranslateText
                 Effect: Allow
@@ -343,7 +347,6 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
-                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InviteTenantMembers
                 Effect: Allow
@@ -396,7 +399,7 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-                            - Sid: AssumeTenantDataAccessRole
+              - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
                 Action:
                   - sts:AssumeRole

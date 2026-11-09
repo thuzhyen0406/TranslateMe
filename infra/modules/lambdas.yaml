@@ -165,7 +165,7 @@ Resources:
       Environment:
         Variables:
           TABLE_NAME: !Ref TableName
-                    TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
           TENANT_WEBSITE_DATA_ACCESS_ROLE_ARN: !Ref TenantWebsiteDataAccessRoleArn
           ALLOW_PLATFORM_SLUG_RESERVATION: 'true'
           CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistributionId

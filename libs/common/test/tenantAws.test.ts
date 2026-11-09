@@ -9,7 +9,6 @@ describe('tenant-scoped AWS sessions', () => {
     const policy = JSON.parse(tenantSessionPolicy('t_aaaaaaaaaaaaaaaaaaaaaaaa'));
     assert.ok(policy.Statement[0].Action.includes('dynamodb:PutItem'));
     assert.ok(policy.Statement[0].Action.includes('dynamodb:ConditionCheckItem'));
-    assert.ok(policy.Statement[0].Action.includes('dynamodb:TransactWriteItems'));
     const keys = policy.Statement[0].Condition['ForAllValues:StringLike']['dynamodb:LeadingKeys'];
     assert.deepEqual(keys, [
       'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa',
@@ -25,7 +24,7 @@ describe('tenant-scoped AWS sessions', () => {
     }));
     assert.deepEqual(policy.Statement[1], {
       Effect: 'Allow',
-      Action: 'dynamodb:TransactWriteItems',
+      Action: ['dynamodb:PutItem', 'dynamodb:ConditionCheckItem'],
       Resource: '*',
       Condition: {
         'ForAllValues:StringLike': {
@@ -39,9 +38,9 @@ describe('tenant-scoped AWS sessions', () => {
     });
   });
 
-  it('IAM tenant role grants TransactWriteItems and requires session tags', () => {
+  it('IAM tenant role grants transaction item actions and requires session tags', () => {
     const iamTemplate = readFileSync(resolve(process.cwd(), '../../infra/modules/iam.yaml'), 'utf8');
-    assert.match(iamTemplate, /dynamodb:TransactWriteItems/);
+    assert.match(iamTemplate, /dynamodb:ConditionCheckItem/);
     assert.match(iamTemplate, /sts:TagSession/);
     assert.match(iamTemplate, /aws:RequestTag\/TenantId/);
     

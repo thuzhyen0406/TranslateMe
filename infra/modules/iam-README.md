@@ -49,9 +49,10 @@ invocation permissions remain in `api-gateway.yaml`.
   Data-layer validation remains defense in depth and must not be removed.
 - Tenant isolation currently relies on the application creating each STS
   session with `libs/common/tenantAws.ts`'s tenant-scoped session policy. The
-  helper now keeps credential creation private and always derives that policy
+  module keeps credential creation private; it is the only code path that
+  issues `AssumeRole`, and it always derives that policy
   from the same validated tenant ID used for `SourceIdentity` and the session
-  tag, so normal call sites cannot pass an arbitrary policy. AWS IAM does not
+  tag, so current call sites cannot pass an arbitrary policy. AWS IAM does not
   independently bind a tenant ID in a Cognito request to `SourceIdentity` or
   the session tag; a compromised Lambda execution role/code path with
   `sts:AssumeRole` can choose another tenant ID. If that threat must be blocked

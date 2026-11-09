@@ -51,6 +51,8 @@ export function tenantSessionPolicy(
     payloadBucketArn?: string;
     batchUploadBucketArn?: string;
     batchUploadKmsKeyArn?: string;
+    dataKmsKeyArn?: string;
+    dataTableName?: string;
     allowPlatformSlugReservation?: boolean;
   } = {},
 ): string {
@@ -62,7 +64,6 @@ export function tenantSessionPolicy(
     Action: [
       'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem',
       'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem', 'dynamodb:BatchWriteItem',
-      'dynamodb:TransactWriteItems',
     ],
     Resource: '*',
     Condition: {
@@ -74,7 +75,7 @@ export function tenantSessionPolicy(
   if (buckets.allowPlatformSlugReservation) {
     statements.push({
       Effect: 'Allow',
-      Action: 'dynamodb:TransactWriteItems',
+      Action: ['dynamodb:PutItem', 'dynamodb:ConditionCheckItem'],
       Resource: '*',
       Condition: {
         'ForAllValues:StringLike': {
@@ -83,6 +84,19 @@ export function tenantSessionPolicy(
             `TENANT#${tenantId}#*`,
             'TENANT#PLATFORM#SLUG#*',
           ],
+        },
+      },
+    });
+  }
+  if (buckets.dataKmsKeyArn && buckets.dataTableName) {
+    statements.push({
+      Effect: 'Allow',
+      Action: ['kms:Decrypt', 'kms:Encrypt', 'kms:ReEncrypt*', 'kms:GenerateDataKey*', 'kms:DescribeKey', 'kms:CreateGrant'],
+      Resource: buckets.dataKmsKeyArn,
+      Condition: {
+        StringEquals: {
+          'kms:ViaService': `dynamodb.${process.env.AWS_REGION ?? 'ap-southeast-1'}.amazonaws.com`,
+          'kms:EncryptionContext:aws:dynamodb:tableName': buckets.dataTableName,
         },
       },
     });
@@ -134,7 +148,11 @@ function createTenantCredentialsProvider(
       try {
         // The tenant-scoped policy is always derived here from the same ID used
         // for SourceIdentity and the session tag; callers cannot supply a broader policy.
-        const policy = tenantSessionPolicy(tenantId, policyOptions);
+        const policy = tenantSessionPolicy(tenantId, {
+          ...policyOptions,
+          dataKmsKeyArn: policyOptions.dataKmsKeyArn ?? process.env.DATA_KMS_KEY_ARN,
+          dataTableName: policyOptions.dataTableName ?? process.env.TABLE_NAME,
+        });
         result = await sts.send(new AssumeRoleCommand({
           RoleArn: roleArn,
           RoleSessionName: `${sessionName}-${tenantId}`.slice(0, 64),
@@ -179,6 +197,8 @@ export function createTenantDocumentClientRouter(
     payloadBucketArn?: string;
     batchUploadBucketArn?: string;
     batchUploadKmsKeyArn?: string;
+    dataKmsKeyArn?: string;
+    dataTableName?: string;
     allowPlatformSlugReservation?: boolean;
     sts?: Pick<STSClient, 'send'>;
     createClient?: (credentials: TenantCredentialsProvider) => SendClient;
