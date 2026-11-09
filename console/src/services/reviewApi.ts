@@ -15,9 +15,11 @@ import type {
   ListReviewFilter,
   ListReviewResponse,
   PlaceholderCheckResult,
+  ReviewApiTab,
   ReviewLabelFilter,
   ReviewMutationResponse,
   ReviewSentenceItem,
+  ReviewTabCursors,
   TranslationStatus,
 } from '../types/review.js';
 
@@ -382,6 +384,95 @@ export function getInvalidationPollIntervalMs(attempt: number): number {
 }
 
 // ============================================================================
+// Hỗ trợ phân trang theo từng tab F5 (cursor / nextTabCursors)
+// ============================================================================
+
+export const DEFAULT_REVIEW_PAGE_SIZE = 50;
+export const REVIEW_API_TABS: readonly ReviewApiTab[] = Object.freeze(['REVIEW', 'MACHINE', 'HUMAN']);
+
+/** Ánh xạ bộ lọc nhãn trên UI Q4 sang danh sách tab GSI3 trên backend F5 */
+export function labelFilterToTabs(labelFilter?: ReviewLabelFilter): ReviewApiTab[] {
+  if (labelFilter === 'NEEDS_REVIEW') return ['REVIEW'];
+  if (labelFilter === 'MACHINE') return ['MACHINE'];
+  if (labelFilter === 'HUMAN') return ['HUMAN'];
+  return ['REVIEW', 'MACHINE', 'HUMAN'];
+}
+
+/** Kiểm tra xem còn ít nhất một tab vẫn có cursor để tải trang tiếp hay không */
+export function hasMoreReviewPages(tabCursors?: ReviewTabCursors | null): boolean {
+  if (!tabCursors) return false;
+  return REVIEW_API_TABS.some((tab) => {
+    const cur = tabCursors[tab];
+    return typeof cur === 'string' && cur.trim().length > 0;
+  });
+}
+
+/** Chuẩn hóa và lọc map cursor theo danh sách tab hợp lệ */
+export function extractTabCursors(
+  tabCursors: ReviewTabCursors | undefined | null,
+  allowedTabs?: readonly ReviewApiTab[],
+): ReviewTabCursors {
+  if (!tabCursors) return {};
+  const allowSet = allowedTabs ? new Set<ReviewApiTab>(allowedTabs) : null;
+  const out: ReviewTabCursors = {};
+  for (const tab of REVIEW_API_TABS) {
+    if (allowSet && !allowSet.has(tab)) continue;
+    const raw = tabCursors[tab];
+    if (typeof raw === 'string' && raw.trim()) {
+      out[tab] = raw.trim();
+    }
+  }
+  return out;
+}
+
+/** Trích xuất bộ cursor trang tiếp theo từ kết quả listTranslations (hỗ trợ cả nextTabCursors và nextCursor đơn tab) */
+export function extractResponseTabCursors(
+  res: ListReviewResponse,
+  labelFilter?: ReviewLabelFilter,
+): ReviewTabCursors {
+  if (res.hasMore === false) {
+    return {};
+  }
+  const activeTabs = labelFilterToTabs(labelFilter);
+  if (res.nextTabCursors !== undefined) {
+    return extractTabCursors(res.nextTabCursors, activeTabs);
+  }
+  if (activeTabs.length === 1 && typeof res.nextCursor === 'string' && res.nextCursor.trim()) {
+    return { [activeTabs[0]]: res.nextCursor.trim() };
+  }
+  return {};
+}
+
+/**
+ * Gộp danh sách câu từ trang tiếp theo vào danh sách đã tải:
+ * giữ nguyên thứ tự các câu hiện có, thêm câu mới vào cuối và khử trùng lặp theo hash.
+ */
+export function mergeReviewItems(
+  existing: readonly ReviewSentenceItem[],
+  incoming: readonly ReviewSentenceItem[],
+): ReviewSentenceItem[] {
+  const merged = [...existing];
+  const indexByHash = new Map<string, number>();
+  for (let i = 0; i < merged.length; i++) {
+    const h = merged[i].hash;
+    if (h && !indexByHash.has(h)) {
+      indexByHash.set(h, i);
+    }
+  }
+  for (const item of incoming) {
+    if (!item.hash) continue;
+    const idx = indexByHash.get(item.hash);
+    if (idx === undefined) {
+      indexByHash.set(item.hash, merged.length);
+      merged.push(item);
+    } else if (item.version > merged[idx].version) {
+      merged[idx] = item;
+    }
+  }
+  return merged;
+}
+
+// ============================================================================
 // Giao diện ReviewApi
 // ============================================================================
 
@@ -478,36 +569,65 @@ export function createHttpReviewApi(opts: HttpReviewApiOptions): ReviewApi {
 
   return {
     async listTranslations(filter) {
-      const tabs: Array<'REVIEW' | 'MACHINE' | 'HUMAN'> =
-        filter.labelFilter === 'NEEDS_REVIEW'
-          ? ['REVIEW']
-          : filter.labelFilter === 'MACHINE'
-            ? ['MACHINE']
-            : filter.labelFilter === 'HUMAN'
-              ? ['HUMAN']
-              : ['REVIEW', 'MACHINE', 'HUMAN'];
+      const baseTabs = labelFilterToTabs(filter.labelFilter);
+      const isTabCursorMode = filter.tabCursors !== undefined;
 
-      const byHash = new Map<string, ReviewSentenceItem>();
-      let nextCursor: string | undefined;
-
-      for (const tab of tabs) {
-        const q = new URLSearchParams();
-        q.set('src', filter.srcLang);
-        q.set('tgt', filter.tgtLang);
-        q.set('tab', tab);
-        if (filter.search?.trim()) q.set('search', filter.search.trim());
-        if (filter.limit) q.set('limit', String(filter.limit));
-
-        const data = await request('GET', `/console/translations?${q.toString()}`);
-        const itemsRaw = Array.isArray(data.items) ? (data.items as Json[]) : [];
-        for (const raw of itemsRaw) {
-          const mapped = reviewItemFromJson(raw);
-          if (mapped.hash && !byHash.has(mapped.hash)) {
-            byHash.set(mapped.hash, mapped);
+      const requests: Array<{ tab: ReviewApiTab; cursor?: string }> = [];
+      if (isTabCursorMode) {
+        // Khi tải trang tiếp theo: chỉ gọi các tab vẫn còn cursor của riêng tab đó
+        for (const tab of baseTabs) {
+          const cur = filter.tabCursors?.[tab]?.trim();
+          if (cur) {
+            requests.push({ tab, cursor: cur });
           }
         }
-        const cur = str(data.next_cursor ?? data.nextCursor);
-        if (cur && tabs.length === 1) nextCursor = cur;
+        if (requests.length === 0) {
+          return {
+            items: [],
+            nextTabCursors: {},
+            hasMore: false,
+          };
+        }
+      } else {
+        const singleCursor = baseTabs.length === 1 ? filter.cursor?.trim() : undefined;
+        for (const tab of baseTabs) {
+          requests.push({
+            tab,
+            ...(singleCursor ? { cursor: singleCursor } : {}),
+          });
+        }
+      }
+
+      const pageResults = await Promise.all(
+        requests.map(async ({ tab, cursor }) => {
+          const q = new URLSearchParams();
+          q.set('src', filter.srcLang);
+          q.set('tgt', filter.tgtLang);
+          q.set('tab', tab);
+          if (filter.search?.trim()) q.set('search', filter.search.trim());
+          if (filter.limit) q.set('limit', String(filter.limit));
+          if (cursor) q.set('cursor', cursor);
+
+          const data = await request('GET', `/console/translations?${q.toString()}`);
+          const itemsRaw = Array.isArray(data.items) ? (data.items as Json[]) : [];
+          const mapped = itemsRaw.map(reviewItemFromJson).filter((it) => Boolean(it.hash));
+          const nextCur = str(data.next_cursor ?? data.nextCursor).trim();
+          return { tab, mapped, nextCur };
+        }),
+      );
+
+      const byHash = new Map<string, ReviewSentenceItem>();
+      const nextTabCursors: ReviewTabCursors = {};
+
+      for (const { tab, mapped, nextCur } of pageResults) {
+        for (const item of mapped) {
+          if (!byHash.has(item.hash)) {
+            byHash.set(item.hash, item);
+          }
+        }
+        if (nextCur) {
+          nextTabCursors[tab] = nextCur;
+        }
       }
 
       let items = [...byHash.values()];
@@ -519,19 +639,41 @@ export function createHttpReviewApi(opts: HttpReviewApiOptions): ReviewApi {
         }
       }
 
+      const hasMore = hasMoreReviewPages(nextTabCursors);
+      const singleNextCursor = baseTabs.length === 1 ? nextTabCursors[baseTabs[0]] : undefined;
+
       return {
         items,
-        ...(nextCursor ? { nextCursor } : {}),
+        ...(singleNextCursor ? { nextCursor: singleNextCursor } : {}),
+        nextTabCursors,
+        hasMore,
       };
     },
 
     async getTranslation(srcLang, tgtLang, hash) {
-      const res = await this.listTranslations({ srcLang, tgtLang, labelFilter: 'ALL' });
-      const found = res.items.find((it) => it.hash === hash);
-      if (!found) {
-        throw new ReviewApiError('NOT_FOUND', `Không tìm thấy bản dịch cho mã băm ${hash}`);
+      let tabCursors: ReviewTabCursors | undefined;
+      for (let page = 0; page < 20; page++) {
+        const res = await this.listTranslations({
+          srcLang,
+          tgtLang,
+          labelFilter: 'ALL',
+          limit: 200,
+          ...(tabCursors ? { tabCursors } : {}),
+        });
+        const found = res.items.find((it) => it.hash === hash);
+        if (found) return found;
+        if (!res.hasMore || !res.nextTabCursors || !hasMoreReviewPages(res.nextTabCursors)) {
+          break;
+        }
+        const sameCursors =
+          tabCursors !== undefined &&
+          REVIEW_API_TABS.every((t) => (tabCursors?.[t] ?? '') === (res.nextTabCursors?.[t] ?? ''));
+        if (sameCursors) {
+          break;
+        }
+        tabCursors = res.nextTabCursors;
       }
-      return found;
+      throw new ReviewApiError('NOT_FOUND', `Không tìm thấy bản dịch cho mã băm ${hash}`);
     },
 
     async acceptTranslation({ srcLang, tgtLang, hash, expectedVersion }) {
@@ -764,6 +906,8 @@ export interface MockReviewApiOptions {
   now?: () => string;
   /** Bật sẵn chế độ giả lập lỗi CloudFront khi xóa cache */
   simulateCdnFailure?: boolean;
+  /** Danh sách câu dịch khởi tạo tùy chọn để kiểm thử phân trang nhiều trang */
+  initialItems?: readonly ReviewSentenceItem[];
 }
 
 export interface MockReviewApi extends ReviewApi {
@@ -792,12 +936,13 @@ export function createMockReviewApi(opts: MockReviewApiOptions = {}): MockReview
 
   const keyOf = (src: string, tgt: string, hash: string) => `${src}#${tgt}#${hash}`;
 
-  for (const item of INITIAL_MOCK_ITEMS) {
+  const seedItems = opts.initialItems ?? INITIAL_MOCK_ITEMS;
+  for (const item of seedItems) {
     store.set(keyOf(item.srcLang, item.tgtLang, item.hash), {
       ...item,
       glossaryWarnings: item.glossaryWarnings.map((w) => ({ ...w })),
       pages: [...item.pages],
-      hasPageMetadata: true,
+      hasPageMetadata: item.hasPageMetadata ?? true,
     });
   }
 
@@ -849,48 +994,112 @@ export function createMockReviewApi(opts: MockReviewApiOptions = {}): MockReview
     },
 
     async listTranslations(filter) {
-      let items = [...store.values()].filter(
+      let baseItems = [...store.values()].filter(
         (it) => it.srcLang === filter.srcLang && it.tgtLang === filter.tgtLang,
       );
 
       if (filter.slug) {
         const prefix = `/${filter.slug}/`;
-        items = items.filter(
+        baseItems = baseItems.filter(
           (it) => it.pages.length === 0 || it.pages.some((p) => p.startsWith(prefix)),
         );
       }
 
       if (filter.pagePath) {
         if (filter.pagePath === '__UNUSED__') {
-          items = items.filter((it) => it.pages.length === 0);
+          baseItems = baseItems.filter((it) => it.pages.length === 0);
         } else {
-          items = items.filter((it) => it.pages.includes(filter.pagePath!));
+          baseItems = baseItems.filter((it) => it.pages.includes(filter.pagePath!));
         }
-      }
-
-      if (filter.labelFilter === 'MACHINE') {
-        items = items.filter((it) => it.status === 'MACHINE');
-      } else if (filter.labelFilter === 'HUMAN') {
-        items = items.filter((it) => it.status === 'HUMAN');
-      } else if (filter.labelFilter === 'NEEDS_REVIEW') {
-        items = items.filter((it) => it.needsReview);
       }
 
       if (filter.search?.trim()) {
         const kw = filter.search.trim().normalize('NFC').toLowerCase();
-        items = items.filter(
+        baseItems = baseItems.filter(
           (it) =>
             it.srcText.normalize('NFC').toLowerCase().includes(kw) ||
             it.tgtText.normalize('NFC').toLowerCase().includes(kw),
         );
       }
 
+      const baseTabs = labelFilterToTabs(filter.labelFilter);
+      const limit =
+        filter.limit && Number.isFinite(filter.limit) && filter.limit > 0
+          ? Math.min(Math.floor(filter.limit), 200)
+          : DEFAULT_REVIEW_PAGE_SIZE;
+
+      const parseOffset = (cursor?: string): number => {
+        if (!cursor) return 0;
+        const trimmed = cursor.trim();
+        const raw = trimmed.startsWith('offset:') ? trimmed.slice('offset:'.length) : trimmed;
+        const parsed = Number(raw);
+        return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+      };
+
+      const isTabCursorMode = filter.tabCursors !== undefined;
+      const requests: Array<{ tab: ReviewApiTab; offset: number }> = [];
+      if (isTabCursorMode) {
+        for (const tab of baseTabs) {
+          const cur = filter.tabCursors?.[tab]?.trim();
+          if (cur) {
+            requests.push({ tab, offset: parseOffset(cur) });
+          }
+        }
+        if (requests.length === 0) {
+          return { items: [], nextTabCursors: {}, hasMore: false };
+        }
+      } else {
+        const singleOffset = baseTabs.length === 1 ? parseOffset(filter.cursor) : 0;
+        for (const tab of baseTabs) {
+          requests.push({ tab, offset: singleOffset });
+        }
+      }
+
+      const singleTabMode = baseTabs.length === 1;
+      const matchesTab = (it: ReviewSentenceItem, tab: ReviewApiTab): boolean => {
+        if (singleTabMode) {
+          if (tab === 'REVIEW') return it.needsReview;
+          if (tab === 'MACHINE') return it.status === 'MACHINE';
+          return it.status === 'HUMAN';
+        }
+        const ownedTab: ReviewApiTab = it.needsReview
+          ? 'REVIEW'
+          : it.status === 'HUMAN'
+            ? 'HUMAN'
+            : 'MACHINE';
+        return ownedTab === tab;
+      };
+
+      const chosen = new Set<ReviewSentenceItem>();
+      const slicedInTabOrder: ReviewSentenceItem[] = [];
+      const nextTabCursors: ReviewTabCursors = {};
+
+      for (const { tab, offset } of requests) {
+        const tabItems = baseItems.filter((it) => matchesTab(it, tab));
+        const slice = tabItems.slice(offset, offset + limit);
+        for (const it of slice) {
+          chosen.add(it);
+          slicedInTabOrder.push(it);
+        }
+        if (offset + limit < tabItems.length) {
+          nextTabCursors[tab] = `offset:${offset + limit}`;
+        }
+      }
+
+      const orderedItems =
+        requests.length <= 1 ? slicedInTabOrder : baseItems.filter((it) => chosen.has(it));
+      const hasMore = hasMoreReviewPages(nextTabCursors);
+      const singleNextCursor = singleTabMode ? nextTabCursors[baseTabs[0]] : undefined;
+
       return {
-        items: items.map((it) => ({
+        items: orderedItems.map((it) => ({
           ...it,
           glossaryWarnings: it.glossaryWarnings.map((w) => ({ ...w })),
           pages: [...it.pages],
         })),
+        ...(singleNextCursor ? { nextCursor: singleNextCursor } : {}),
+        nextTabCursors,
+        hasMore,
       };
     },
 

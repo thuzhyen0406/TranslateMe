@@ -11,7 +11,11 @@ import {
   MAX_INVALIDATION_POLL_ATTEMPTS,
   checkMultipleInvalidationsStatus,
   extractInvalidationIds,
+  extractResponseTabCursors,
   getInvalidationPollIntervalMs,
+  hasMoreReviewPages,
+  labelFilterToTabs,
+  mergeReviewItems,
   validatePlaceholders,
   type MockReviewApi,
   type ReviewApi,
@@ -23,12 +27,14 @@ import type {
   InvalidationOutcome,
   ReviewLabelFilter,
   ReviewSentenceItem,
+  ReviewTabCursors,
 } from '../types/review.js';
 
 interface ReviewPageProps {
   session: AuthenticatedSession;
   api?: ReviewApi;
   isDemoMode?: boolean;
+  pageSize?: number;
 }
 
 const DEFAULT_TARGET_LANGS = ['en', 'ko', 'ja', 'zh', 'fr'] as const;
@@ -86,6 +92,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
   session,
   api: injectedApi,
   isDemoMode,
+  pageSize,
 }) => {
   const demoMode = isDemoMode ?? IS_DEMO_AUTH_MODE;
   const { api, mock } = useMemo(
@@ -140,7 +147,14 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
 
   const [items, setItems] = useState<ReviewSentenceItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [loadingMore, setLoadingMore] = useState<boolean>(false);
+  const [tabCursors, setTabCursors] = useState<ReviewTabCursors>({});
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [selectedHash, setSelectedHash] = useState<string | null>(null);
+  const hasMore = useMemo(() => hasMoreReviewPages(tabCursors), [tabCursors]);
+  const loadSeqRef = React.useRef<number>(0);
+  const selectedHashRef = React.useRef<string | null>(null);
+  selectedHashRef.current = selectedHash;
   const [draftText, setDraftText] = useState<string>('');
   const [submitting, setSubmitting] = useState<boolean>(false);
 
@@ -178,7 +192,12 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
   }, [demoMode, currentSite, targetLang, items]);
 
   const loadItems = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
+    setLoadingMore(false);
+    setTabCursors({});
+    setLoadMoreError(null);
+    setErrorMessage(null);
     try {
       const res = await api.listTranslations({
         slug: demoMode ? currentSite?.slug || undefined : undefined,
@@ -187,29 +206,88 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
         pagePath: demoMode && pageFilter ? pageFilter : undefined,
         labelFilter,
         search: searchQuery,
+        ...(pageSize ? { limit: pageSize } : {}),
       });
+      if (loadSeqRef.current !== seq) return;
       setItems(res.items);
+      setTabCursors(extractResponseTabCursors(res, labelFilter));
       if (res.items.length > 0) {
-        setSelectedHash((prev) => {
-          const found = prev ? res.items.find((i) => i.hash === prev) : undefined;
-          const chosen = found ?? res.items[0];
-          if (!found) {
-            setDraftText(chosen.tgtText);
-            setConflictLatest(null);
-            setErrorMessage(null);
-          }
-          return chosen.hash;
-        });
+        const currentSelected = selectedHashRef.current;
+        const found = currentSelected ? res.items.find((i) => i.hash === currentSelected) : undefined;
+        const chosen = found ?? res.items[0];
+        setSelectedHash(chosen.hash);
+        if (!found) {
+          setDraftText(chosen.tgtText);
+          setConflictLatest(null);
+        }
       } else {
         setSelectedHash(null);
         setDraftText('');
+        setConflictLatest(null);
       }
     } catch (err) {
+      if (loadSeqRef.current !== seq) return;
+      setItems([]);
+      setSelectedHash(null);
+      setDraftText('');
       setErrorMessage(reviewErrorMessage(err));
     } finally {
-      setLoading(false);
+      if (loadSeqRef.current === seq) {
+        setLoading(false);
+      }
     }
-  }, [api, currentSite?.slug, sourceLang, targetLang, pageFilter, labelFilter, searchQuery]);
+  }, [api, demoMode, currentSite?.slug, sourceLang, targetLang, pageFilter, labelFilter, searchQuery, pageSize]);
+
+  const loadMoreItems = useCallback(async () => {
+    if (loading || loadingMore || !hasMoreReviewPages(tabCursors)) return;
+    const seq = loadSeqRef.current;
+    setLoadingMore(true);
+    setLoadMoreError(null);
+    try {
+      const activeTabs = labelFilterToTabs(labelFilter);
+      const singleCursor = activeTabs.length === 1 ? tabCursors[activeTabs[0]] : undefined;
+      const res = await api.listTranslations({
+        slug: demoMode ? currentSite?.slug || undefined : undefined,
+        srcLang: sourceLang,
+        tgtLang: targetLang,
+        pagePath: demoMode && pageFilter ? pageFilter : undefined,
+        labelFilter,
+        search: searchQuery,
+        ...(singleCursor ? { cursor: singleCursor } : {}),
+        tabCursors,
+        ...(pageSize ? { limit: pageSize } : {}),
+      });
+      if (loadSeqRef.current !== seq) return;
+      setItems((prev) => mergeReviewItems(prev, res.items));
+      setTabCursors(extractResponseTabCursors(res, labelFilter));
+      if (!selectedHashRef.current && res.items.length > 0) {
+        const first = res.items[0];
+        setSelectedHash(first.hash);
+        setDraftText(first.tgtText);
+        setConflictLatest(null);
+      }
+    } catch (err) {
+      if (loadSeqRef.current !== seq) return;
+      setLoadMoreError(reviewErrorMessage(err));
+    } finally {
+      if (loadSeqRef.current === seq) {
+        setLoadingMore(false);
+      }
+    }
+  }, [
+    api,
+    demoMode,
+    currentSite?.slug,
+    sourceLang,
+    targetLang,
+    pageFilter,
+    labelFilter,
+    searchQuery,
+    pageSize,
+    loading,
+    loadingMore,
+    tabCursors,
+  ]);
 
   useEffect(() => {
     void loadItems();
@@ -634,7 +712,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
         </div>
         <div className="flex items-center gap-2 text-xs text-gray-600 bg-white px-3 py-2 rounded-lg border border-gray-200">
           <span>
-            Tổng câu khớp lọc: <strong className="text-gray-900">{items.length}</strong>
+            {hasMore ? 'Đã tải' : 'Tổng câu khớp lọc'}:{' '}
+            <strong className="text-gray-900">{items.length}</strong>
+            {hasMore ? ' (còn thêm)' : ''}
           </span>
           <span>•</span>
           <span>
@@ -813,9 +893,24 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
           {loading ? (
             <div className="p-8 text-center text-sm text-gray-500">Đang tải danh sách câu dịch...</div>
           ) : items.length === 0 ? (
-            <div className="p-8 text-center text-sm text-gray-500">
-              Không có câu dịch nào khớp với bộ lọc hiện tại.
-            </div>
+            errorMessage ? (
+              <div className="p-8 text-center space-y-3">
+                <div className="text-sm text-red-700">{errorMessage}</div>
+                <button
+                  type="button"
+                  onClick={() => void loadItems()}
+                  className="px-3.5 py-1.5 rounded-lg bg-white border border-gray-300 text-xs font-medium text-gray-800 hover:bg-gray-50"
+                >
+                  Thử lại
+                </button>
+              </div>
+            ) : (
+              <div className="p-8 text-center text-sm text-gray-500">
+                {hasMore
+                  ? 'Chưa tìm thấy câu dịch khớp bộ lọc trong các trang vừa tải. Bạn có thể bấm "Tải thêm" để kiểm tra các trang cũ hơn.'
+                  : 'Không có câu dịch nào khớp với bộ lọc hiện tại.'}
+              </div>
+            )
           ) : (
             <div className="divide-y divide-gray-200 max-h-[600px] overflow-y-auto">
               {items.map((item) => {
@@ -885,6 +980,37 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {!loading && (items.length > 0 || hasMore) && (
+            <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-600">
+              <div>
+                {hasMore ? (
+                  <span>
+                    Đã tải <strong className="text-gray-900">{items.length}</strong> câu. Vẫn còn bản dịch cũ hơn trên máy chủ.
+                  </span>
+                ) : (
+                  <span>
+                    Đã hiển thị toàn bộ <strong className="text-gray-900">{items.length}</strong> câu khớp bộ lọc.
+                  </span>
+                )}
+                {loadMoreError && (
+                  <div role="alert" className="text-red-600 mt-1">
+                    {loadMoreError}
+                  </div>
+                )}
+              </div>
+              {hasMore && (
+                <button
+                  type="button"
+                  disabled={loadingMore}
+                  onClick={() => void loadMoreItems()}
+                  className="px-3.5 py-1.5 rounded-lg bg-white border border-gray-300 text-gray-800 font-medium hover:bg-gray-100 disabled:opacity-50"
+                >
+                  {loadingMore ? 'Đang tải thêm...' : 'Tải thêm'}
+                </button>
+              )}
             </div>
           )}
         </div>
