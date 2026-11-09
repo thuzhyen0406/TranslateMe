@@ -72,10 +72,17 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
 
-          <span className="text-gray-600 font-normal">{session.email}</span>
+          <span className="hidden sm:inline text-gray-600 font-normal truncate max-w-[220px]" title={session.email}>
+            {session.email}
+          </span>
           <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-[#e6f2ee] text-[#146c54]">
             {ROLE_DISPLAY_LABEL[session.role]}
           </span>
+          {session.tenantStatus === 'LOCKED' && (
+            <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-200">
+              Tổ chức tạm khóa
+            </span>
+          )}
           <button
             type="button"
             onClick={onSignOut}

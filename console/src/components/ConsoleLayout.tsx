@@ -1,10 +1,17 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getVisibleMenuItems, ROLE_DISPLAY_LABEL } from '../services/cognitoAuth.js';
 import type { AuthenticatedSession, ConsoleMenuKey } from '../types/auth.js';
+import { EmptyState } from './ConsoleFeedback.js';
 import { GlossaryPage } from './GlossaryPage.js';
 import { MembersPage } from './MembersPage.js';
 import { ReviewPage } from './ReviewPage.js';
 import { WebsitePage } from './WebsitePage.js';
+
+const PLAN_DISPLAY_LABEL: Readonly<Record<AuthenticatedSession['plan'], string>> = {
+  FREE: 'Free',
+  PRO: 'Pro',
+  BUSINESS: 'Business',
+};
 
 interface ConsoleLayoutProps {
   session: AuthenticatedSession;
@@ -47,21 +54,29 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session }) => {
           })}
         </nav>
 
-        {/* Hộp thông tin JWT Claims (custom:tenant_id & custom:role sau khi Refresh Token) */}
-        <div className="mt-6 rounded-lg bg-white border border-gray-200 p-3 text-[11px] text-gray-500 space-y-1">
-          <div className="font-semibold text-gray-700">Phiên Cognito JWT</div>
-          <div className="truncate">
-            <span className="text-gray-400">tenant_id:</span>{' '}
-            <code className="text-gray-700">{session.tenantId}</code>
+        {/* Thông tin tổ chức & phiên làm việc hiện tại */}
+        <div className="mt-6 rounded-lg bg-white border border-gray-200 p-3 text-[11px] text-gray-500 space-y-1.5">
+          <div className="font-semibold text-gray-700 truncate" title={session.organizationName}>
+            {session.organizationName}
           </div>
-          <div>
-            <span className="text-gray-400">role:</span>{' '}
-            <code className="text-[#146c54] font-semibold">{session.role}</code>
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-gray-400">Vai trò:</span>
+            <span className="text-[#146c54] font-semibold">{ROLE_DISPLAY_LABEL[session.role]}</span>
           </div>
-          <div>
-            <span className="text-gray-400">gói:</span>{' '}
-            <span className="font-medium text-gray-700">{session.plan}</span>
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-gray-400">Gói dịch vụ:</span>
+            <span className="font-medium text-gray-700">{PLAN_DISPLAY_LABEL[session.plan] ?? session.plan}</span>
           </div>
+          <div className="truncate text-[10px] text-gray-400" title={session.tenantId}>
+            Mã tổ chức: <code className="text-gray-600">{session.tenantId}</code>
+          </div>
+          {session.tenantStatus === 'LOCKED' && (
+            <div className="pt-1">
+              <span className="inline-flex w-full justify-center items-center px-2 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-800 font-semibold">
+                Tổ chức tạm khóa (chỉ xem)
+              </span>
+            </div>
+          )}
         </div>
       </aside>
 
@@ -77,33 +92,27 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session }) => {
           <ReviewPage session={session} />
         ) : (
           <div className="p-8 max-w-4xl">
-            <div className="bg-white rounded-xl border border-gray-200 p-8 shadow-sm">
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#e6f2ee] text-[#146c54] mb-3">
-                Vai trò hiện tại: {ROLE_DISPLAY_LABEL[session.role]}
-              </span>
-              <h1 className="text-2xl font-bold text-gray-800">
-                {visibleMenus.find((m) => m.key === activeMenu)?.label}
-              </h1>
-              <p className="mt-2 text-sm text-gray-500 leading-relaxed">
-                Khung điều hướng của mục này đã được phân quyền theo claim{' '}
-                <code className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700">
-                  custom:role = {session.role}
-                </code>{' '}
-                và{' '}
-                <code className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700">
-                  custom:tenant_id = {session.tenantId}
-                </code>
-                .
-              </p>
-              {session.role === 'TENANT_ADMIN' && (
-                <button
-                  type="button"
-                  onClick={() => setActiveMenu('members')}
-                  className="mt-5 px-4 py-2 rounded-lg bg-[#146c54] hover:bg-[#0f5945] text-white text-xs font-semibold transition-colors"
-                >
-                  Chuyển tới màn Thành viên (Q1)
-                </button>
-              )}
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
+              <EmptyState
+                title={`Mục "${visibleMenus.find((m) => m.key === activeMenu)?.label ?? 'Chức năng'}" đang chờ tích hợp`}
+                description={`Bạn đang đăng nhập với vai trò ${ROLE_DISPLAY_LABEL[session.role]} của tổ chức ${session.organizationName}. Giao diện chi tiết của chức năng này sẽ được tích hợp ở bước tiếp theo.`}
+                actionLabel={
+                  session.role === 'TENANT_ADMIN'
+                    ? 'Quản lý thành viên'
+                    : session.role === 'DEVELOPER'
+                      ? 'Mở Bảng thuật ngữ'
+                      : undefined
+                }
+                onAction={
+                  session.role === 'TENANT_ADMIN'
+                    ? () => setActiveMenu('members')
+                    : session.role === 'DEVELOPER'
+                      ? () => setActiveMenu('glossary')
+                      : undefined
+                }
+                secondaryActionLabel={session.role === 'TENANT_ADMIN' ? 'Quay lại Website' : undefined}
+                onSecondaryAction={session.role === 'TENANT_ADMIN' ? () => setActiveMenu('website') : undefined}
+              />
             </div>
           </div>
         )}

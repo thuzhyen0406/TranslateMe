@@ -14,6 +14,11 @@
  *  - Gọi REST API `GET /console/me` và `GET/POST /console/members` qua `VITE_API_BASE_URL`.
  */
 
+import {
+  isKnownConsoleErrorCode,
+  resolveConsoleError,
+  sanitizeClientSafeMessage,
+} from './errorMapping.js';
 import type {
   AuthenticatedSession,
   ConfirmEmailInput,
@@ -179,6 +184,8 @@ export class ConsoleAuthError extends Error {
   constructor(
     public code: string,
     message: string,
+    public requestId?: string,
+    public httpStatus?: number,
   ) {
     super(message);
     this.name = 'ConsoleAuthError';
@@ -186,13 +193,9 @@ export class ConsoleAuthError extends Error {
 }
 
 /**
- * Chuyển mã lỗi của Amazon Cognito / API sang thông báo tiếng Việt rõ ràng cho người dùng.
+ * Chuyển mã lỗi của Amazon Cognito / API (Bảng 2.10) sang thông báo tiếng Việt rõ ràng cho người dùng.
  */
 export function mapCognitoErrorToVietnamese(err: unknown): string {
-  if (err instanceof ConsoleAuthError) {
-    return err.message;
-  }
-
   const rawCode =
     err && typeof err === 'object' && ('name' in err || '__type' in err || 'code' in err)
       ? String(
@@ -203,6 +206,15 @@ export function mapCognitoErrorToVietnamese(err: unknown): string {
       : '';
   const code = rawCode.includes('#') ? rawCode.split('#').pop()! : rawCode;
   const rawMessage = err instanceof Error ? err.message : String(err ?? '');
+
+  if (
+    err instanceof ConsoleAuthError &&
+    !isKnownConsoleErrorCode(err.code) &&
+    (err.code === 'ValidationError' || /[À-ỹ]/u.test(err.message))
+  ) {
+    const safe = sanitizeClientSafeMessage(err.message);
+    if (safe) return safe;
+  }
 
   switch (code) {
     case 'UsernameExistsException':
@@ -226,7 +238,19 @@ export function mapCognitoErrorToVietnamese(err: unknown): string {
     case 'UserNotConfirmedException':
       return 'Tài khoản chưa được xác nhận email. Vui lòng nhập mã xác nhận 6 chữ số.';
     default:
-      return rawMessage || 'Đã xảy ra lỗi trong quá trình xác thực. Vui lòng thử lại.';
+      if (isKnownConsoleErrorCode(code)) {
+        return resolveConsoleError(err, {
+          scope: 'auth',
+          overrides: {
+            PERMISSION_DENIED: 'Chỉ Tenant Admin mới có quyền quản lý và mời thành viên.',
+            TENANT_SUSPENDED: 'Tổ chức đang bị tạm khóa (chế độ chỉ xem); không thể thay đổi thành viên.',
+          },
+        }).message;
+      }
+      if (err && typeof err === 'object' && 'httpStatus' in err) {
+        return resolveConsoleError(err, { scope: 'auth' }).message;
+      }
+      return sanitizeClientSafeMessage(rawMessage) ?? 'Đã xảy ra lỗi trong quá trình xác thực. Vui lòng thử lại.';
   }
 }
 

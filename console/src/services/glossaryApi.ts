@@ -13,6 +13,11 @@
  *  - createHttpGlossaryApi: gọi REST API thật kèm Authorization: Bearer <idToken> (khi VITE_AUTH_MODE=cognito);
  *  - createMockGlossaryApi: giả lập đầy đủ trong trình duyệt (khi VITE_AUTH_MODE=mock) với dữ liệu mẫu Mục 1.3.3.
  */
+import {
+  extractApiErrorPayload,
+  resolveConsoleError,
+  type KnownConsoleErrorCode,
+} from './errorMapping.js';
 import type {
   CsvImportPreviewOrCommitResult,
   CsvImportRowError,
@@ -65,6 +70,8 @@ export class GlossaryApiError extends Error {
   constructor(
     public code: string,
     message: string,
+    public requestId?: string,
+    public httpStatus?: number,
   ) {
     super(message);
     this.name = 'GlossaryApiError';
@@ -626,29 +633,25 @@ export function analyzeGlossaryCsv(
   };
 }
 
+const GLOSSARY_ERROR_OVERRIDES: Partial<Record<KnownConsoleErrorCode, string>> = Object.freeze({
+  INVALID_REQUEST: 'Dữ liệu thuật ngữ hoặc tệp CSV chưa hợp lệ.',
+  FORBIDDEN: 'Chỉ Tenant Admin mới có quyền thêm, sửa, xóa thuật ngữ hoặc nhập CSV.',
+  PERMISSION_DENIED: 'Chỉ Tenant Admin mới có quyền thêm, sửa, xóa thuật ngữ hoặc nhập CSV.',
+  TENANT_SUSPENDED: 'Tổ chức đang bị tạm khóa (chế độ chỉ xem); không thể thay đổi bảng thuật ngữ.',
+  VERSION_CONFLICT: 'Bảng thuật ngữ vừa được cập nhật từ phiên khác. Vui lòng tải lại và thử lại.',
+  NOT_FOUND: 'Không tìm thấy thuật ngữ cần xóa hoặc chỉnh sửa.',
+  UNAUTHORIZED: 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.',
+  NETWORK_ERROR: 'Không kết nối được tới máy chủ, vui lòng kiểm tra mạng và thử lại.',
+});
+
 export function glossaryErrorMessage(err: unknown): string {
   if (!(err instanceof GlossaryApiError)) {
     return 'Có lỗi tạm thời khi xử lý bảng thuật ngữ, vui lòng thử lại.';
   }
-  switch (err.code) {
-    case 'INVALID_REQUEST':
-      return err.message || 'Dữ liệu thuật ngữ hoặc tệp CSV chưa hợp lệ.';
-    case 'FORBIDDEN':
-    case 'PERMISSION_DENIED':
-      return 'Chỉ Tenant Admin mới có quyền thêm, sửa, xóa thuật ngữ hoặc nhập CSV.';
-    case 'TENANT_SUSPENDED':
-      return 'Tổ chức đang bị tạm khóa (chế độ chỉ xem); không thể thay đổi bảng thuật ngữ.';
-    case 'VERSION_CONFLICT':
-      return 'Bảng thuật ngữ vừa được cập nhật từ phiên khác. Vui lòng tải lại và thử lại.';
-    case 'NOT_FOUND':
-      return 'Không tìm thấy thuật ngữ cần xóa hoặc chỉnh sửa.';
-    case 'UNAUTHORIZED':
-      return 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.';
-    case 'NETWORK_ERROR':
-      return 'Không kết nối được tới máy chủ, vui lòng kiểm tra mạng và thử lại.';
-    default:
-      return err.message || 'Có lỗi tạm thời, vui lòng thử lại.';
-  }
+  return resolveConsoleError(err, {
+    scope: 'glossary',
+    overrides: GLOSSARY_ERROR_OVERRIDES,
+  }).message;
 }
 
 // ============================================================================
@@ -765,15 +768,13 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
     }
 
     if (!res.ok) {
-      const errObj = (data.error ?? {}) as Json;
-      const code =
-        str(errObj.code) ||
-        (res.status === 401
-          ? 'UNAUTHORIZED'
-          : res.status === 403
-            ? 'PERMISSION_DENIED'
-            : 'INTERNAL_ERROR');
-      throw new GlossaryApiError(code, str(errObj.message));
+      const extracted = extractApiErrorPayload(data, res.status);
+      throw new GlossaryApiError(
+        extracted.code,
+        extracted.message,
+        extracted.requestId,
+        extracted.httpStatus,
+      );
     }
     return data;
   }

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { IS_DEMO_AUTH_MODE } from '../services/cognitoAuth.js';
+import { canConsoleRequest } from '../services/tenantPolicy.js';
 import {
   LANGUAGE_OPTIONS,
   PREWARM_REASON_LABEL,
@@ -21,6 +22,7 @@ import {
 } from '../services/websiteApi.js';
 import type { AuthenticatedSession } from '../types/auth.js';
 import type { CreateWebsiteInput, PrewarmJob, VerifyMethod, Website, WebsiteStatus } from '../types/website.js';
+import { EmptyState, ErrorAlert } from './ConsoleFeedback.js';
 
 /**
  * Màn Website (Q2, Nhiệm vụ 4.6 – TV2): danh sách website, thêm website (bước 1), xác minh quyền sở hữu (bước 2),
@@ -90,83 +92,105 @@ const StepChips: React.FC<{ step: 1 | 2 }> = ({ step }) => (
   </div>
 );
 
-const ErrorBox: React.FC<{ message: string | null }> = ({ message }) =>
-  message ? (
-    <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-      {message}
-    </div>
-  ) : null;
-
 // ----------------------------------------------------------------------------
 // Danh sách
 // ----------------------------------------------------------------------------
 
-const WebsiteList: React.FC<{ api: WebsiteApi; onCreate: () => void; onOpen: (slug: string) => void }> = ({ api, onCreate, onOpen }) => {
+const WebsiteList: React.FC<{
+  api: WebsiteApi;
+  canWrite: boolean;
+  tenantLocked: boolean;
+  onCreate: () => void;
+  onOpen: (slug: string) => void;
+}> = ({ api, canWrite, tenantLocked, onCreate, onOpen }) => {
   const [sites, setSites] = useState<Website[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const s = await api.listWebsites();
+      setSites(s);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setLoading(false);
+    }
+  }, [api]);
 
   useEffect(() => {
-    let alive = true;
-    api
-      .listWebsites()
-      .then((s) => alive && setSites(s))
-      .catch((e) => alive && setError(websiteErrorMessage(e)));
-    return () => {
-      alive = false;
-    };
-  }, [api]);
+    void load();
+  }, [load]);
 
   return (
     <div className="p-8 max-w-6xl">
-      <div className="mb-6 flex items-end justify-between gap-4">
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">Website</h1>
           <p className="mt-1 text-xs text-gray-500">Đưa website có sẵn vào TranslateMe và nhận đường dẫn bản dịch cho từng ngôn ngữ.</p>
         </div>
-        <button type="button" className={btnPrimary} onClick={onCreate}>
-          + Thêm website
-        </button>
+        {canWrite ? (
+          <button type="button" className={btnPrimary} onClick={onCreate}>
+            + Thêm website
+          </button>
+        ) : tenantLocked ? (
+          <span className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
+            Tổ chức đang bị tạm khóa – chỉ xem
+          </span>
+        ) : null}
       </div>
-      <ErrorBox message={error} />
+      <ErrorAlert error={error} scope="website" formatMessage={websiteErrorMessage} onRetry={() => void load()} className="mb-4" />
       <div className={`${card} overflow-hidden`}>
-        {sites === null && !error ? (
-          <p className="px-6 py-8 text-sm text-gray-500">Đang tải…</p>
-        ) : sites && sites.length === 0 ? (
-          <div className="px-6 py-10 text-center">
-            <p className="text-sm text-gray-600">Chưa có website nào.</p>
-            <button type="button" className={`${btnPrimary} mt-4`} onClick={onCreate}>
-              Thêm website đầu tiên
-            </button>
-          </div>
+        {loading ? (
+          <p className="px-6 py-10 text-center text-sm text-gray-500">Đang tải danh sách website…</p>
+        ) : error && (!sites || sites.length === 0) ? (
+          <EmptyState
+            variant="error"
+            title="Chưa thể hiển thị danh sách website"
+            description="Vui lòng kiểm tra thông báo lỗi ở trên và thử lại."
+            actionLabel="Thử lại"
+            onAction={() => void load()}
+          />
+        ) : !sites || sites.length === 0 ? (
+          <EmptyState
+            title="Chưa có website nào"
+            description="Thêm website đầu tiên của bạn để nhận mã xác minh quyền sở hữu và tạo đường dẫn bản dịch đa ngôn ngữ."
+            actionLabel={canWrite ? '+ Thêm website đầu tiên' : undefined}
+            onAction={canWrite ? onCreate : undefined}
+          />
         ) : (
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="border-b border-gray-100 text-xs font-medium text-gray-400">
-                <th className="py-3.5 px-6">Tên hiển thị</th>
-                <th className="py-3.5 px-6">Trang chủ</th>
-                <th className="py-3.5 px-6">Ngôn ngữ đích</th>
-                <th className="py-3.5 px-6">Trạng thái</th>
-                <th className="py-3.5 px-6" />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100 text-sm">
-              {(sites ?? []).map((s) => (
-                <tr key={s.slug} className="hover:bg-gray-50/70 transition-colors">
-                  <td className="py-4 px-6 font-medium text-gray-800">{s.displayName}</td>
-                  <td className="py-4 px-6 text-gray-600 break-all">{s.homeUrl}</td>
-                  <td className="py-4 px-6 text-gray-600">{s.targetLangs.map(languageLabel).join(', ')}</td>
-                  <td className="py-4 px-6">
-                    <StatusBadge status={s.status} />
-                  </td>
-                  <td className="py-4 px-6 text-right">
-                    <button type="button" className="text-sm font-semibold text-[#146c54] hover:underline" onClick={() => onOpen(s.slug)}>
-                      {s.status === 'PENDING' ? 'Xác minh' : 'Xem'}
-                    </button>
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-gray-100 text-xs font-medium text-gray-400">
+                  <th className="py-3.5 px-6">Tên hiển thị</th>
+                  <th className="py-3.5 px-6">Trang chủ</th>
+                  <th className="py-3.5 px-6">Ngôn ngữ đích</th>
+                  <th className="py-3.5 px-6">Trạng thái</th>
+                  <th className="py-3.5 px-6" />
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-gray-100 text-sm">
+                {sites.map((s) => (
+                  <tr key={s.slug} className="hover:bg-gray-50/70 transition-colors">
+                    <td className="py-4 px-6 font-medium text-gray-800">{s.displayName}</td>
+                    <td className="py-4 px-6 text-gray-600 break-all">{s.homeUrl}</td>
+                    <td className="py-4 px-6 text-gray-600">{s.targetLangs.map(languageLabel).join(', ')}</td>
+                    <td className="py-4 px-6">
+                      <StatusBadge status={s.status} />
+                    </td>
+                    <td className="py-4 px-6 text-right">
+                      <button type="button" className="text-sm font-semibold text-[#146c54] hover:underline" onClick={() => onOpen(s.slug)}>
+                        {s.status === 'PENDING' ? 'Xác minh' : 'Xem'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>
@@ -177,7 +201,12 @@ const WebsiteList: React.FC<{ api: WebsiteApi; onCreate: () => void; onOpen: (sl
 // Bước 1: Thêm website (Hình 1.7)
 // ----------------------------------------------------------------------------
 
-const CreateWebsite: React.FC<{ api: WebsiteApi; onCancel: () => void; onCreated: (slug: string) => void }> = ({ api, onCancel, onCreated }) => {
+const CreateWebsite: React.FC<{ api: WebsiteApi; canWrite: boolean; onCancel: () => void; onCreated: (slug: string) => void }> = ({
+  api,
+  canWrite,
+  onCancel,
+  onCreated,
+}) => {
   const [homeUrl, setHomeUrl] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [sourceLang, setSourceLang] = useState('vi');
@@ -185,7 +214,7 @@ const CreateWebsite: React.FC<{ api: WebsiteApi; onCancel: () => void; onCreated
   const [selectors, setSelectors] = useState('');
   const [touched, setTouched] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown | null>(null);
 
   const form: CreateWebsiteInput = useMemo(
     () => ({ homeUrl, displayName, sourceLang, targetLangs: targetLangs.filter((l) => l !== sourceLang), noTranslateSelectors: parseSelectors(selectors) }),
@@ -198,6 +227,7 @@ const CreateWebsite: React.FC<{ api: WebsiteApi; onCancel: () => void; onCreated
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canWrite) return;
     setTouched(true);
     setError(null);
     if (Object.keys(errors).length) return;
@@ -206,7 +236,7 @@ const CreateWebsite: React.FC<{ api: WebsiteApi; onCancel: () => void; onCreated
       const site = await api.createWebsite(form);
       onCreated(site.slug);
     } catch (err) {
-      setError(websiteErrorMessage(err));
+      setError(err);
     } finally {
       setSubmitting(false);
     }
@@ -225,7 +255,7 @@ const CreateWebsite: React.FC<{ api: WebsiteApi; onCancel: () => void; onCreated
       </p>
       <StepChips step={1} />
       <form onSubmit={submit} noValidate className={`${card} p-6 space-y-4`}>
-        <ErrorBox message={error} />
+        <ErrorAlert error={error} scope="website" formatMessage={websiteErrorMessage} compact />
         <div>
           <label htmlFor="ws-home" className="block text-xs font-semibold text-gray-700 mb-1.5">
             Địa chỉ trang chủ
@@ -279,7 +309,7 @@ const CreateWebsite: React.FC<{ api: WebsiteApi; onCancel: () => void; onCreated
           <button type="button" className={btnSecondary} onClick={onCancel}>
             Hủy
           </button>
-          <button type="submit" className={btnPrimary} disabled={submitting}>
+          <button type="submit" className={btnPrimary} disabled={!canWrite || submitting}>
             {submitting ? 'Đang tạo…' : 'Tiếp tục: Xác minh'}
           </button>
         </div>
@@ -310,19 +340,25 @@ const CopyButton: React.FC<{ text: string; label?: string }> = ({ text, label = 
   );
 };
 
-const VerificationCard: React.FC<{ api: WebsiteApi; site: Website; onVerified: (s: Website) => void }> = ({ api, site, onVerified }) => {
+const VerificationCard: React.FC<{
+  api: WebsiteApi;
+  canWrite: boolean;
+  site: Website;
+  onVerified: (s: Website) => void;
+}> = ({ api, canWrite, site, onVerified }) => {
   const [method, setMethod] = useState<VerifyMethod>('META');
   const [checking, setChecking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown | null>(null);
   const verified = site.status !== 'PENDING';
 
   const check = async () => {
+    if (!canWrite) return;
     setChecking(true);
     setError(null);
     try {
       onVerified(await api.verifyWebsite(site.slug, method));
     } catch (err) {
-      setError(websiteErrorMessage(err));
+      setError(err);
     } finally {
       setChecking(false);
     }
@@ -340,7 +376,14 @@ const VerificationCard: React.FC<{ api: WebsiteApi; site: Website; onVerified: (
       <h2 id="verify-title" className="text-base font-bold text-gray-800 mb-3">
         {verified ? 'Đã xác minh quyền sở hữu' : 'Chọn một trong hai cách, sau đó bấm Kiểm tra'}
       </h2>
-      <ErrorBox message={error} />
+      <ErrorAlert
+        error={error}
+        scope="website"
+        formatMessage={websiteErrorMessage}
+        onRetry={canWrite && !checking ? () => void check() : undefined}
+        compact
+        className="mb-3"
+      />
       {!verified && (
         <div className="space-y-3">
           <label className="flex items-start gap-2.5 cursor-pointer">
@@ -373,7 +416,7 @@ const VerificationCard: React.FC<{ api: WebsiteApi; site: Website; onVerified: (
           ))}
         </div>
         {!verified && (
-          <button type="button" className={btnPrimary} onClick={check} disabled={checking}>
+          <button type="button" className={btnPrimary} onClick={check} disabled={!canWrite || checking}>
             {checking ? 'Đang kiểm tra…' : 'Kiểm tra'}
           </button>
         )}
@@ -382,10 +425,10 @@ const VerificationCard: React.FC<{ api: WebsiteApi; site: Website; onVerified: (
   );
 };
 
-const PrewarmPanel: React.FC<{ api: WebsiteApi; site: Website }> = ({ api, site }) => {
+const PrewarmPanel: React.FC<{ api: WebsiteApi; canWrite: boolean; site: Website }> = ({ api, canWrite, site }) => {
   const [job, setJob] = useState<PrewarmJob | null>(null);
   const [starting, setStarting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown | null>(null);
   const active = isPrewarmActive(job);
 
   useEffect(() => {
@@ -412,12 +455,13 @@ const PrewarmPanel: React.FC<{ api: WebsiteApi; site: Website }> = ({ api, site 
   }, [api, site.slug, active]);
 
   const start = async () => {
+    if (!canWrite) return;
     setStarting(true);
     setError(null);
     try {
       setJob((await api.startPrewarm(site.slug)).job);
     } catch (err) {
-      setError(websiteErrorMessage(err));
+      setError(err);
     } finally {
       setStarting(false);
     }
@@ -426,9 +470,14 @@ const PrewarmPanel: React.FC<{ api: WebsiteApi; site: Website }> = ({ api, site 
   const progress = job?.progress ?? 0;
   return (
     <div className="mt-5">
-      <ErrorBox message={error} />
+      <ErrorAlert error={error} scope="website" formatMessage={websiteErrorMessage} compact className="mb-3" />
       <div className="flex flex-wrap items-center gap-4">
-        <button type="button" className={btnSecondary} onClick={start} disabled={starting || active || site.status !== 'ACTIVE'}>
+        <button
+          type="button"
+          className={btnSecondary}
+          onClick={start}
+          disabled={!canWrite || starting || active || site.status !== 'ACTIVE'}
+        >
           {active ? 'Đang dịch trước…' : 'Dịch trước toàn bộ website theo sitemap'}
         </button>
         <div
@@ -466,26 +515,55 @@ const PrewarmPanel: React.FC<{ api: WebsiteApi; site: Website }> = ({ api, site 
   );
 };
 
-const WebsiteDetail: React.FC<{ api: WebsiteApi; slug: string; onBack: () => void }> = ({ api, slug, onBack }) => {
+const WebsiteDetail: React.FC<{
+  api: WebsiteApi;
+  canWrite: boolean;
+  tenantLocked: boolean;
+  slug: string;
+  onBack: () => void;
+}> = ({ api, canWrite, tenantLocked, slug, onBack }) => {
   const [site, setSite] = useState<Website | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown | null>(null);
 
-  const load = useCallback(() => {
-    api
-      .getWebsite(slug)
-      .then(setSite)
-      .catch((e) => setError(websiteErrorMessage(e)));
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const found = await api.getWebsite(slug);
+      setSite(found);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setLoading(false);
+    }
   }, [api, slug]);
-  useEffect(load, [load]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   if (!site) {
     return (
-      <div className="p-8 max-w-6xl">
-        <ErrorBox message={error} />
-        {!error && <p className="text-sm text-gray-500">Đang tải…</p>}
-        <button type="button" className={btnSecondary} onClick={onBack}>
-          Quay lại danh sách
-        </button>
+      <div className="p-8 max-w-6xl space-y-4">
+        <ErrorAlert error={error} scope="website" formatMessage={websiteErrorMessage} onRetry={() => void load()} />
+        {loading ? (
+          <div className={`${card} px-6 py-10 text-center text-sm text-gray-500`}>
+            Đang tải thông tin website…
+          </div>
+        ) : (
+          <div className={card}>
+            <EmptyState
+              variant={error ? 'error' : 'default'}
+              title={error ? 'Chưa thể mở thông tin website' : 'Không tìm thấy website'}
+              description="Vui lòng kiểm tra thông báo lỗi ở trên hoặc quay lại danh sách website."
+              actionLabel={error ? 'Thử lại' : 'Quay lại danh sách'}
+              onAction={error ? () => void load() : onBack}
+              secondaryActionLabel={error ? 'Quay lại danh sách' : undefined}
+              onSecondaryAction={error ? onBack : undefined}
+            />
+          </div>
+        )}
       </div>
     );
   }
@@ -494,7 +572,7 @@ const WebsiteDetail: React.FC<{ api: WebsiteApi; slug: string; onBack: () => voi
   const firstLang = site.targetLangs[0];
   return (
     <div className="p-8 max-w-6xl">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">{site.displayName}</h1>
           <p className="mt-1 mb-4 text-xs text-gray-500">
@@ -504,10 +582,17 @@ const WebsiteDetail: React.FC<{ api: WebsiteApi; slug: string; onBack: () => voi
             › {site.displayName}
           </p>
         </div>
-        <StatusBadge status={site.status} />
+        <div className="flex items-center gap-2">
+          {tenantLocked && (
+            <span className="px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
+              Tổ chức đang bị tạm khóa – chỉ xem
+            </span>
+          )}
+          <StatusBadge status={site.status} />
+        </div>
       </div>
       <StepChips step={2} />
-      <VerificationCard api={api} site={site} onVerified={setSite} />
+      <VerificationCard api={api} canWrite={canWrite} site={site} onVerified={setSite} />
 
       <section className={`${card} p-6`} aria-labelledby="urls-title">
         <h2 id="urls-title" className="text-base font-bold text-gray-800 mb-3">
@@ -520,40 +605,42 @@ const WebsiteDetail: React.FC<{ api: WebsiteApi; slug: string; onBack: () => voi
             {site.status === 'PAUSED' && (
               <p className="mb-3 text-xs text-amber-700">Website đang tạm dừng: khách truy cập đường dẫn bản dịch được chuyển về website gốc.</p>
             )}
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="bg-gray-50 text-xs font-medium text-gray-500">
-                  <th className="py-2.5 px-3">Ngôn ngữ</th>
-                  <th className="py-2.5 px-3">Đường dẫn</th>
-                  <th className="py-2.5 px-3" />
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 text-sm">
-                {site.targetLangs.map((lang) => {
-                  const url = translationUrl(PUBLIC_BASE_URL, site.slug, lang);
-                  return (
-                    <tr key={lang}>
-                      <td className="py-3 px-3 text-gray-700">{languageLabel(lang)}</td>
-                      <td className="py-3 px-3">
-                        <code className="text-xs text-gray-800 break-all">{url}</code>
-                      </td>
-                      <td className="py-3 px-3 text-right whitespace-nowrap space-x-2">
-                        <CopyButton text={url} />
-                        <a
-                          href={url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-block px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 text-xs font-semibold text-gray-700"
-                        >
-                          Mở
-                        </a>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            <PrewarmPanel api={api} site={site} />
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-gray-50 text-xs font-medium text-gray-500">
+                    <th className="py-2.5 px-3">Ngôn ngữ</th>
+                    <th className="py-2.5 px-3">Đường dẫn</th>
+                    <th className="py-2.5 px-3" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 text-sm">
+                  {site.targetLangs.map((lang) => {
+                    const url = translationUrl(PUBLIC_BASE_URL, site.slug, lang);
+                    return (
+                      <tr key={lang}>
+                        <td className="py-3 px-3 text-gray-700">{languageLabel(lang)}</td>
+                        <td className="py-3 px-3">
+                          <code className="text-xs text-gray-800 break-all">{url}</code>
+                        </td>
+                        <td className="py-3 px-3 text-right whitespace-nowrap space-x-2">
+                          <CopyButton text={url} />
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-block px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 text-xs font-semibold text-gray-700"
+                          >
+                            Mở
+                          </a>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <PrewarmPanel api={api} canWrite={canWrite} site={site} />
             {firstLang && (
               <p className="mt-4 text-[11px] text-gray-500">
                 Gợi ý: thêm liên kết "{languageLabel(firstLang)}" vào menu website gốc, trỏ tới /{firstLang}/.
@@ -570,14 +657,13 @@ const WebsiteDetail: React.FC<{ api: WebsiteApi; slug: string; onBack: () => voi
 
 /** Chế độ Cognito khi API quản lý website chưa được nối: không gửi request nào, chỉ báo tính năng chưa sẵn sàng */
 const WebsiteUnavailable: React.FC = () => (
-  <div className="max-w-3xl">
-    <h1 className="text-xl font-bold text-gray-900">Website</h1>
-    <section className={`${card} mt-4 p-6`}>
-      <p className="text-sm font-semibold text-gray-800">Tính năng quản lý website chưa được bật trên môi trường này.</p>
-      <p className="mt-2 text-sm text-gray-600">
-        Thêm website, xác minh quyền sở hữu và dịch trước sẽ dùng được khi máy chủ mở các API quản lý website. Vui lòng
-        quay lại sau hoặc liên hệ quản trị hệ thống.
-      </p>
+  <div className="p-8 max-w-5xl">
+    <h1 className="text-2xl font-bold text-gray-800">Website</h1>
+    <section className={`${card} mt-4`}>
+      <EmptyState
+        title="Tính năng quản lý website chưa được bật trên môi trường này"
+        description="Thêm website, xác minh quyền sở hữu và dịch trước sẽ dùng được khi máy chủ mở các API quản lý website. Vui lòng quay lại sau hoặc liên hệ quản trị hệ thống."
+      />
     </section>
   </div>
 );
@@ -587,14 +673,38 @@ const WebsiteUnavailable: React.FC = () => (
 export const WebsitePage: React.FC<{ session: AuthenticatedSession; api?: WebsiteApi }> = ({ session, api: injected }) => {
   const api = useMemo(() => injected ?? websiteApiFor(session), [injected, session]);
   const [view, setView] = useState<View>({ kind: 'list' });
+  const isTenantAdmin = session.role === 'TENANT_ADMIN';
+  const tenantLocked = !canConsoleRequest({
+    method: 'POST',
+    path: '/console/hosts',
+    tenantStatus: session.tenantStatus ?? 'ACTIVE',
+  });
+  const canWrite = isTenantAdmin && !tenantLocked;
 
   if (!api) return <WebsiteUnavailable />;
 
   if (view.kind === 'create') {
-    return <CreateWebsite api={api} onCancel={() => setView({ kind: 'list' })} onCreated={(slug) => setView({ kind: 'detail', slug })} />;
+    return <CreateWebsite api={api} canWrite={canWrite} onCancel={() => setView({ kind: 'list' })} onCreated={(slug) => setView({ kind: 'detail', slug })} />;
   }
   if (view.kind === 'detail') {
-    return <WebsiteDetail key={view.slug} api={api} slug={view.slug} onBack={() => setView({ kind: 'list' })} />;
+    return (
+      <WebsiteDetail
+        key={view.slug}
+        api={api}
+        canWrite={canWrite}
+        tenantLocked={tenantLocked}
+        slug={view.slug}
+        onBack={() => setView({ kind: 'list' })}
+      />
+    );
   }
-  return <WebsiteList api={api} onCreate={() => setView({ kind: 'create' })} onOpen={(slug) => setView({ kind: 'detail', slug })} />;
+  return (
+    <WebsiteList
+      api={api}
+      canWrite={canWrite}
+      tenantLocked={tenantLocked}
+      onCreate={() => canWrite && setView({ kind: 'create' })}
+      onOpen={(slug) => setView({ kind: 'detail', slug })}
+    />
+  );
 };
