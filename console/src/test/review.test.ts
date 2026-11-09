@@ -6,15 +6,21 @@ import {
   createMockReviewApi,
   extractInvalidationIds,
   extractPlaceholderTokens,
+  extractResponseTabCursors,
+  extractTabCursors,
   checkMultipleInvalidationsStatus,
+  hasMoreReviewPages,
   invalidationFromJson,
+  labelFilterToTabs,
   MAX_INVALIDATION_POLL_ATTEMPTS,
   getInvalidationPollIntervalMs,
+  mergeReviewItems,
   normalizeInvalidationPollStatus,
   reviewErrorMessage,
   reviewItemFromJson,
   validatePlaceholders,
 } from '../services/reviewApi.js';
+import type { ReviewSentenceItem } from '../types/review.js';
 
 describe('Q4 – kiểm tra ký hiệu định dạng {n} và thông báo lỗi (Task 4.10)', () => {
   it('extractPlaceholderTokens và validatePlaceholders nhận diện đúng {n}, cho phép đảo thứ tự cặp và bỏ qua {{ }}', () => {
@@ -726,6 +732,357 @@ describe('Theo dõi toàn bộ Invalidation IDs CloudFront & xử lý hoàn tấ
     const res = await checkMultipleInvalidationsStatus(mockApi, []);
     assert.equal(res.status, 'Completed');
     assert.deepEqual(res.completedIds, []);
+  });
+});
+
+describe('Phân trang theo từng tab (cursor / nextTabCursors) cho PR #32 – Q4', () => {
+  it('các hàm thuần labelFilterToTabs, extractTabCursors, extractResponseTabCursors, hasMoreReviewPages và mergeReviewItems hoạt động chính xác', () => {
+    assert.deepEqual(labelFilterToTabs(undefined), ['REVIEW', 'MACHINE', 'HUMAN']);
+    assert.deepEqual(labelFilterToTabs('ALL'), ['REVIEW', 'MACHINE', 'HUMAN']);
+    assert.deepEqual(labelFilterToTabs('NEEDS_REVIEW'), ['REVIEW']);
+    assert.deepEqual(labelFilterToTabs('MACHINE'), ['MACHINE']);
+    assert.deepEqual(labelFilterToTabs('HUMAN'), ['HUMAN']);
+
+    assert.equal(hasMoreReviewPages(undefined), false);
+    assert.equal(hasMoreReviewPages({}), false);
+    assert.equal(hasMoreReviewPages({ MACHINE: '  ' }), false);
+    assert.equal(hasMoreReviewPages({ MACHINE: 'c1' }), true);
+
+    assert.deepEqual(
+      extractTabCursors({ REVIEW: ' r1 ', MACHINE: '', HUMAN: 'h1' }, ['MACHINE', 'HUMAN']),
+      { HUMAN: 'h1' },
+    );
+
+    // Tương thích ngược nếu caller/API đơn tab chỉ trả nextCursor
+    assert.deepEqual(
+      extractResponseTabCursors({ items: [], nextCursor: ' cur-single ' }, 'NEEDS_REVIEW'),
+      { REVIEW: 'cur-single' },
+    );
+    assert.deepEqual(
+      extractResponseTabCursors(
+        { items: [], nextTabCursors: { MACHINE: 'm2', HUMAN: 'h2' }, hasMore: true },
+        'ALL',
+      ),
+      { MACHINE: 'm2', HUMAN: 'h2' },
+    );
+    assert.deepEqual(
+      extractResponseTabCursors(
+        { items: [], nextTabCursors: { MACHINE: 'm2' }, hasMore: false },
+        'ALL',
+      ),
+      {},
+    );
+
+    const makeItem = (hash: string, version = 1, tgtText = hash): ReviewSentenceItem => ({
+      hash,
+      srcLang: 'vi',
+      tgtLang: 'en',
+      srcText: `Src ${hash}`,
+      tgtText,
+      machineText: `Machine ${hash}`,
+      status: 'MACHINE',
+      needsReview: false,
+      glossaryWarnings: [],
+      version,
+      glossaryVersion: 1,
+      updatedAt: '2026-11-08T00:00:00.000Z',
+      pages: [],
+      hasPageMetadata: false,
+      unused: false,
+    });
+
+    const merged = mergeReviewItems(
+      [makeItem('h1', 1, 'old-1'), makeItem('h2', 2, 'keep-2')],
+      [makeItem('h2', 1, 'stale-2'), makeItem('h1', 3, 'new-1'), makeItem('h3', 1, 'added-3')],
+    );
+    assert.deepEqual(
+      merged.map((x) => [x.hash, x.version, x.tgtText]),
+      [
+        ['h1', 3, 'new-1'],
+        ['h2', 2, 'keep-2'],
+        ['h3', 1, 'added-3'],
+      ],
+    );
+  });
+
+  it('createHttpReviewApi gửi đúng cursor cho đơn tab và quản lý cursor riêng từng tab ở chế độ ALL qua nhiều trang', async () => {
+    const requestedTabs: Array<{ tab: string; cursor: string | null; limit: string | null }> = [];
+
+    const makeRaw = (hash: string, label: 'MACHINE' | 'HUMAN', needsReview: boolean) => ({
+      hash,
+      srcLang: 'vi',
+      tgtLang: 'en',
+      sourceText: `Nguồn ${hash}`,
+      tgt: `Đích ${hash}`,
+      machineTgt: `Máy ${hash}`,
+      label,
+      needsReview,
+      glossaryVersion: 1,
+      version: 1,
+      updatedAt: '2026-11-08T10:00:00.000Z',
+    });
+
+    const fakeFetch: typeof fetch = async (input) => {
+      const parsed = new URL(String(input));
+      const tab = parsed.searchParams.get('tab') ?? '';
+      const cursor = parsed.searchParams.get('cursor');
+      const limit = parsed.searchParams.get('limit');
+      requestedTabs.push({ tab, cursor, limit });
+
+      // Bộ dữ liệu phân trang trên 3 tab:
+      // - REVIEW: 1 trang (hết ngay ở trang 1)
+      // - MACHINE: 3 trang (cur-m-2 -> cur-m-3 -> hết)
+      // - HUMAN: 2 trang (cur-h-2 -> hết)
+      if (tab === 'REVIEW') {
+        return new Response(
+          JSON.stringify({
+            items: [makeRaw('r1', 'MACHINE', true)],
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (tab === 'MACHINE') {
+        if (!cursor) {
+          return new Response(
+            JSON.stringify({
+              items: [makeRaw('m1', 'MACHINE', false), makeRaw('m2', 'MACHINE', false)],
+              nextCursor: 'cur-m-2',
+            }),
+            { status: 200 },
+          );
+        }
+        if (cursor === 'cur-m-2') {
+          return new Response(
+            JSON.stringify({
+              items: [makeRaw('m3', 'MACHINE', false), makeRaw('m4', 'MACHINE', false)],
+              nextCursor: 'cur-m-3',
+            }),
+            { status: 200 },
+          );
+        }
+        if (cursor === 'cur-m-3') {
+          return new Response(
+            JSON.stringify({
+              items: [makeRaw('m5', 'MACHINE', false)],
+            }),
+            { status: 200 },
+          );
+        }
+      }
+
+      if (tab === 'HUMAN') {
+        if (!cursor) {
+          return new Response(
+            JSON.stringify({
+              items: [makeRaw('h1', 'HUMAN', false)],
+              nextCursor: 'cur-h-2',
+            }),
+            { status: 200 },
+          );
+        }
+        if (cursor === 'cur-h-2') {
+          return new Response(
+            JSON.stringify({
+              items: [makeRaw('h2', 'HUMAN', false)],
+            }),
+            { status: 200 },
+          );
+        }
+      }
+
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    };
+
+    const api = createHttpReviewApi({
+      baseUrl: 'https://api.translateme.example',
+      getToken: () => 'jwt-token',
+      fetchFn: fakeFetch,
+    });
+
+    // A. Chế độ ALL: Trang 1 gọi cả 3 tab không cursor
+    const page1 = await api.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'ALL',
+      limit: 2,
+    });
+    assert.deepEqual(
+      page1.items.map((x) => x.hash),
+      ['r1', 'm1', 'm2', 'h1'],
+    );
+    assert.equal(page1.nextCursor, undefined, 'Ở chế độ ALL không gộp thành 1 nextCursor duy nhất');
+    assert.deepEqual(page1.nextTabCursors, { MACHINE: 'cur-m-2', HUMAN: 'cur-h-2' });
+    assert.equal(page1.hasMore, true);
+
+    // B. Trang 2: Chỉ gọi tiếp MACHINE và HUMAN theo đúng cursor từng tab (bỏ qua REVIEW đã hết)
+    requestedTabs.length = 0;
+    const page2 = await api.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'ALL',
+      limit: 2,
+      tabCursors: page1.nextTabCursors,
+    });
+    assert.deepEqual(requestedTabs, [
+      { tab: 'MACHINE', cursor: 'cur-m-2', limit: '2' },
+      { tab: 'HUMAN', cursor: 'cur-h-2', limit: '2' },
+    ]);
+    assert.deepEqual(
+      page2.items.map((x) => x.hash),
+      ['m3', 'm4', 'h2'],
+    );
+    assert.deepEqual(page2.nextTabCursors, { MACHINE: 'cur-m-3' });
+    assert.equal(page2.hasMore, true);
+
+    // C. Trang 3: Chỉ gọi tiếp tab MACHINE còn lại
+    requestedTabs.length = 0;
+    const page3 = await api.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'ALL',
+      limit: 2,
+      tabCursors: page2.nextTabCursors,
+    });
+    assert.deepEqual(requestedTabs, [{ tab: 'MACHINE', cursor: 'cur-m-3', limit: '2' }]);
+    assert.deepEqual(
+      page3.items.map((x) => x.hash),
+      ['m5'],
+    );
+    assert.deepEqual(page3.nextTabCursors, {});
+    assert.equal(page3.hasMore, false);
+
+    // Gộp 3 trang phải có đủ 8 câu của cả 3 tab
+    const allMerged = mergeReviewItems(
+      mergeReviewItems(page1.items, page2.items),
+      page3.items,
+    );
+    assert.deepEqual(
+      allMerged.map((x) => x.hash),
+      ['r1', 'm1', 'm2', 'h1', 'm3', 'm4', 'h2', 'm5'],
+    );
+
+    // D. Nếu truyền tabCursors rỗng -> không gửi HTTP request nào
+    requestedTabs.length = 0;
+    const emptyNext = await api.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'ALL',
+      tabCursors: {},
+    });
+    assert.equal(requestedTabs.length, 0);
+    assert.deepEqual(emptyNext.items, []);
+    assert.equal(emptyNext.hasMore, false);
+
+    // E. Đơn tab (MACHINE) gửi cursor trực tiếp và getTranslation tìm thấy câu ở trang cuối (m5)
+    requestedTabs.length = 0;
+    const machineP2 = await api.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'MACHINE',
+      cursor: 'cur-m-2',
+    });
+    assert.deepEqual(requestedTabs, [{ tab: 'MACHINE', cursor: 'cur-m-2', limit: null }]);
+    assert.equal(machineP2.nextCursor, 'cur-m-3');
+    assert.deepEqual(machineP2.nextTabCursors, { MACHINE: 'cur-m-3' });
+    assert.equal(machineP2.hasMore, true);
+
+    const foundLaterPage = await api.getTranslation('vi', 'en', 'm5');
+    assert.equal(foundLaterPage.hash, 'm5');
+  });
+
+  it('createMockReviewApi hỗ trợ phân trang limit & per-tab cursor cho cả đơn tab lẫn chế độ ALL', async () => {
+    const makeItem = (
+      hash: string,
+      status: 'MACHINE' | 'HUMAN',
+      needsReview: boolean,
+    ): ReviewSentenceItem => ({
+      hash,
+      srcLang: 'vi',
+      tgtLang: 'en',
+      srcText: `Câu ${hash}`,
+      tgtText: `Sentence ${hash}`,
+      machineText: `Sentence ${hash}`,
+      status,
+      needsReview,
+      glossaryWarnings: [],
+      version: 1,
+      glossaryVersion: 1,
+      updatedAt: '2026-11-08T12:00:00.000Z',
+      pages: ['/homestay-abc/en/'],
+      hasPageMetadata: true,
+      unused: false,
+    });
+
+    const mockApi = createMockReviewApi({
+      initialItems: [
+        makeItem('r1', 'MACHINE', true),
+        makeItem('r2', 'MACHINE', true),
+        makeItem('r3', 'HUMAN', true),
+        makeItem('m1', 'MACHINE', false),
+        makeItem('m2', 'MACHINE', false),
+        makeItem('m3', 'MACHINE', false),
+        makeItem('m4', 'MACHINE', false),
+        makeItem('h1', 'HUMAN', false),
+        makeItem('h2', 'HUMAN', false),
+      ],
+    });
+
+    // 1. Chế độ ALL với limit=2: HUMAN hết ở trang 1; REVIEW & MACHINE còn ở trang 2
+    const allP1 = await mockApi.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'ALL',
+      limit: 2,
+    });
+    assert.deepEqual(
+      allP1.items.map((x) => x.hash),
+      ['r1', 'r2', 'm1', 'm2', 'h1', 'h2'],
+    );
+    assert.deepEqual(allP1.nextTabCursors, { REVIEW: 'offset:2', MACHINE: 'offset:2' });
+    assert.equal(allP1.hasMore, true);
+
+    const allP2 = await mockApi.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'ALL',
+      limit: 2,
+      tabCursors: allP1.nextTabCursors,
+    });
+    assert.deepEqual(
+      allP2.items.map((x) => x.hash),
+      ['r3', 'm3', 'm4'],
+    );
+    assert.deepEqual(allP2.nextTabCursors, {});
+    assert.equal(allP2.hasMore, false);
+
+    // 2. Đơn tab (NEEDS_REVIEW) với limit=2 qua 2 trang bằng cursor đơn
+    const revP1 = await mockApi.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'NEEDS_REVIEW',
+      limit: 2,
+    });
+    assert.deepEqual(
+      revP1.items.map((x) => x.hash),
+      ['r1', 'r2'],
+    );
+    assert.equal(revP1.nextCursor, 'offset:2');
+    assert.equal(revP1.hasMore, true);
+
+    const revP2 = await mockApi.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'NEEDS_REVIEW',
+      limit: 2,
+      cursor: revP1.nextCursor,
+    });
+    assert.deepEqual(
+      revP2.items.map((x) => x.hash),
+      ['r3'],
+    );
+    assert.equal(revP2.nextCursor, undefined);
+    assert.equal(revP2.hasMore, false);
   });
 });
 
