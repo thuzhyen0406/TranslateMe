@@ -7,6 +7,7 @@ type SendClient = Pick<DynamoDBDocumentClient, 'send'>;
 type AwsCommand = { input?: Record<string, unknown> };
 type TenantCredentials = { accessKeyId: string; secretAccessKey: string; sessionToken: string; expiration?: Date };
 type TenantCredentialsProvider = () => Promise<TenantCredentials>;
+type TenantPolicyOptions = Parameters<typeof tenantSessionPolicy>[1];
 
 export class TenantAssumeRoleError extends Error {
   constructor(
@@ -55,7 +56,7 @@ export function tenantSessionPolicy(
 ): string {
   if (!/^t_[A-Za-z0-9_-]{1,64}$/.test(tenantId)) throw new TypeError('Invalid tenant ID');
   const leadingKeys = [`TENANT#${tenantId}`, `TENANT#${tenantId}#*`];
-  if (allowPlatformSlugReservations) leadingKeys.push('TENANT#PLATFORM#SLUG#*');
+  if (buckets.allowPlatformSlugReservation) leadingKeys.push('TENANT#PLATFORM#SLUG#*');
   const statements: Array<Record<string, unknown>> = [{
     Effect: 'Allow',
     Action: [
@@ -115,10 +116,10 @@ export function tenantSessionPolicy(
   });
 }
 
-export function createTenantCredentialsProvider(
+function createTenantCredentialsProvider(
   roleArn: string,
   tenantId: string,
-  policy: string,
+  policyOptions: TenantPolicyOptions = {},
   sts: Pick<STSClient, 'send'> = new STSClient({}),
   sessionName = 'tenant',
   logger: (message: Record<string, unknown>) => void = (message) => console.error(JSON.stringify(message)),
@@ -131,6 +132,9 @@ export function createTenantCredentialsProvider(
     refreshing ??= (async () => {
       let result: { Credentials?: { AccessKeyId?: string; SecretAccessKey?: string; SessionToken?: string; Expiration?: Date } };
       try {
+        // The tenant-scoped policy is always derived here from the same ID used
+        // for SourceIdentity and the session tag; callers cannot supply a broader policy.
+        const policy = tenantSessionPolicy(tenantId, policyOptions);
         result = await sts.send(new AssumeRoleCommand({
           RoleArn: roleArn,
           RoleSessionName: `${sessionName}-${tenantId}`.slice(0, 64),
@@ -192,10 +196,10 @@ export function createTenantDocumentClientRouter(
     if (!pending) {
       pending = (async () => {
         if (!roleArn) throw new Error('TENANT_DATA_ACCESS_ROLE_ARN is required in Lambda');
-                const credentials = createTenantCredentialsProvider(
+        const credentials = createTenantCredentialsProvider(
           roleArn,
           tenantId,
-          tenantSessionPolicy(tenantId, options),
+          options,
           sts,
           options.sessionName,
           options.logger,
@@ -236,6 +240,5 @@ export function createTenantS3Client(
   const buckets = prefix === 'worker'
     ? { payloadBucketArn: bucketArn }
     : { batchUploadBucketArn: bucketArn, batchUploadKmsKeyArn };
-  const policy = tenantSessionPolicy(tenantId, buckets);
-  return new S3Client({ credentials: createTenantCredentialsProvider(roleArn, tenantId, policy, undefined, sessionName) });
+  return new S3Client({ credentials: createTenantCredentialsProvider(roleArn, tenantId, buckets, undefined, sessionName) });
 }
