@@ -37,9 +37,22 @@ export const SUPPORTED_GLOSSARY_LANGS: readonly { code: string; label: string }[
   { code: 'zh', label: 'Tiếng Trung (zh)' },
   { code: 'fr', label: 'Tiếng Pháp (fr)' },
   { code: 'de', label: 'Tiếng Đức (de)' },
+  { code: 'es', label: 'Tiếng Tây Ban Nha (es)' },
 ]);
 
-export const DEFAULT_GLOSSARY_TARGET_LANGS: readonly string[] = Object.freeze(['en', 'ko', 'ja']);
+export const DEFAULT_GLOSSARY_TARGET_LANGS: readonly string[] = Object.freeze([
+  'en',
+  'ko',
+  'ja',
+  'zh',
+  'fr',
+]);
+
+export function glossaryLangLabel(code: string): string {
+  const norm = cleanTermText(code).toLowerCase();
+  const found = SUPPORTED_GLOSSARY_LANGS.find((l) => l.code === norm);
+  return found ? found.label : norm.toUpperCase();
+}
 
 export const MAX_CSV_IMPORT_ROWS = 99;
 
@@ -81,6 +94,174 @@ export function hasForbiddenTermContent(text: string): boolean {
  * Kiểm tra thông tin khi Thêm / Sửa một thuật ngữ trên giao diện Q3.
  * Với loại KEEP, bản dịch ở mọi ngôn ngữ đích được tự điền bằng chính từ nguồn.
  */
+const DEFAULT_TARGET_ORDER = new Map<string, number>([
+  ['en', 0],
+  ['ko', 1],
+  ['ja', 2],
+  ['zh', 3],
+  ['fr', 4],
+  ['de', 5],
+  ['es', 6],
+  ['vi', 7],
+]);
+
+function sortGlossaryLangCodes(codes: Iterable<string>): string[] {
+  return [...new Set(codes)].sort((a, b) => {
+    const oa = DEFAULT_TARGET_ORDER.get(a);
+    const ob = DEFAULT_TARGET_ORDER.get(b);
+    if (oa !== undefined && ob !== undefined) return oa - ob;
+    if (oa !== undefined) return -1;
+    if (ob !== undefined) return 1;
+    return a.localeCompare(b);
+  });
+}
+
+/**
+ * Xác định toàn bộ danh sách ngôn ngữ đích cần hiển thị và giữ lại trong form Thêm / Sửa thuật ngữ:
+ * gồm 5 ngôn ngữ đích chuẩn (en, ko, ja, zh, fr) và mọi ngôn ngữ đã có sẵn trong mục đang sửa (ví dụ de, es...), trừ ngôn ngữ nguồn.
+ */
+export function getEditableGlossaryTargetLangs(
+  sourceLang: string,
+  existingTranslations?: Readonly<Record<string, string>>,
+  extraTargetLangs?: readonly string[],
+): string[] {
+  const src = cleanTermText(sourceLang || 'vi').toLowerCase() || 'vi';
+  const langs = new Set<string>();
+
+  for (const lang of DEFAULT_GLOSSARY_TARGET_LANGS) {
+    if (lang !== src) langs.add(lang);
+  }
+  if (existingTranslations) {
+    for (const [rawLang, val] of Object.entries(existingTranslations)) {
+      const lang = cleanTermText(rawLang).toLowerCase();
+      if (lang && lang !== src && typeof val === 'string' && cleanTermText(val).length > 0) {
+        langs.add(lang);
+      }
+    }
+  }
+  if (extraTargetLangs) {
+    for (const rawLang of extraTargetLangs) {
+      const lang = cleanTermText(rawLang).toLowerCase();
+      if (lang && lang !== src) langs.add(lang);
+    }
+  }
+  return sortGlossaryLangCodes(langs);
+}
+
+/**
+ * Xác định danh sách cột ngôn ngữ đích hiển thị trên bảng Q3:
+ * gồm 5 ngôn ngữ chuẩn (en, ko, ja, zh, fr) cộng thêm mọi ngôn ngữ đích đang có dữ liệu trong danh sách thuật ngữ.
+ */
+export function getGlossaryTableLangs(terms: readonly GlossaryTermEntry[]): string[] {
+  const langs = new Set<string>(DEFAULT_GLOSSARY_TARGET_LANGS);
+  for (const entry of terms) {
+    const src = cleanTermText(entry.sourceLang || 'vi').toLowerCase() || 'vi';
+    for (const [rawLang, val] of Object.entries(entry.translations ?? {})) {
+      const lang = cleanTermText(rawLang).toLowerCase();
+      if (lang && lang !== src && typeof val === 'string' && cleanTermText(val).length > 0) {
+        langs.add(lang);
+      }
+    }
+  }
+  return sortGlossaryLangCodes(langs);
+}
+
+/**
+ * Khởi tạo map giá trị ô nhập bản dịch khi mở form Thêm mới hoặc Sửa một mục thuật ngữ,
+ * bảo đảm nạp đủ toàn bộ ngôn ngữ hiện có (en, ko, ja, zh, fr và bất kỳ ngôn ngữ nào khác).
+ */
+export function initGlossaryFormTranslations(
+  entry?: GlossaryTermEntry | null,
+  overrideSourceLang?: string,
+  extraTargetLangs?: readonly string[],
+): Record<string, string> {
+  const src = cleanTermText(overrideSourceLang ?? entry?.sourceLang ?? 'vi').toLowerCase() || 'vi';
+  const editableLangs = getEditableGlossaryTargetLangs(src, entry?.translations, extraTargetLangs);
+  const existingNorm: Record<string, string> = {};
+  if (entry?.translations) {
+    for (const [rawLang, val] of Object.entries(entry.translations)) {
+      const lang = cleanTermText(rawLang).toLowerCase();
+      if (lang && lang !== src && typeof val === 'string') {
+        existingNorm[lang] = val;
+      }
+    }
+  }
+
+  const out: Record<string, string> = {};
+  for (const lang of editableLangs) {
+    out[lang] = existingNorm[lang] ?? (entry?.type === 'KEEP' ? entry.sourceTerm : '');
+  }
+  for (const [lang, val] of Object.entries(existingNorm)) {
+    if (!(lang in out)) out[lang] = val;
+  }
+  return out;
+}
+
+export interface BuildUpsertGlossaryParams {
+  sourceTerm: string;
+  sourceLang: string;
+  type: GlossaryTermType;
+  formTranslations: Readonly<Record<string, string>>;
+  targetLangs?: readonly string[];
+  /** Bản dịch gốc của mục đang sửa; mọi key chưa xuất hiện trong formTranslations sẽ được giữ lại */
+  existingTranslations?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Dựng payload PUT /console/glossary/terms/{term} gửi lên F4:
+ * - Giữ nguyên mọi ngôn ngữ đã có khi sửa (en, ko, ja, zh, fr, de, ...);
+ * - Loại bỏ các ô còn trống đối với loại FIXED để khớp ràng buộc kiểm tra của F4.
+ */
+export function buildUpsertGlossaryInput(params: BuildUpsertGlossaryParams): UpsertGlossaryTermInput {
+  const src = cleanTermText(params.sourceLang || 'vi').toLowerCase() || 'vi';
+  const cleanedSource = cleanTermText(params.sourceTerm ?? '');
+
+  const mergedRaw: Record<string, string> = {};
+  for (const [rawLang, val] of Object.entries(params.existingTranslations ?? {})) {
+    const lang = cleanTermText(rawLang).toLowerCase();
+    if (!lang || lang === src || typeof val !== 'string') continue;
+    mergedRaw[lang] = val;
+  }
+  for (const [rawLang, val] of Object.entries(params.formTranslations ?? {})) {
+    const lang = cleanTermText(rawLang).toLowerCase();
+    if (!lang || lang === src || typeof val !== 'string') continue;
+    mergedRaw[lang] = val;
+  }
+
+  if (params.type === 'KEEP') {
+    const keepLangs = getEditableGlossaryTargetLangs(src, mergedRaw, params.targetLangs);
+    const translations: Record<string, string> = {};
+    for (const lang of keepLangs) {
+      translations[lang] = cleanedSource;
+    }
+    return {
+      sourceTerm: cleanedSource,
+      sourceLang: src,
+      type: 'KEEP',
+      translations,
+      targetLangs: keepLangs,
+    };
+  }
+
+  const translations: Record<string, string> = {};
+  for (const lang of sortGlossaryLangCodes(Object.keys(mergedRaw))) {
+    if (lang === src) continue;
+    const cleanedVal = cleanTermText(mergedRaw[lang] ?? '');
+    if (cleanedVal) {
+      translations[lang] = cleanedVal;
+    }
+  }
+  const activeTargets = sortGlossaryLangCodes(Object.keys(translations));
+
+  return {
+    sourceTerm: cleanedSource,
+    sourceLang: src,
+    type: 'FIXED',
+    translations,
+    targetLangs: activeTargets,
+  };
+}
+
 export function validateUpsertTermInput(input: UpsertGlossaryTermInput): string | null {
   const cleanedSource = cleanTermText(input.sourceTerm ?? '');
   if (!cleanedSource) {
@@ -681,6 +862,8 @@ const INITIAL_DEMO_TERMS: readonly GlossaryTermEntry[] = Object.freeze([
       en: 'Homestay ABC',
       ko: 'Homestay ABC',
       ja: 'Homestay ABC',
+      zh: 'Homestay ABC',
+      fr: 'Homestay ABC',
     },
     updatedInVersion: 1,
     updatedAt: '2026-10-25T08:00:00.000Z',
@@ -694,6 +877,8 @@ const INITIAL_DEMO_TERMS: readonly GlossaryTermEntry[] = Object.freeze([
       en: 'Hoi An Ancient Town',
       ko: '호이안 구시가지',
       ja: 'ホイアン旧市街',
+      zh: '会安古镇',
+      fr: 'Vieille ville de Hoi An',
     },
     updatedInVersion: 2,
     updatedAt: '2026-10-26T09:30:00.000Z',
@@ -707,6 +892,8 @@ const INITIAL_DEMO_TERMS: readonly GlossaryTermEntry[] = Object.freeze([
       en: 'cao lau noodles',
       ko: '까오러우 국수',
       ja: 'カオラウ',
+      zh: '高楼面',
+      fr: 'nouilles cao lau',
     },
     updatedInVersion: 2,
     updatedAt: '2026-10-26T09:30:00.000Z',
@@ -720,6 +907,8 @@ const INITIAL_DEMO_TERMS: readonly GlossaryTermEntry[] = Object.freeze([
       en: 'Hoai River',
       ko: '호아이 강',
       ja: 'ホアイ川',
+      zh: '怀河',
+      fr: 'rivière Hoai',
     },
     updatedInVersion: 2,
     updatedAt: '2026-10-26T09:30:00.000Z',
@@ -766,20 +955,34 @@ export function createMockGlossaryApi(opts: MockGlossaryApiOptions = {}): Glossa
         throw new GlossaryApiError('INVALID_REQUEST', validationErr);
       }
 
+      const srcLang = cleanTermText(input.sourceLang || 'vi').toLowerCase() || 'vi';
       const cleanedSource = cleanTermText(input.sourceTerm);
       const norm = normalizeGlossaryTerm(cleanedSource);
-      const targetLangs =
-        input.targetLangs.length > 0 ? input.targetLangs : [...DEFAULT_GLOSSARY_TARGET_LANGS];
 
       const translations: Record<string, string> = {};
       if (input.type === 'KEEP') {
-        for (const lang of targetLangs) {
-          if (lang !== input.sourceLang) translations[lang] = cleanedSource;
+        const keepLangs =
+          input.targetLangs && input.targetLangs.length > 0
+            ? sortGlossaryLangCodes(
+                [...input.targetLangs, ...Object.keys(input.translations ?? {})]
+                  .map((l) => cleanTermText(l).toLowerCase())
+                  .filter((l) => l && l !== srcLang),
+              )
+            : input.translations && Object.keys(input.translations).length > 0
+              ? sortGlossaryLangCodes(
+                  Object.keys(input.translations)
+                    .map((l) => cleanTermText(l).toLowerCase())
+                    .filter((l) => l && l !== srcLang),
+                )
+              : [...DEFAULT_GLOSSARY_TARGET_LANGS].filter((l) => l !== srcLang);
+        for (const lang of keepLangs) {
+          translations[lang] = cleanedSource;
         }
       } else {
-        for (const [lang, val] of Object.entries(input.translations)) {
+        for (const [rawLang, val] of Object.entries(input.translations)) {
+          const lang = cleanTermText(rawLang).toLowerCase();
           const cleanedVal = cleanTermText(val);
-          if (lang !== input.sourceLang && cleanedVal) {
+          if (lang && lang !== srcLang && cleanedVal) {
             translations[lang] = cleanedVal;
           }
         }
@@ -789,7 +992,7 @@ export function createMockGlossaryApi(opts: MockGlossaryApiOptions = {}): Glossa
       const entry: GlossaryTermEntry = {
         normalizedTerm: norm,
         sourceTerm: cleanedSource,
-        sourceLang: input.sourceLang || 'vi',
+        sourceLang: srcLang,
         type: input.type,
         translations,
         updatedInVersion: version,
