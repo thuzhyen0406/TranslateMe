@@ -104,7 +104,6 @@ Resources:
       PathPart: hosts
 
   HostSlugResource:
-  HostsProxyResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref RestApi

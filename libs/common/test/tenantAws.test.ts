@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createTenantDocumentClientRouter, tenantSessionPolicy } from '../tenantAws.js';
 
@@ -22,6 +22,7 @@ describe('tenant-scoped AWS sessions', () => {
     const policy = JSON.parse(tenantSessionPolicy('t_aaaaaaaaaaaaaaaaaaaaaaaa', {
       allowPlatformSlugReservation: true,
     }));
+    assert.deepEqual(policy.Statement[1].Action, ['dynamodb:PutItem', 'dynamodb:ConditionCheckItem']);
     assert.deepEqual(policy.Statement[1], {
       Effect: 'Allow',
       Action: ['dynamodb:PutItem', 'dynamodb:ConditionCheckItem'],
@@ -43,13 +44,47 @@ describe('tenant-scoped AWS sessions', () => {
     assert.match(iamTemplate, /dynamodb:ConditionCheckItem/);
     assert.match(iamTemplate, /sts:TagSession/);
     assert.match(iamTemplate, /aws:RequestTag\/TenantId/);
+    assert.doesNotMatch(iamTemplate, /dynamodb:TransactWriteItems/);
     
     const websiteTransaction = iamTemplate.match(/Sid: WebsiteTenantAndSlugTransaction[\s\S]*?(?=\n              - Sid:|\n  [A-Z])/);
     assert.ok(websiteTransaction, 'website transaction IAM statement exists');
     assert.match(websiteTransaction[0], /dynamodb:PutItem/);
     assert.match(websiteTransaction[0], /dynamodb:ConditionCheckItem/);
+    assert.match(websiteTransaction[0], /Resource: !Ref TableArn/);
+    assert.match(websiteTransaction[0], /TENANT#\$\{aws:PrincipalTag\/TenantId\}#\*/);
+    assert.match(websiteTransaction[0], /TENANT#PLATFORM#SLUG#\*/);
     assert.doesNotMatch(websiteTransaction[0], /dynamodb:(?:DeleteItem|UpdateItem)/);
   });
+
+  it('defines HostSlugResource as a valid child of HostsResource', () => {
+    const template = readFileSync(resolve(process.cwd(), '../../infra/modules/api-gateway.yaml'), 'utf8');
+    const slugResource = template.match(/  HostSlugResource:\s*([\s\S]*?)(?=\n  [A-Za-z][A-Za-z0-9]+:|\s*$)/);
+    assert.ok(slugResource, 'HostSlugResource exists');
+    assert.match(slugResource[1], /Type: AWS::ApiGateway::Resource/);
+    assert.match(slugResource[1], /ParentId: !Ref HostsResource/);
+    assert.match(slugResource[1], /PathPart: '\{slug\}'/);
+    assert.doesNotMatch(template, /  HostsProxyResource:/);
+  });
+
+  it('keeps application AssumeRole calls behind the tenant-policy helper', () => {
+    const repositoryRoot = resolve(process.cwd(), '../..');
+    const sourceRoots = [resolve(repositoryRoot, 'libs'), resolve(repositoryRoot, 'services')];
+    const findings: string[] = [];
+    const visit = (directory: string) => {
+      for (const entry of readdirSync(directory)) {
+        const fullPath = resolve(directory, entry);
+        if (statSync(fullPath).isDirectory()) {
+          if (entry !== 'node_modules' && entry !== 'dist' && entry !== 'test') visit(fullPath);
+        } else if (/\.(?:ts|js|mts|cts)$/.test(entry)) {
+          if (/new\s+AssumeRoleCommand\s*\(/.test(readFileSync(fullPath, 'utf8'))) findings.push(fullPath);
+        }
+      }
+    };
+    sourceRoots.forEach(visit);
+    assert.deepEqual(findings, [resolve(process.cwd(), 'tenantAws.ts')]);
+    const helper = readFileSync(resolve(process.cwd(), 'tenantAws.ts'), 'utf8');
+    assert.match(helper, /function createTenantCredentialsProvider\(/);
+    assert.doesNotMatch(helper, /export\s+function\s+createTenantCredentialsProvider\(/);
   });
 
     it('session policy scopes S3 objects to the requesting tenant prefix', () => {
