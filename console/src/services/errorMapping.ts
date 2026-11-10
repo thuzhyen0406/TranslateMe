@@ -51,7 +51,7 @@ export type ConsoleErrorScope = 'generic' | 'auth' | 'members' | 'website' | 'gl
 /**
  * Phân loại thao tác gọi API:
  *  - 'read': GET / xem trước chỉ đọc (an toàn thử lại khi 5xx/mạng);
- *  - 'idempotent': thao tác ghi đã có bảo đảm chống lặp phía máy chủ (verify, prewarm, retryInvalidation);
+ *  - 'idempotent': thao tác ghi đã có bảo đảm chống lặp phía máy chủ (verify, retryInvalidation);
  *  - 'write': thao tác ghi có thể đã ghi dữ liệu trước khi phát sinh 5xx/mạng -> không tự khuyên thử lại an toàn.
  */
 export type ConsoleOperationKind = 'read' | 'idempotent' | 'write';

@@ -460,6 +460,16 @@ const VerificationCard: React.FC<{
 const PrewarmPanel: React.FC<{ api: WebsiteApi; canWrite: boolean; site: Website; onTenantStatusDetected?: (status: TenantStatus) => void }> = ({ api, canWrite, site, onTenantStatusDetected }) => {
   const [job, setJob] = useState<PrewarmJob | null>(null);
   const [starting, setStarting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [errorOperation, setErrorOperation] = useState<'read' | 'write'>('write');
+  const [statusNote, setStatusNote] = useState<string | null>(null);
+  const mountedRef = React.useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const [error, setError] = useState<unknown | null>(null);
   const active = isPrewarmActive(job);
 
@@ -489,6 +499,8 @@ const PrewarmPanel: React.FC<{ api: WebsiteApi; canWrite: boolean; site: Website
   const start = async () => {
     if (!canWrite) return;
     setStarting(true);
+    setErrorOperation('write');
+    setStatusNote(null);
     setError(null);
     try {
       setJob((await api.startPrewarm(site.slug)).job);
@@ -500,24 +512,64 @@ const PrewarmPanel: React.FC<{ api: WebsiteApi; canWrite: boolean; site: Website
     }
   };
 
+  const refreshJob = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    setError(null);
+    setErrorOperation('read');
+    setStatusNote(null);
+    try {
+      const latest = await api.getPrewarm(site.slug);
+      if (!mountedRef.current) return;
+      setJob(latest);
+      if (!latest) {
+        setStatusNote(
+          'Đã kiểm tra máy chủ: chưa có lượt dịch trước nào cho website này. Bạn có thể gửi lại yêu cầu.',
+        );
+      } else if (isPrewarmActive(latest)) {
+        setStatusNote('Đã tải lại trạng thái: máy chủ đang chạy sẵn một lượt dịch trước.');
+      }
+    } catch (err) {
+      if (!mountedRef.current) return;
+      notifyIfTenantSuspended(err, onTenantStatusDetected);
+      setErrorOperation('read');
+      setError(err);
+    } finally {
+      if (mountedRef.current) {
+        setRefreshing(false);
+      }
+    }
+  };
+
   const progress = job?.progress ?? 0;
   return (
     <div className="mt-5">
       <ErrorAlert
         error={error}
         scope="website"
-        operation="idempotent"
+        operation={errorOperation}
         formatMessage={websiteErrorMessage}
-        onRetry={canWrite && !starting && !active && site.status === 'ACTIVE' ? () => void start() : undefined}
+        onRetry={errorOperation === 'read' && !refreshing ? () => void refreshJob() : undefined}
+        onCheckStatus={!refreshing ? () => void refreshJob() : undefined}
+        checkStatusLabel={refreshing ? 'Đang tải trạng thái…' : 'Tải lại trạng thái dịch trước'}
+        onDismiss={() => {
+          setError(null);
+          setErrorOperation('write');
+        }}
         compact
         className="mb-3"
       />
+      {statusNote && !error && (
+        <p className="mb-3 text-xs text-[#146c54]" role="status">
+          {statusNote}
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-4">
         <button
           type="button"
           className={btnSecondary}
           onClick={start}
-          disabled={!canWrite || starting || active || site.status !== 'ACTIVE'}
+          disabled={!canWrite || starting || refreshing || active || site.status !== 'ACTIVE'}
         >
           {active ? 'Đang dịch trước…' : 'Dịch trước toàn bộ website theo sitemap'}
         </button>

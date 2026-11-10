@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+
 import { describe, it } from 'node:test';
+
 import {
   WebsiteApiError,
   createHttpWebsiteApi,
@@ -17,6 +19,7 @@ import {
   isWebsiteApiEnabled,
 } from '../services/websiteApi.js';
 import type { CreateWebsiteInput } from '../types/website.js';
+import { errorToUiPayload } from '../services/errorMapping.js';
 
 const form = (o: Partial<CreateWebsiteInput> = {}): CreateWebsiteInput => ({
   homeUrl: 'https://homestay-abc.example',
@@ -60,6 +63,23 @@ describe('Q2 – kiểm tra khi nhập (Task 4.6)', () => {
     assert.match(msg('DUPLICATE_SLUG'), /đã được thêm/);
     assert.match(msg('PERMISSION_DENIED'), /Tenant Admin/);
     assert.match(websiteErrorMessage(new Error('x')), /lỗi tạm thời/);
+
+    const prewarm500 = errorToUiPayload(
+      new WebsiteApiError('INTERNAL_ERROR', 'StartExecution failed', undefined, 'req-pw-500', 500),
+      { scope: 'website', operation: 'write', formatMessage: websiteErrorMessage },
+    );
+    assert.ok(prewarm500);
+    assert.equal(prewarm500.retryable, false);
+    assert.equal(prewarm500.requiresStatusCheck, true);
+    assert.match(prewarm500.message, /kiểm tra trạng thái hiện tại trước khi gửi lại/i);
+
+    const getPrewarm500 = errorToUiPayload(
+      new WebsiteApiError('INTERNAL_ERROR', 'Get failed', undefined, 'req-pw-get', 500),
+      { scope: 'website', operation: 'read', formatMessage: websiteErrorMessage },
+    );
+    assert.ok(getPrewarm500);
+    assert.equal(getPrewarm500.retryable, true);
+    assert.equal(getPrewarm500.requiresStatusCheck, undefined);
   });
 });
 
