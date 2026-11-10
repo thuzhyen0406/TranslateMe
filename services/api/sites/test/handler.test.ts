@@ -71,4 +71,35 @@ describe('website HTTP handler', () => {
     assert.equal(response.statusCode, 200);
     assert.deepEqual(JSON.parse(response.body).hosts, [{ slug: 'example', status: 'ACTIVE' }]);
   });
+
+  it('hỗ trợ cả POST và PATCH cho pause/resume website theo đúng quy ước và contract', async () => {
+    let paused = 0;
+    let resumed = 0;
+    const { handler } = setup({
+      pause: async () => { paused++; return { status: 'PAUSED' } as never; },
+      resume: async () => { resumed++; return { status: 'ACTIVE' } as never; },
+    });
+
+    const resPostPause = await handler({
+      httpMethod: 'POST', path: '/console/hosts/example/pause', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(resPostPause.statusCode, 200);
+
+    const resPatchPause = await handler({
+      httpMethod: 'PATCH', path: '/console/hosts/example/pause', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(resPatchPause.statusCode, 200);
+    assert.equal(paused, 2);
+
+    const resPostResume = await handler({
+      httpMethod: 'POST', path: '/console/hosts/example/resume', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(resPostResume.statusCode, 200);
+
+    const resPatchResume = await handler({
+      httpMethod: 'PATCH', path: '/console/hosts/example/resume', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(resPatchResume.statusCode, 200);
+    assert.equal(resumed, 2);
+  });
 });

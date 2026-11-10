@@ -112,9 +112,9 @@ return async function handler(event: WebsiteEvent) {
       const site = await dependencies.getHost(ctx, slug);
       if (!site) throw new AppError('NOT_FOUND', 'Không tìm thấy website');
       result = { host: site };
-    } else if (path.endsWith('/pause') && method === 'PATCH') {
+    } else if (path.endsWith('/pause') && (method === 'POST' || method === 'PATCH')) {
       result = await dependencies.pause(ctx, slug);
-    } else if (path.endsWith('/resume') && method === 'PATCH') {
+    } else if (path.endsWith('/resume') && (method === 'POST' || method === 'PATCH')) {
       result = await dependencies.resume(ctx, slug);
     } else if (isExactHostPath && method === 'PATCH') {
       // Yêu cầu [P1]: Giữ hợp đồng PATCH /console/hosts/{slug} (Cập nhật status, targetLangs, CSS selectors, cache TTL)
