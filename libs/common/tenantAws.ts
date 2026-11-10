@@ -64,6 +64,7 @@ export function tenantSessionPolicy(
     Action: [
       'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem',
       'dynamodb:DeleteItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem', 'dynamodb:BatchWriteItem',
+      'dynamodb:TransactWriteItems',
     ],
     Resource: '*',
     Condition: {
@@ -75,7 +76,7 @@ export function tenantSessionPolicy(
   if (buckets.allowPlatformSlugReservation) {
     statements.push({
       Effect: 'Allow',
-      Action: ['dynamodb:PutItem', 'dynamodb:ConditionCheckItem'],
+      Action: ['dynamodb:PutItem', 'dynamodb:ConditionCheckItem', 'dynamodb:TransactWriteItems'],
       Resource: '*',
       Condition: {
         'ForAllValues:StringLike': {
@@ -134,6 +135,7 @@ function createTenantCredentialsProvider(
   roleArn: string,
   tenantId: string,
   policyOptions: TenantPolicyOptions = {},
+  allowPlatformSlugReservations = false,
   sts: Pick<STSClient, 'send'> = new STSClient({}),
   sessionName = 'tenant',
   logger: (message: Record<string, unknown>) => void = (message) => console.error(JSON.stringify(message)),
@@ -146,13 +148,15 @@ function createTenantCredentialsProvider(
     refreshing ??= (async () => {
       let result: { Credentials?: { AccessKeyId?: string; SecretAccessKey?: string; SessionToken?: string; Expiration?: Date } };
       try {
-        // The tenant-scoped policy is always derived here from the same ID used
-        // for SourceIdentity and the session tag; callers cannot supply a broader policy.
-        const policy = tenantSessionPolicy(tenantId, {
-          ...policyOptions,
-          dataKmsKeyArn: policyOptions.dataKmsKeyArn ?? process.env.DATA_KMS_KEY_ARN,
-          dataTableName: policyOptions.dataTableName ?? process.env.TABLE_NAME,
-        });
+        const policy = tenantSessionPolicy(
+          tenantId,
+          {
+            ...policyOptions,
+            dataKmsKeyArn: policyOptions.dataKmsKeyArn ?? process.env.DATA_KMS_KEY_ARN,
+            dataTableName: policyOptions.dataTableName ?? process.env.TABLE_NAME,
+          },
+          allowPlatformSlugReservations,
+        );
         result = await sts.send(new AssumeRoleCommand({
           RoleArn: roleArn,
           RoleSessionName: `${sessionName}-${tenantId}`.slice(0, 64),
@@ -196,10 +200,11 @@ export function createTenantDocumentClientRouter(
     localFallback?: boolean;
     payloadBucketArn?: string;
     batchUploadBucketArn?: string;
+    payloadBucketKmsKeyArn?: string;
     batchUploadKmsKeyArn?: string;
     dataKmsKeyArn?: string;
     dataTableName?: string;
-    allowPlatformSlugReservation?: boolean;
+    allowPlatformSlugReservations?: boolean;
     sts?: Pick<STSClient, 'send'>;
     createClient?: (credentials: TenantCredentialsProvider) => SendClient;
     logger?: (message: Record<string, unknown>) => void;
@@ -216,10 +221,17 @@ export function createTenantDocumentClientRouter(
     if (!pending) {
       pending = (async () => {
         if (!roleArn) throw new Error('TENANT_DATA_ACCESS_ROLE_ARN is required in Lambda');
+        const policyOptions: TenantPolicyOptions = {
+          payloadBucketArn: options.payloadBucketArn,
+          payloadBucketKmsKeyArn: options.payloadBucketKmsKeyArn,
+          batchUploadBucketArn: options.batchUploadBucketArn,
+          batchUploadKmsKeyArn: options.batchUploadKmsKeyArn,
+        };
         const credentials = createTenantCredentialsProvider(
           roleArn,
           tenantId,
-          options,
+          policyOptions,
+          options.allowPlatformSlugReservations,
           sts,
           options.sessionName,
           options.logger,
@@ -258,7 +270,7 @@ export function createTenantS3Client(
   batchUploadKmsKeyArn = process.env.TENANT_BATCH_UPLOAD_KMS_KEY_ARN,
 ): S3Client {
   const buckets = prefix === 'worker'
-    ? { payloadBucketArn: bucketArn }
-    : { batchUploadBucketArn: bucketArn, batchUploadKmsKeyArn };
-  return new S3Client({ credentials: createTenantCredentialsProvider(roleArn, tenantId, buckets, undefined, sessionName) });
+    ? { payloadBucketArn: bucketArn, payloadBucketKmsKeyArn: kmsKeyArn }
+    : { batchUploadBucketArn: bucketArn, batchUploadKmsKeyArn: kmsKeyArn };
+  return new S3Client({ credentials: createTenantCredentialsProvider(roleArn, tenantId, buckets, false, undefined, sessionName) });
 }

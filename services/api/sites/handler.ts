@@ -1,12 +1,7 @@
 import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
 import { db } from '../../../libs/common/db.js';
 import { contextFromIdTokenClaims } from '../auth/context.js';
-import {
-  createSite,
-  pauseSite,
-  resumeSite,
-  verifySite,
-} from './siteManager.js';
+import { createSite, pauseSite, resumeSite, verifySite, updateSite } from './siteManager.js';
 
 export type WebsiteEvent = {
   httpMethod?: string;
@@ -58,12 +53,8 @@ return async function handler(event: WebsiteEvent) {
     }
 
     const path = normalizedRequestPath(event);
-    const method = event.httpMethod ?? 'GET';
-    if (path !== '/console/hosts' && !path.startsWith('/console/hosts/')) {
-      throw new AppError('NOT_FOUND', 'Không tìm thấy endpoint website');
-    }
-    const routeParts = path.split('/').filter(Boolean);
-    const slug = event.pathParameters?.slug ?? routeParts[2];
+    const method = (event.httpMethod ?? 'GET').toUpperCase();
+    const slug = event.pathParameters?.slug ?? event.pathParameters?.proxy?.split('/').filter(Boolean)[0] ?? path.split('/').filter(Boolean)[2];
     let body: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(event.body ?? '{}');
@@ -79,6 +70,8 @@ return async function handler(event: WebsiteEvent) {
       ['sourceLang', 'source_lang'],
       ['targetLangs', 'target_langs'],
       ['noTranslateSelectors', 'no_translate_selectors'],
+      ['cacheTTL', 'cache_ttl'],
+      ['cacheSeconds', 'cache_seconds'],
     ]) {
       if (body[camelCase] === undefined && body[snakeCase] !== undefined) {
         body[camelCase] = body[snakeCase];
@@ -88,11 +81,14 @@ return async function handler(event: WebsiteEvent) {
       throw new AppError('INVALID_REQUEST', 'Không được gửi tenantId trong body');
     }
 
+    // Kiểm tra exact path cho route detail host (/console/websites/{slug} hoặc /console/hosts/{slug})
+    const isExactHostPath = isExactHostDetailRoute(path, slug);
+
     let result: unknown;
-    if (path === '/console/hosts' && method === 'GET') {
-      const sites = await dependencies.listTenantSites(ctx);
-      result = { hosts: sites };
-    } else if (path === '/console/hosts' && method === 'POST') {
+    if ((path === '/console/websites' || path === '/console/hosts') && method === 'GET') {
+      const sites = await db.listTenantSites(ctx);
+      result = { websites: sites, hosts: sites };
+    } else if ((path === '/console/websites' || path === '/console/hosts') && method === 'POST') {
       if (
         typeof body.homeUrl !== 'string' || typeof body.displayName !== 'string' ||
         typeof body.sourceLang !== 'string' || !Array.isArray(body.targetLangs) ||
@@ -103,27 +99,31 @@ return async function handler(event: WebsiteEvent) {
       ) {
         throw new AppError('INVALID_REQUEST', 'Thiếu hoặc sai kiểu thông tin website');
       }
-      const created = await dependencies.create(ctx, body as never);
-      const host = await loadHost(ctx, created.slug, dependencies);
-      result = { host };
+      result = await createSite(ctx, body as never);
+      result = { ...(result as Record<string, unknown>), host: result };
     } else if (!slug) {
       throw new AppError('NOT_FOUND', 'Không tìm thấy website');
     } else if (path.endsWith('/verify') && method === 'POST') {
       if (body.method !== 'META' && body.method !== 'FILE') throw new AppError('INVALID_REQUEST', 'method phải là META hoặc FILE');
-      await dependencies.verify(ctx, slug, body.method);
-      result = { host: await loadHost(ctx, slug, dependencies) };
-    } else if (path.endsWith('/pause') && method === 'POST') {
-      const paused = await dependencies.pause(ctx, slug);
-      result = { ...paused, host: await loadHost(ctx, slug, dependencies) };
-    } else if (path.endsWith('/resume') && method === 'POST') {
-      const resumed = await dependencies.resume(ctx, slug);
-      result = { ...resumed, host: await loadHost(ctx, slug, dependencies) };
-    } else if (method === 'GET') {
-      result = { host: await loadHost(ctx, slug, dependencies) };
+      result = await verifySite(ctx, slug, body.method);
+    } else if (path.endsWith('/pause') && method === 'PATCH') {
+      result = await pauseSite(ctx, slug);
+    } else if (path.endsWith('/resume') && method === 'PATCH') {
+      result = await resumeSite(ctx, slug);
+    } else if (isExactHostPath && method === 'PATCH') {
+      // Yêu cầu [P1]: Giữ hợp đồng PATCH /console/hosts/{slug} (Cập nhật status, targetLangs, CSS selectors, cache TTL)
+      result = await updateSite(ctx, slug, body);
+      result = { ...(result as Record<string, unknown>), host: result };
+    } else if (isExactHostPath && method === 'GET') {
+      // Yêu cầu [P2]: Chỉ trả detail khi path khớp chính xác /console/hosts/{slug}
+      const site = await db.get(ctx, keys.host(ctx, slug));
+      if (!site) throw new AppError('NOT_FOUND', 'Không tìm thấy website');
+      result = { website: site, host: site };
     } else {
+      // Các path con không hợp lệ khác sẽ trả lỗi 404 NOT_FOUND
       throw new AppError('NOT_FOUND', 'Không tìm thấy endpoint');
     }
-    const statusCode = path === '/console/hosts' && method === 'POST' ? 201 : 200;
+    const statusCode = (path === '/console/websites' || path === '/console/hosts') && method === 'POST' ? 201 : 200;
     return response(statusCode, { request_id: requestId, ...(result as Record<string, unknown>) });
   } catch (error) {
     const appError = error instanceof AppError ? error : new AppError('INTERNAL_ERROR', 'Lỗi hệ thống');
@@ -165,4 +165,16 @@ function normalizedRequestPath(event: WebsiteEvent): string {
   }
   if (!path.startsWith('/')) path = `/${path}`;
   return path.length > 1 ? path.replace(/\/+$/, '') : path;
+}
+
+/**
+ * Kiểm tra xem đường dẫn có trùng khớp chính xác dạng /console/websites/{slug} hoặc /console/hosts/{slug} hay không
+ */
+function isExactHostDetailRoute(path: string, slug: string): boolean {
+  if (!slug) return false;
+  const decodedSlug = encodeURIComponent(slug);
+  return path === `/console/websites/${slug}` || 
+         path === `/console/hosts/${slug}` ||
+         path === `/console/websites/${decodedSlug}` || 
+         path === `/console/hosts/${decodedSlug}`;
 }
