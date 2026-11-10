@@ -17,7 +17,8 @@ import {
   type GlossaryApi,
 } from '../services/glossaryApi.js';
 import { canConsoleRequest } from '../services/tenantPolicy.js';
-import type { AuthenticatedSession } from '../types/auth.js';
+import { resolveConsoleError, type ConsoleOperationKind } from '../services/errorMapping.js';
+import type { AuthenticatedSession, TenantStatus } from '../types/auth.js';
 import type {
   CsvImportPreviewOrCommitResult,
   DuplicateHandlingMode,
@@ -27,6 +28,7 @@ import type {
 import { EmptyState, ErrorAlert } from './ConsoleFeedback.js';
 
 interface GlossaryPageProps {
+  onTenantStatusDetected?: (status: TenantStatus) => void;
   session: AuthenticatedSession;
 }
 
@@ -53,16 +55,18 @@ const DEMO_FAULTY_CSV = [
   ',Empty source,빈 원본',
 ].join('\n');
 
-export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
-  const api = useMemo(() => glossaryApiFor(session), [session]);
+export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session, onTenantStatusDetected }) => {
+  const api = useMemo(() => glossaryApiFor(session), [session.idToken]);
   const isTenantAdmin = session.role === 'TENANT_ADMIN';
   // Tenant LOCKED: chặn thao tác ghi ngay trên giao diện (cùng chính sách với tenantPolicy phía máy chủ)
-  const tenantLocked = !canConsoleRequest({
+  const canWriteByTenant = canConsoleRequest({
     method: 'PUT',
     path: '/console/glossary/terms',
-    tenantStatus: session.tenantStatus ?? 'ACTIVE',
+    tenantStatus: session.tenantStatus,
   });
-  const canWrite = isTenantAdmin && !tenantLocked;
+  const tenantLocked = session.tenantStatus === 'LOCKED';
+  const tenantStatusUnknown = session.tenantStatus === 'UNKNOWN';
+  const canWrite = isTenantAdmin && canWriteByTenant;
 
   const [version, setVersion] = useState<number>(0);
   const [terminologyName, setTerminologyName] = useState<string | undefined>(undefined);
@@ -74,6 +78,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
 
   const [listError, setListError] = useState<unknown | null>(null);
   const [actionError, setActionError] = useState<unknown | null>(null);
+  const [actionErrorOperation, setActionErrorOperation] = useState<ConsoleOperationKind>('write');
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Trạng thái khung Thêm / Sửa thuật ngữ
@@ -121,6 +126,9 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
       setTerminologyName(state.terminologyName);
       setTerms(state.terms);
     } catch (err) {
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setListError(err);
     } finally {
       setLoading(false);
@@ -151,9 +159,19 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     setSearchQuery('');
   };
 
+  const handleCheckGlossaryStatus = () => {
+    setActionError(null);
+    setActionErrorOperation('write');
+    setShowTermForm(false);
+    setShowCsvModal(false);
+    setCsvPreview(null);
+    void loadGlossary();
+  };
+
   const openCsvModal = () => {
     if (!canWrite) return;
     setActionError(null);
+    setActionErrorOperation('write');
     setSuccessMessage(null);
     setCsvPreview(null);
     setShowTermForm(false);
@@ -170,6 +188,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     setFormType('FIXED');
     setFormTranslations(initGlossaryFormTranslations(null, 'vi'));
     setActionError(null);
+    setActionErrorOperation('write');
     setSuccessMessage(null);
     setShowCsvModal(false);
     setShowTermForm(true);
@@ -185,6 +204,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     setFormType(entry.type);
     setFormTranslations(initGlossaryFormTranslations(entry));
     setActionError(null);
+    setActionErrorOperation('write');
     setSuccessMessage(null);
     setShowCsvModal(false);
     setShowTermForm(true);
@@ -194,6 +214,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     e.preventDefault();
     if (!canWrite) return;
     setActionError(null);
+    setActionErrorOperation('write');
     setSuccessMessage(null);
 
     const payload = buildUpsertGlossaryInput({
@@ -219,6 +240,9 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
         `Đã lưu thuật ngữ "${res.term.sourceTerm}" (${TERM_TYPE_LABELS[res.term.type]}). Phiên bản bảng thuật ngữ hiện tại: v${res.version}.`,
       );
     } catch (err) {
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setActionError(err);
     } finally {
       setSavingTerm(false);
@@ -228,6 +252,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
   const handleDeleteTerm = async (entry: GlossaryTermEntry) => {
     if (!canWrite) return;
     setActionError(null);
+    setActionErrorOperation('write');
     setSuccessMessage(null);
     try {
       const res = await api.deleteTerm(entry.sourceTerm);
@@ -236,6 +261,9 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
         `Đã xóa thuật ngữ "${entry.sourceTerm}". Phiên bản bảng thuật ngữ hiện tại: v${res.version}.`,
       );
     } catch (err) {
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setActionError(err);
     }
   };
@@ -255,6 +283,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setActionError(null);
+    setActionErrorOperation('write');
     setCsvPreview(null);
     setCsvFileName(file.name);
     try {
@@ -262,6 +291,9 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
       const decoded = decodeCsvUtf8Bytes(buf);
       setCsvText(decoded);
     } catch (err) {
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setActionError(err);
     }
   };
@@ -270,11 +302,16 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     if (!canWrite) return;
     setCsvBusy(true);
     setActionError(null);
+    setActionErrorOperation('write');
     try {
+      setActionErrorOperation('read');
       const preview = await api.previewImportCsv(csvText, onDuplicate);
       setCsvPreview(preview);
     } catch (err) {
       setCsvPreview(null);
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setActionError(err);
     } finally {
       setCsvBusy(false);
@@ -285,6 +322,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     if (!canWrite) return;
     setCsvBusy(true);
     setActionError(null);
+    setActionErrorOperation('write');
     try {
       const res = await api.commitImportCsv(csvText, onDuplicate);
       await loadGlossary();
@@ -294,6 +332,9 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
         `Đã nhập CSV thành công (${res.addedCount} thêm mới, ${res.overwrittenCount} ghi đè, ${res.skippedCount} giữ nguyên). Phiên bản hiện tại: v${res.version}.`,
       );
     } catch (err) {
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setActionError(err);
     } finally {
       setCsvBusy(false);
@@ -348,10 +389,18 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
               </button>
             </>
           ) : (
-            <span className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
+            <span
+              className={`px-3 py-1.5 rounded-lg border text-xs font-medium ${
+                tenantStatusUnknown && isTenantAdmin && !tenantLocked
+                  ? 'bg-slate-100 border-slate-300 text-slate-700'
+                  : 'bg-amber-50 border-amber-200 text-amber-800'
+              }`}
+            >
               {tenantLocked
                 ? 'Tổ chức đang bị tạm khóa – chỉ xem'
-                : `Chế độ chỉ xem (${ROLE_DISPLAY_LABEL[session.role]})`}
+                : tenantStatusUnknown && isTenantAdmin
+                  ? 'Chưa xác minh trạng thái tổ chức – tạm khóa thao tác ghi'
+                  : `Chế độ chỉ xem (${ROLE_DISPLAY_LABEL[session.role]})`}
             </span>
           )}
         </div>
@@ -362,15 +411,22 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
         error={listError}
         scope="glossary"
         formatMessage={glossaryErrorMessage}
+        operation="read"
         onRetry={() => void loadGlossary()}
       />
 
-      {!showTermForm && !showCsvModal && (
+      {(!canWrite || (!showTermForm && !showCsvModal)) && (
         <ErrorAlert
           error={actionError}
           scope="glossary"
           formatMessage={glossaryErrorMessage}
-          onDismiss={() => setActionError(null)}
+          operation={actionErrorOperation}
+          onCheckStatus={handleCheckGlossaryStatus}
+          checkStatusLabel="Tải lại bảng thuật ngữ"
+          onDismiss={() => {
+            setActionError(null);
+            setActionErrorOperation('write');
+          }}
         />
       )}
 
@@ -399,7 +455,11 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
             </h3>
             <button
               type="button"
-              onClick={() => setShowTermForm(false)}
+              onClick={() => {
+                setShowTermForm(false);
+                setActionError(null);
+                setActionErrorOperation('write');
+              }}
               className="text-xs text-gray-500 hover:text-gray-800"
             >
               Đóng
@@ -410,7 +470,13 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
             error={actionError}
             scope="glossary"
             formatMessage={glossaryErrorMessage}
-            onDismiss={() => setActionError(null)}
+            operation={actionErrorOperation}
+          onCheckStatus={handleCheckGlossaryStatus}
+          checkStatusLabel="Tải lại bảng thuật ngữ"
+          onDismiss={() => {
+            setActionError(null);
+            setActionErrorOperation('write');
+          }}
             compact
           />
 
@@ -523,7 +589,11 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
           <div className="flex justify-end gap-2 pt-2">
             <button
               type="button"
-              onClick={() => setShowTermForm(false)}
+              onClick={() => {
+                setShowTermForm(false);
+                setActionError(null);
+                setActionErrorOperation('write');
+              }}
               className="px-3.5 py-2 rounded-lg border border-gray-300 text-gray-700 text-xs font-semibold hover:bg-gray-50"
             >
               Hủy
@@ -553,7 +623,11 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
             </div>
             <button
               type="button"
-              onClick={() => setShowCsvModal(false)}
+              onClick={() => {
+                setShowCsvModal(false);
+                setActionError(null);
+                setActionErrorOperation('write');
+              }}
               className="text-xs text-gray-500 hover:text-gray-800"
             >
               Đóng
@@ -564,7 +638,13 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
             error={actionError}
             scope="glossary"
             formatMessage={glossaryErrorMessage}
-            onDismiss={() => setActionError(null)}
+            operation={actionErrorOperation}
+          onCheckStatus={handleCheckGlossaryStatus}
+          checkStatusLabel="Tải lại bảng thuật ngữ"
+          onDismiss={() => {
+            setActionError(null);
+            setActionErrorOperation('write');
+          }}
             compact
           />
 

@@ -15,7 +15,9 @@
  */
 import {
   extractApiErrorPayload,
+  mapErrorCodeToVietnamese,
   resolveConsoleError,
+  type ResolveConsoleErrorOptions,
   type KnownConsoleErrorCode,
 } from './errorMapping.js';
 import type {
@@ -641,16 +643,17 @@ const GLOSSARY_ERROR_OVERRIDES: Partial<Record<KnownConsoleErrorCode, string>> =
   VERSION_CONFLICT: 'Bảng thuật ngữ vừa được cập nhật từ phiên khác. Vui lòng tải lại và thử lại.',
   NOT_FOUND: 'Không tìm thấy thuật ngữ cần xóa hoặc chỉnh sửa.',
   UNAUTHORIZED: 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.',
-  NETWORK_ERROR: 'Không kết nối được tới máy chủ, vui lòng kiểm tra mạng và thử lại.',
+  // NETWORK_ERROR và INTERNAL_ERROR được xử lý theo loại thao tác trong errorMapping.ts
 });
 
-export function glossaryErrorMessage(err: unknown): string {
+export function glossaryErrorMessage(err: unknown, opts: ResolveConsoleErrorOptions = {}): string {
   if (!(err instanceof GlossaryApiError)) {
-    return 'Có lỗi tạm thời khi xử lý bảng thuật ngữ, vui lòng thử lại.';
+    return mapErrorCodeToVietnamese('INTERNAL_ERROR', opts);
   }
   return resolveConsoleError(err, {
+    ...opts,
     scope: 'glossary',
-    overrides: GLOSSARY_ERROR_OVERRIDES,
+    overrides: { ...GLOSSARY_ERROR_OVERRIDES, ...opts.overrides },
   }).message;
 }
 

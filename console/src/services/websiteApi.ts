@@ -16,7 +16,9 @@
 import {
   VERIFICATION_FAILURE_MESSAGES,
   extractApiErrorPayload,
+  mapErrorCodeToVietnamese,
   resolveConsoleError,
+  type ResolveConsoleErrorOptions,
   type KnownConsoleErrorCode,
 } from './errorMapping.js';
 import type {
@@ -144,18 +146,19 @@ const WEBSITE_ERROR_OVERRIDES: Partial<Record<KnownConsoleErrorCode, string>> = 
   TENANT_SUSPENDED: 'Tổ chức đang bị tạm khóa; bạn chỉ có thể xem.',
   UNAUTHORIZED: 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.',
   NOT_FOUND: 'Không tìm thấy website.',
-  INTERNAL_ERROR: 'Có lỗi tạm thời, vui lòng thử lại.',
+  // INTERNAL_ERROR và NETWORK_ERROR được xử lý theo loại thao tác trong errorMapping.ts
 });
 
 export const VERIFICATION_REASON_LABEL: Readonly<Record<VerificationFailureReason, string>> =
   VERIFICATION_FAILURE_MESSAGES;
 
 /** Thông báo tiếng Việt cho lỗi của nhóm /console/hosts (Bảng 2.10), kể cả mã của siteManager hiện tại. */
-export function websiteErrorMessage(err: unknown): string {
-  if (!(err instanceof WebsiteApiError)) return 'Có lỗi tạm thời, vui lòng thử lại.';
+export function websiteErrorMessage(err: unknown, opts: ResolveConsoleErrorOptions = {}): string {
+  if (!(err instanceof WebsiteApiError)) return mapErrorCodeToVietnamese('INTERNAL_ERROR', opts);
   return resolveConsoleError(err, {
+    ...opts,
     scope: 'website',
-    overrides: WEBSITE_ERROR_OVERRIDES,
+    overrides: { ...WEBSITE_ERROR_OVERRIDES, ...opts.overrides },
   }).message;
 }
 

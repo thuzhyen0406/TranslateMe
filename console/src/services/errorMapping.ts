@@ -5,7 +5,9 @@
  *  1. Tài nguyên của tenant khác luôn trả NOT_FOUND giống hệt tài nguyên không tồn tại;
  *  2. Thông báo lỗi tiếng Việt tuyệt đối không làm lộ dữ liệu của tenant hoặc người dùng khác;
  *  3. Mã lỗi (code) giữ nguyên không dịch, phần mô tả (message) dùng tiếng Việt rõ ràng;
- *  4. Lỗi 5xx (INTERNAL_ERROR) và 429 RATE_LIMITED là lỗi tạm thời, an toàn để thử lại;
+ *  4. Lỗi 429 RATE_LIMITED và CACHE_INVALIDATION_FAILED có thể thử lại an toàn; lỗi 5xx/mạng chỉ khuyên thử lại
+ *     với thao tác đọc (`read`) hoặc thao tác ghi có bảo đảm chống lặp (`idempotent`), còn thao tác ghi khác
+ *     (`write` hoặc chưa rõ ngữ cảnh) phải hướng dẫn kiểm tra trạng thái trước khi gửi lại để tránh lặp tác động;
  *  5. Giữ lại request_id từ phản hồi API (nếu có) để phục vụ đối chiếu log.
  */
 
@@ -45,6 +47,18 @@ export type ExtraConsoleErrorCode = (typeof EXTRA_CONSOLE_ERROR_CODES)[number];
 export type KnownConsoleErrorCode = Table210ErrorCode | ExtraConsoleErrorCode;
 
 export type ConsoleErrorScope = 'generic' | 'auth' | 'members' | 'website' | 'glossary' | 'review';
+
+/**
+ * Phân loại thao tác gọi API:
+ *  - 'read': GET / xem trước chỉ đọc (an toàn thử lại khi 5xx/mạng);
+ *  - 'idempotent': thao tác ghi đã có bảo đảm chống lặp phía máy chủ (verify, prewarm, retryInvalidation);
+ *  - 'write': thao tác ghi có thể đã ghi dữ liệu trước khi phát sinh 5xx/mạng -> không tự khuyên thử lại an toàn.
+ */
+export type ConsoleOperationKind = 'read' | 'idempotent' | 'write';
+
+export function isSafeToRetryOperation(operation?: ConsoleOperationKind): boolean {
+  return operation === 'read' || operation === 'idempotent';
+}
 
 export interface ErrorCodeSpec {
   code: KnownConsoleErrorCode;
@@ -166,8 +180,9 @@ export const ERROR_CODE_SPECS: Readonly<Record<KnownConsoleErrorCode, ErrorCodeS
   INTERNAL_ERROR: {
     code: 'INTERNAL_ERROR',
     httpStatus: 500,
-    retryable: true,
-    defaultMessage: 'Hệ thống đang gặp lỗi tạm thời, an toàn để thử lại sau ít phút.',
+    retryable: false,
+    defaultMessage:
+      'Hệ thống đang gặp lỗi tạm thời. Vui lòng kiểm tra trạng thái hiện tại trước khi gửi lại.',
   },
   FORBIDDEN: {
     code: 'FORBIDDEN',
@@ -214,8 +229,9 @@ export const ERROR_CODE_SPECS: Readonly<Record<KnownConsoleErrorCode, ErrorCodeS
   NETWORK_ERROR: {
     code: 'NETWORK_ERROR',
     httpStatus: 0,
-    retryable: true,
-    defaultMessage: 'Không kết nối được tới máy chủ. Vui lòng kiểm tra kết nối mạng và thử lại.',
+    retryable: false,
+    defaultMessage:
+      'Không nhận được phản hồi từ máy chủ. Vui lòng kiểm tra kết nối và trạng thái hiện tại trước khi gửi lại.',
   },
 });
 
@@ -260,7 +276,7 @@ const INTERNAL_LEAK_RE =
   /(TENANT#[A-Za-z0-9_-]+|HASH#[0-9a-f]+|arn:aws:|ConditionalCheckFailed|DynamoDB|ResourceNotFoundException|\n\s+at\s+)/i;
 
 const GENERIC_ENGLISH_NOISE_RE =
-  /^(bad request|unauthorized|forbidden|not found|conflict|too many requests|internal server error|service unavailable|failed to fetch|fetch failed|network error|load failed|request timed out|error|failed|unknown error)$/i;
+  /^(bad request|unauthorized|forbidden|not found|conflict|too many requests|internal server error|service unavailable|failed to fetch|fetch failed|network\s?error|load failed|request timed out|error|failed|unknown error)$/i;
 
 /**
  * Lọc thông điệp thô để ngăn rò rỉ stack trace, khóa nội bộ DynamoDB hoặc dữ liệu tenant khác (QC-2).
@@ -324,11 +340,16 @@ export interface ConsoleUiError {
   httpStatus?: number;
   reason?: string;
   requestId?: string;
+  /** Chỉ bật khi an toàn để bấm thử lại ngay (429 RATE_LIMITED, CACHE_INVALIDATION_FAILED, hoặc 5xx/mạng ở read/idempotent) */
   retryable: boolean;
+  /** Bật khi 5xx/mạng xảy ra trên thao tác ghi không chống lặp (hoặc chưa rõ ngữ cảnh) -> hướng dẫn kiểm tra trạng thái trước */
+  requiresStatusCheck?: boolean;
 }
 
 export interface ResolveConsoleErrorOptions {
   scope?: ConsoleErrorScope;
+  /** Phân loại thao tác; mặc định thận trọng xem như chưa có bảo đảm chống lặp */
+  operation?: ConsoleOperationKind;
   /** Ghi đè thông báo theo ngữ cảnh từng màn (ví dụ NOT_FOUND -> "Không tìm thấy website.") */
   overrides?: Partial<Record<KnownConsoleErrorCode, string>>;
 }
@@ -343,6 +364,7 @@ export function mapErrorCodeToVietnamese(
   } = {},
 ): string {
   const code = codeInput.trim().toUpperCase();
+  const safeRetryOp = isSafeToRetryOperation(opts.operation);
 
   if (code === 'PLACEHOLDER_MISMATCH') {
     if ((opts.missing && opts.missing.length > 0) || (opts.extra && opts.extra.length > 0)) {
@@ -365,6 +387,18 @@ export function mapErrorCodeToVietnamese(
     const override = opts.overrides?.[code];
     if (override) return override;
 
+    if (code === 'INTERNAL_ERROR') {
+      return safeRetryOp
+        ? 'Hệ thống đang gặp lỗi tạm thời, an toàn để thử lại sau ít phút.'
+        : ERROR_CODE_SPECS.INTERNAL_ERROR.defaultMessage;
+    }
+
+    if (code === 'NETWORK_ERROR') {
+      return safeRetryOp
+        ? 'Không kết nối được tới máy chủ. Vui lòng kiểm tra kết nối mạng và thử lại.'
+        : ERROR_CODE_SPECS.NETWORK_ERROR.defaultMessage;
+    }
+
     if (code === 'INVALID_REQUEST') {
       const safe = sanitizeClientSafeMessage(opts.serverMessage);
       if (safe) return safe;
@@ -373,7 +407,10 @@ export function mapErrorCodeToVietnamese(
     return ERROR_CODE_SPECS[code].defaultMessage;
   }
 
-  return sanitizeClientSafeMessage(opts.serverMessage) ?? ERROR_CODE_SPECS.INTERNAL_ERROR.defaultMessage;
+  return (
+    sanitizeClientSafeMessage(opts.serverMessage) ??
+    mapErrorCodeToVietnamese('INTERNAL_ERROR', opts)
+  );
 }
 
 const IGNORED_RUNTIME_ERROR_NAMES = new Set<string>([
@@ -389,8 +426,11 @@ export function resolveConsoleError(
   err: unknown,
   opts: ResolveConsoleErrorOptions = {},
 ): ConsoleUiError {
+  const safeRetryOp = isSafeToRetryOperation(opts.operation);
+
   if (typeof err === 'string') {
-    const clean = sanitizeClientSafeMessage(err) ?? ERROR_CODE_SPECS.INTERNAL_ERROR.defaultMessage;
+    const clean =
+      sanitizeClientSafeMessage(err) ?? mapErrorCodeToVietnamese('INTERNAL_ERROR', opts);
     return { message: clean, retryable: false };
   }
 
@@ -398,9 +438,10 @@ export function resolveConsoleError(
   if (!obj) {
     return {
       code: 'INTERNAL_ERROR',
-      message: ERROR_CODE_SPECS.INTERNAL_ERROR.defaultMessage,
+      message: mapErrorCodeToVietnamese('INTERNAL_ERROR', opts),
       httpStatus: 500,
-      retryable: true,
+      retryable: safeRetryOp,
+      ...(safeRetryOp ? {} : { requiresStatusCheck: true }),
     };
   }
 
@@ -463,10 +504,20 @@ export function resolveConsoleError(
     extra,
   });
 
-  const retryable =
-    effectiveCode && isKnownConsoleErrorCode(effectiveCode)
+  const isUncertain5xxOrNetwork =
+    effectiveCode === 'INTERNAL_ERROR' ||
+    effectiveCode === 'NETWORK_ERROR' ||
+    (effectiveCode !== 'CACHE_INVALIDATION_FAILED' &&
+      typeof httpStatus === 'number' &&
+      httpStatus >= 500);
+
+  const retryable = isUncertain5xxOrNetwork
+    ? safeRetryOp
+    : effectiveCode && isKnownConsoleErrorCode(effectiveCode)
       ? ERROR_CODE_SPECS[effectiveCode].retryable
-      : typeof httpStatus === 'number' && (httpStatus === 429 || httpStatus >= 500);
+      : httpStatus === 429;
+
+  const requiresStatusCheck = isUncertain5xxOrNetwork && !safeRetryOp;
 
   return {
     ...(effectiveCode ? { code: effectiveCode } : {}),
@@ -475,6 +526,7 @@ export function resolveConsoleError(
     ...(reason ? { reason } : {}),
     ...(requestId ? { requestId } : {}),
     retryable,
+    ...(requiresStatusCheck ? { requiresStatusCheck: true } : {}),
   };
 }
 
@@ -484,7 +536,9 @@ export function resolveConsoleError(
  */
 export function errorToUiPayload(
   err: unknown,
-  opts: ResolveConsoleErrorOptions & { formatMessage?: (e: unknown) => string } = {},
+  opts: ResolveConsoleErrorOptions & {
+    formatMessage?: (e: unknown, resolveOpts?: ResolveConsoleErrorOptions) => string;
+  } = {},
 ): ConsoleUiError | null {
   if (err === null || err === undefined || err === '') return null;
   if (typeof err === 'string') {
@@ -495,7 +549,7 @@ export function errorToUiPayload(
 
   const resolved = resolveConsoleError(err, opts);
   if (opts.formatMessage) {
-    const customMsg = opts.formatMessage(err)?.trim();
+    const customMsg = opts.formatMessage(err, opts)?.trim();
     if (customMsg) {
       resolved.message = customMsg;
     }

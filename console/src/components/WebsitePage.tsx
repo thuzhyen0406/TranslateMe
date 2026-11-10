@@ -20,7 +20,17 @@ import {
   websiteErrorMessage,
   type WebsiteApi,
 } from '../services/websiteApi.js';
-import type { AuthenticatedSession } from '../types/auth.js';
+import { resolveConsoleError } from '../services/errorMapping.js';
+import type { AuthenticatedSession, TenantStatus } from '../types/auth.js';
+
+function notifyIfTenantSuspended(
+  err: unknown,
+  onTenantStatusDetected?: (status: TenantStatus) => void,
+): void {
+  if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+    onTenantStatusDetected?.('LOCKED');
+  }
+}
 import type { CreateWebsiteInput, PrewarmJob, VerifyMethod, Website, WebsiteStatus } from '../types/website.js';
 import { EmptyState, ErrorAlert } from './ConsoleFeedback.js';
 
@@ -99,10 +109,11 @@ const StepChips: React.FC<{ step: 1 | 2 }> = ({ step }) => (
 const WebsiteList: React.FC<{
   api: WebsiteApi;
   canWrite: boolean;
-  tenantLocked: boolean;
+  tenantStatus: TenantStatus;
+  onTenantStatusDetected?: (status: TenantStatus) => void;
   onCreate: () => void;
   onOpen: (slug: string) => void;
-}> = ({ api, canWrite, tenantLocked, onCreate, onOpen }) => {
+}> = ({ api, canWrite, tenantStatus, onTenantStatusDetected, onCreate, onOpen }) => {
   const [sites, setSites] = useState<Website[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown | null>(null);
@@ -114,6 +125,7 @@ const WebsiteList: React.FC<{
       const s = await api.listWebsites();
       setSites(s);
     } catch (err) {
+      notifyIfTenantSuspended(err, onTenantStatusDetected);
       setError(err);
     } finally {
       setLoading(false);
@@ -135,13 +147,21 @@ const WebsiteList: React.FC<{
           <button type="button" className={btnPrimary} onClick={onCreate}>
             + Thêm website
           </button>
-        ) : tenantLocked ? (
-          <span className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
-            Tổ chức đang bị tạm khóa – chỉ xem
+        ) : tenantStatus !== 'ACTIVE' ? (
+          <span
+            className={
+              tenantStatus === 'LOCKED'
+                ? 'px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium'
+                : 'px-3 py-1.5 rounded-lg bg-slate-100 border border-slate-300 text-slate-700 text-xs font-medium'
+            }
+          >
+            {tenantStatus === 'LOCKED'
+              ? 'Tổ chức đang bị tạm khóa – chỉ xem'
+              : 'Chưa xác minh trạng thái tổ chức – tạm khóa thao tác ghi'}
           </span>
         ) : null}
       </div>
-      <ErrorAlert error={error} scope="website" formatMessage={websiteErrorMessage} onRetry={() => void load()} className="mb-4" />
+      <ErrorAlert error={error} scope="website" operation="read" formatMessage={websiteErrorMessage} onRetry={() => void load()} className="mb-4" />
       <div className={`${card} overflow-hidden`}>
         {loading ? (
           <p className="px-6 py-10 text-center text-sm text-gray-500">Đang tải danh sách website…</p>
@@ -201,7 +221,7 @@ const WebsiteList: React.FC<{
 // Bước 1: Thêm website (Hình 1.7)
 // ----------------------------------------------------------------------------
 
-const CreateWebsite: React.FC<{ api: WebsiteApi; canWrite: boolean; onCancel: () => void; onCreated: (slug: string) => void }> = ({
+const CreateWebsite: React.FC<{ api: WebsiteApi; canWrite: boolean; onTenantStatusDetected?: (status: TenantStatus) => void; onCancel: () => void; onCreated: (slug: string) => void }> = ({ onTenantStatusDetected,
   api,
   canWrite,
   onCancel,
@@ -236,6 +256,7 @@ const CreateWebsite: React.FC<{ api: WebsiteApi; canWrite: boolean; onCancel: ()
       const site = await api.createWebsite(form);
       onCreated(site.slug);
     } catch (err) {
+      notifyIfTenantSuspended(err, onTenantStatusDetected);
       setError(err);
     } finally {
       setSubmitting(false);
@@ -255,7 +276,15 @@ const CreateWebsite: React.FC<{ api: WebsiteApi; canWrite: boolean; onCancel: ()
       </p>
       <StepChips step={1} />
       <form onSubmit={submit} noValidate className={`${card} p-6 space-y-4`}>
-        <ErrorAlert error={error} scope="website" formatMessage={websiteErrorMessage} compact />
+        <ErrorAlert
+          error={error}
+          scope="website"
+          operation="write"
+          formatMessage={websiteErrorMessage}
+          onCheckStatus={onCancel}
+          checkStatusLabel="Kiểm tra danh sách website"
+          compact
+        />
         <div>
           <label htmlFor="ws-home" className="block text-xs font-semibold text-gray-700 mb-1.5">
             Địa chỉ trang chủ
@@ -344,8 +373,9 @@ const VerificationCard: React.FC<{
   api: WebsiteApi;
   canWrite: boolean;
   site: Website;
+  onTenantStatusDetected?: (status: TenantStatus) => void;
   onVerified: (s: Website) => void;
-}> = ({ api, canWrite, site, onVerified }) => {
+}> = ({ api, canWrite, site, onTenantStatusDetected, onVerified }) => {
   const [method, setMethod] = useState<VerifyMethod>('META');
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<unknown | null>(null);
@@ -358,6 +388,7 @@ const VerificationCard: React.FC<{
     try {
       onVerified(await api.verifyWebsite(site.slug, method));
     } catch (err) {
+      notifyIfTenantSuspended(err, onTenantStatusDetected);
       setError(err);
     } finally {
       setChecking(false);
@@ -380,6 +411,7 @@ const VerificationCard: React.FC<{
         error={error}
         scope="website"
         formatMessage={websiteErrorMessage}
+        operation="idempotent"
         onRetry={canWrite && !checking ? () => void check() : undefined}
         compact
         className="mb-3"
@@ -425,7 +457,7 @@ const VerificationCard: React.FC<{
   );
 };
 
-const PrewarmPanel: React.FC<{ api: WebsiteApi; canWrite: boolean; site: Website }> = ({ api, canWrite, site }) => {
+const PrewarmPanel: React.FC<{ api: WebsiteApi; canWrite: boolean; site: Website; onTenantStatusDetected?: (status: TenantStatus) => void }> = ({ api, canWrite, site, onTenantStatusDetected }) => {
   const [job, setJob] = useState<PrewarmJob | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<unknown | null>(null);
@@ -461,6 +493,7 @@ const PrewarmPanel: React.FC<{ api: WebsiteApi; canWrite: boolean; site: Website
     try {
       setJob((await api.startPrewarm(site.slug)).job);
     } catch (err) {
+      notifyIfTenantSuspended(err, onTenantStatusDetected);
       setError(err);
     } finally {
       setStarting(false);
@@ -470,7 +503,15 @@ const PrewarmPanel: React.FC<{ api: WebsiteApi; canWrite: boolean; site: Website
   const progress = job?.progress ?? 0;
   return (
     <div className="mt-5">
-      <ErrorAlert error={error} scope="website" formatMessage={websiteErrorMessage} compact className="mb-3" />
+      <ErrorAlert
+        error={error}
+        scope="website"
+        operation="idempotent"
+        formatMessage={websiteErrorMessage}
+        onRetry={canWrite && !starting && !active && site.status === 'ACTIVE' ? () => void start() : undefined}
+        compact
+        className="mb-3"
+      />
       <div className="flex flex-wrap items-center gap-4">
         <button
           type="button"
@@ -518,10 +559,11 @@ const PrewarmPanel: React.FC<{ api: WebsiteApi; canWrite: boolean; site: Website
 const WebsiteDetail: React.FC<{
   api: WebsiteApi;
   canWrite: boolean;
-  tenantLocked: boolean;
+  tenantStatus: TenantStatus;
+  onTenantStatusDetected?: (status: TenantStatus) => void;
   slug: string;
   onBack: () => void;
-}> = ({ api, canWrite, tenantLocked, slug, onBack }) => {
+}> = ({ api, canWrite, tenantStatus, slug, onTenantStatusDetected, onBack }) => {
   const [site, setSite] = useState<Website | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown | null>(null);
@@ -533,6 +575,7 @@ const WebsiteDetail: React.FC<{
       const found = await api.getWebsite(slug);
       setSite(found);
     } catch (err) {
+      notifyIfTenantSuspended(err, onTenantStatusDetected);
       setError(err);
     } finally {
       setLoading(false);
@@ -546,7 +589,7 @@ const WebsiteDetail: React.FC<{
   if (!site) {
     return (
       <div className="p-8 max-w-6xl space-y-4">
-        <ErrorAlert error={error} scope="website" formatMessage={websiteErrorMessage} onRetry={() => void load()} />
+        <ErrorAlert error={error} scope="website" operation="read" formatMessage={websiteErrorMessage} onRetry={() => void load()} />
         {loading ? (
           <div className={`${card} px-6 py-10 text-center text-sm text-gray-500`}>
             Đang tải thông tin website…
@@ -583,16 +626,24 @@ const WebsiteDetail: React.FC<{
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {tenantLocked && (
-            <span className="px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
-              Tổ chức đang bị tạm khóa – chỉ xem
+          {tenantStatus !== 'ACTIVE' && (
+            <span
+              className={
+                tenantStatus === 'LOCKED'
+                  ? 'px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium'
+                  : 'px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-300 text-slate-700 text-xs font-medium'
+              }
+            >
+              {tenantStatus === 'LOCKED'
+              ? 'Tổ chức đang bị tạm khóa – chỉ xem'
+              : 'Chưa xác minh trạng thái tổ chức – tạm khóa thao tác ghi'}
             </span>
           )}
           <StatusBadge status={site.status} />
         </div>
       </div>
       <StepChips step={2} />
-      <VerificationCard api={api} canWrite={canWrite} site={site} onVerified={setSite} />
+      <VerificationCard api={api} canWrite={canWrite} site={site} onTenantStatusDetected={onTenantStatusDetected} onVerified={setSite} />
 
       <section className={`${card} p-6`} aria-labelledby="urls-title">
         <h2 id="urls-title" className="text-base font-bold text-gray-800 mb-3">
@@ -640,7 +691,7 @@ const WebsiteDetail: React.FC<{
                 </tbody>
               </table>
             </div>
-            <PrewarmPanel api={api} canWrite={canWrite} site={site} />
+            <PrewarmPanel api={api} canWrite={canWrite} site={site} onTenantStatusDetected={onTenantStatusDetected} />
             {firstLang && (
               <p className="mt-4 text-[11px] text-gray-500">
                 Gợi ý: thêm liên kết "{languageLabel(firstLang)}" vào menu website gốc, trỏ tới /{firstLang}/.
@@ -670,21 +721,25 @@ const WebsiteUnavailable: React.FC = () => (
 
 // ----------------------------------------------------------------------------
 
-export const WebsitePage: React.FC<{ session: AuthenticatedSession; api?: WebsiteApi }> = ({ session, api: injected }) => {
-  const api = useMemo(() => injected ?? websiteApiFor(session), [injected, session]);
+export const WebsitePage: React.FC<{
+  session: AuthenticatedSession;
+  api?: WebsiteApi;
+  onTenantStatusDetected?: (status: TenantStatus) => void;
+}> = ({ session, api: injected, onTenantStatusDetected }) => {
+  const api = useMemo(() => injected ?? websiteApiFor(session), [injected, session.idToken]);
   const [view, setView] = useState<View>({ kind: 'list' });
   const isTenantAdmin = session.role === 'TENANT_ADMIN';
-  const tenantLocked = !canConsoleRequest({
+  const canWriteByTenant = canConsoleRequest({
     method: 'POST',
     path: '/console/hosts',
-    tenantStatus: session.tenantStatus ?? 'ACTIVE',
+    tenantStatus: session.tenantStatus,
   });
-  const canWrite = isTenantAdmin && !tenantLocked;
+  const canWrite = isTenantAdmin && canWriteByTenant;
 
   if (!api) return <WebsiteUnavailable />;
 
   if (view.kind === 'create') {
-    return <CreateWebsite api={api} canWrite={canWrite} onCancel={() => setView({ kind: 'list' })} onCreated={(slug) => setView({ kind: 'detail', slug })} />;
+    return <CreateWebsite api={api} canWrite={canWrite} onTenantStatusDetected={onTenantStatusDetected} onCancel={() => setView({ kind: 'list' })} onCreated={(slug) => setView({ kind: 'detail', slug })} />;
   }
   if (view.kind === 'detail') {
     return (
@@ -692,7 +747,9 @@ export const WebsitePage: React.FC<{ session: AuthenticatedSession; api?: Websit
         key={view.slug}
         api={api}
         canWrite={canWrite}
-        tenantLocked={tenantLocked}
+
+        tenantStatus={session.tenantStatus}
+        onTenantStatusDetected={onTenantStatusDetected}
         slug={view.slug}
         onBack={() => setView({ kind: 'list' })}
       />
@@ -702,7 +759,9 @@ export const WebsitePage: React.FC<{ session: AuthenticatedSession; api?: Websit
     <WebsiteList
       api={api}
       canWrite={canWrite}
-      tenantLocked={tenantLocked}
+
+      tenantStatus={session.tenantStatus}
+      onTenantStatusDetected={onTenantStatusDetected}
       onCreate={() => canWrite && setView({ kind: 'create' })}
       onOpen={(slug) => setView({ kind: 'detail', slug })}
     />

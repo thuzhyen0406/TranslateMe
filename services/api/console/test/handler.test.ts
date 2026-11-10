@@ -9,6 +9,7 @@ import {
   handleMembersApiGatewayRoute,
   handleApiKeysApiGatewayRoute,
   toHostResponse,
+  handleConsoleMeApiGatewayRoute,
   CONSOLE_ROUTE_MODULES,
   type ConsoleEvent,
   type ConsoleRouteModule,
@@ -558,6 +559,92 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(inputPayload.tenant_id, 't_a');
     assert.equal(inputPayload.slug, 'homestay-abc');
     assert.deepEqual(inputPayload.target_langs, ['en']);
+  });
+
+  it('GET /console/me trả danh tính và trạng thái tenant ACTIVE/LOCKED cho mọi vai trò hợp lệ; từ chối sai method/thiếu CONFIG', async () => {
+    const adminCtx: Ctx = { tenantId: 't_me', via: 'JWT', requestId: 'req-me', role: 'TENANT_ADMIN', sub: 'u_admin' };
+    const nonMe = await handleConsoleMeApiGatewayRoute(event('/console/hosts'), adminCtx);
+    assert.equal(nonMe, null);
+
+    const wrongMethod = await handleConsoleMeApiGatewayRoute(
+      event('/console/me', claims, 'POST'),
+      adminCtx,
+    );
+    assert.equal(wrongMethod?.statusCode, 404);
+
+    // Cho phép TENANT_ADMIN, REVIEWER và DEVELOPER đọc ngay cả khi tenant LOCKED
+    const lockedMemDb = memoryDataDb();
+    await lockedMemDb.put(adminCtx, {
+      ...keys.config(adminCtx),
+      status: 'LOCKED',
+      plan: 'Pro',
+      organizationName: 'Resort Locked',
+    });
+
+    const lockedHandler = createConsoleHandler(undefined, {
+      db: {
+        get: async (_c, key, opts) => {
+          if (key.SK === 'MEMBER#u_rev') return { status: 'ACTIVE', role: 'REVIEWER' };
+          if (key.SK === 'MEMBER#u_dev') return { status: 'ACTIVE', role: 'DEVELOPER' };
+          if (key.SK === 'MEMBER#u_admin') return { status: 'ACTIVE', role: 'TENANT_ADMIN' };
+          return lockedMemDb.get(_c as any, key, opts);
+        },
+      },
+    });
+
+    for (const [roleClaim, sub, expectedRole] of [
+      ['tenant_admin', 'u_admin', 'TENANT_ADMIN'],
+      ['reviewer', 'u_rev', 'REVIEWER'],
+      ['developer', 'u_dev', 'DEVELOPER'],
+    ] as const) {
+      const res = await lockedHandler(
+        event('/dev/console/me', { 'custom:tenant_id': 't_me', 'custom:role': roleClaim, sub }, 'GET'),
+      );
+      assert.equal(res.statusCode, 200);
+      const body = JSON.parse(res.body);
+      assert.equal(body.request_id, 'req-console');
+      assert.equal(body.tenant_id, 't_me');
+      assert.equal(body.role, expectedRole);
+      assert.equal(body.tenant_status, 'LOCKED');
+      assert.equal(body.tenant_locked, true);
+      assert.equal(body.organization_name, 'Resort Locked');
+      assert.equal(body.plan, 'Pro');
+    }
+
+    // CONFIG ACTIVE -> tenant_status = ACTIVE, tenant_locked = false
+    const activeHandler = createConsoleHandler(undefined, {
+      db: {
+        get: async (_c, key) => {
+          if (key.SK.startsWith('MEMBER#')) return { status: 'ACTIVE', role: 'TENANT_ADMIN' };
+          if (key.SK === 'CONFIG') return { ...keys.config(adminCtx), status: 'ACTIVE' };
+          return null;
+        },
+      },
+    });
+    const activeRes = await activeHandler(
+      event('/console/me', { 'custom:tenant_id': 't_me', 'custom:role': 'tenant_admin', sub: 'u_admin' }, 'GET'),
+    );
+    assert.equal(activeRes.statusCode, 200);
+    const activeBody = JSON.parse(activeRes.body);
+    assert.equal(activeBody.tenant_status, 'ACTIVE');
+    assert.equal(activeBody.tenant_locked, false);
+
+    // Thiếu CONFIG -> 404 NOT_FOUND; trạng thái CONFIG không hợp lệ -> 500 INTERNAL_ERROR
+    const missingRes = await handleConsoleMeApiGatewayRoute(
+      event('/console/me'),
+      adminCtx,
+      { db: { get: async () => null } },
+    );
+    assert.equal(missingRes?.statusCode, 404);
+    assert.equal(JSON.parse(missingRes!.body).error?.code, 'NOT_FOUND');
+
+    const badStatusRes = await handleConsoleMeApiGatewayRoute(
+      event('/console/me'),
+      adminCtx,
+      { db: { get: async () => ({ ...keys.config(adminCtx), status: 'CORRUPT' }) } },
+    );
+    assert.equal(badStatusRes?.statusCode, 500);
+    assert.equal(JSON.parse(badStatusRes!.body).error?.code, 'INTERNAL_ERROR');
   });
 
   it('Console router điều phối các route /console/api-keys* qua handleApiKeyRoute với Ctx từ contextFromIdTokenClaims', async () => {

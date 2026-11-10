@@ -6,12 +6,14 @@ import {
   mapCognitoErrorToVietnamese,
   ROLE_DISPLAY_LABEL,
 } from '../services/cognitoAuth.js';
+import { resolveConsoleError } from '../services/errorMapping.js';
 import { canConsoleRequest } from '../services/tenantPolicy.js';
 import type {
   AuthenticatedSession,
   InvitableConsoleRole,
   MemberStatus,
   TenantMember,
+  TenantStatus,
 } from '../types/auth.js';
 import { EmptyState, ErrorAlert } from './ConsoleFeedback.js';
 
@@ -29,16 +31,19 @@ const MEMBER_STATUS_STYLE: Readonly<Record<MemberStatus, string>> = {
 
 interface MembersPageProps {
   session: AuthenticatedSession;
+  onTenantStatusDetected?: (status: TenantStatus) => void;
 }
 
-export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
+export const MembersPage: React.FC<MembersPageProps> = ({ session, onTenantStatusDetected }) => {
   const isTenantAdmin = session.role === 'TENANT_ADMIN';
-  const tenantLocked = !canConsoleRequest({
+  const tenantStatus = session.tenantStatus;
+  const canWriteByTenant = canConsoleRequest({
     method: 'POST',
     path: '/console/members/invite',
-    tenantStatus: session.tenantStatus ?? 'ACTIVE',
+    tenantStatus,
   });
-  const canInvite = isTenantAdmin && !tenantLocked;
+  const tenantLocked = tenantStatus === 'LOCKED';
+  const canInvite = isTenantAdmin && canWriteByTenant;
 
   const [members, setMembers] = useState<TenantMember[]>([]);
   const [loading, setLoading] = useState(true);
@@ -57,11 +62,17 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
       const list = await listTenantMembers(session.tenantId);
       setMembers(list);
     } catch (err) {
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+        setIsModalOpen(false);
+        setLoadError(err);
+        return;
+      }
       setLoadError(err);
     } finally {
       setLoading(false);
     }
-  }, [session.tenantId]);
+  }, [session.tenantId, onTenantStatusDetected]);
 
   useEffect(() => {
     void loadMembers();
@@ -99,6 +110,12 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
         `Đã gửi email mời tới ${res.member.email} với vai trò ${ROLE_DISPLAY_LABEL[res.member.role]}${demoPwdHint}.`,
       );
     } catch (err) {
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+        setIsModalOpen(false);
+        setLoadError(err);
+        return;
+      }
       setModalError(err);
     } finally {
       setSubmitting(false);
@@ -115,9 +132,17 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
             Mời Developer hoặc Reviewer tham gia tổ chức {session.organizationName}
           </p>
         </div>
-        {isTenantAdmin && tenantLocked && (
-          <span className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
-            Tổ chức đang bị tạm khóa – chỉ xem
+        {isTenantAdmin && !canWriteByTenant && (
+          <span
+            className={`px-3 py-1.5 rounded-lg border text-xs font-medium ${
+              tenantLocked
+                ? 'bg-amber-50 border-amber-200 text-amber-800'
+                : 'bg-slate-100 border-slate-300 text-slate-700'
+            }`}
+          >
+            {tenantLocked
+              ? 'Tổ chức đang bị tạm khóa – chỉ xem'
+              : 'Chưa xác minh trạng thái tổ chức – tạm khóa thao tác ghi'}
           </span>
         )}
       </div>
@@ -125,6 +150,7 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
       <ErrorAlert
         error={loadError}
         scope="members"
+        operation="read"
         formatMessage={mapCognitoErrorToVietnamese}
         onRetry={() => void loadMembers()}
         className="mb-5"
@@ -168,7 +194,7 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
           <EmptyState
             variant="error"
             title="Không thể tải danh sách thành viên"
-            description={mapCognitoErrorToVietnamese(loadError)}
+            description={mapCognitoErrorToVietnamese(loadError, { operation: 'read' })}
             actionLabel="Thử lại"
             onAction={() => void loadMembers()}
           />
@@ -234,7 +260,13 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
             <ErrorAlert
               error={modalError}
               scope="members"
+              operation="write"
               formatMessage={mapCognitoErrorToVietnamese}
+              onCheckStatus={() => {
+                setIsModalOpen(false);
+                void loadMembers();
+              }}
+              checkStatusLabel="Kiểm tra danh sách thành viên"
               compact
               className="mb-4"
             />

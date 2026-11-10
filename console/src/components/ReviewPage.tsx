@@ -22,7 +22,8 @@ import {
   type ReviewApi,
   type ReviewSiteOption,
 } from '../services/reviewApi.js';
-import type { AuthenticatedSession } from '../types/auth.js';
+import { resolveConsoleError, type ConsoleOperationKind } from '../services/errorMapping.js';
+import type { AuthenticatedSession, TenantStatus } from '../types/auth.js';
 import type {
   CacheRefreshState,
   InvalidationOutcome,
@@ -33,6 +34,7 @@ import type {
 import { EmptyState, ErrorAlert } from './ConsoleFeedback.js';
 
 interface ReviewPageProps {
+  onTenantStatusDetected?: (status: TenantStatus) => void;
   session: AuthenticatedSession;
   api?: ReviewApi;
   isDemoMode?: boolean;
@@ -91,6 +93,7 @@ interface ItemCacheRefreshStatus {
 }
 
 export const ReviewPage: React.FC<ReviewPageProps> = ({
+  onTenantStatusDetected,
   session,
   api: injectedApi,
   isDemoMode,
@@ -99,15 +102,17 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
   const demoMode = isDemoMode ?? IS_DEMO_AUTH_MODE;
   const { api, mock } = useMemo(
     () => reviewApiFor(session, demoMode, injectedApi),
-    [session, demoMode, injectedApi],
+    [session.idToken, demoMode, injectedApi],
   );
   const hasReviewRole = session.role === 'TENANT_ADMIN' || session.role === 'REVIEWER';
-  const tenantLocked = !canConsoleRequest({
+  const canWriteByTenant = canConsoleRequest({
     method: 'PUT',
     path: '/console/translations',
-    tenantStatus: session.tenantStatus ?? 'ACTIVE',
+    tenantStatus: session.tenantStatus,
   });
-  const canEdit = hasReviewRole && !tenantLocked;
+  const tenantLocked = session.tenantStatus === 'LOCKED';
+  const tenantStatusUnknown = session.tenantStatus === 'UNKNOWN';
+  const canEdit = hasReviewRole && canWriteByTenant;
 
   const [sites, setSites] = useState<ReviewSiteOption[]>(() =>
     demoMode ? [...DEMO_REVIEW_SITES] : [],
@@ -163,11 +168,15 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
   const loadSeqRef = React.useRef<number>(0);
   const selectedHashRef = React.useRef<string | null>(null);
   selectedHashRef.current = selectedHash;
+  const tenantStatusRef = React.useRef(session.tenantStatus);
+  tenantStatusRef.current = session.tenantStatus;
   const [draftText, setDraftText] = useState<string>('');
   const [submitting, setSubmitting] = useState<boolean>(false);
 
   const [listError, setListError] = useState<unknown | null>(null);
   const [actionError, setActionError] = useState<unknown | null>(null);
+  const [actionErrorOperation, setActionErrorOperation] = useState<ConsoleOperationKind>('write');
+  const [retryInvalidationTarget, setRetryInvalidationTarget] = useState<ReviewSentenceItem | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [conflictLatest, setConflictLatest] = useState<ReviewSentenceItem | null>(null);
   const [cacheStatusByHash, setCacheStatusByHash] = useState<Record<string, ItemCacheRefreshStatus>>({});
@@ -208,6 +217,8 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     setLoadMoreError(null);
     setListError(null);
     setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     try {
       const res = await api.listTranslations({
         slug: demoMode ? currentSite?.slug || undefined : undefined,
@@ -219,6 +230,11 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
         ...(pageSize ? { limit: pageSize } : {}),
       });
       if (loadSeqRef.current !== seq) return;
+      if (res.tenantLocked === true) {
+        onTenantStatusDetected?.('LOCKED');
+      } else if (res.tenantLocked === false && tenantStatusRef.current === 'LOCKED') {
+        onTenantStatusDetected?.('ACTIVE');
+      }
       setItems(res.items);
       setTabCursors(extractResponseTabCursors(res, labelFilter));
       if (res.items.length > 0) {
@@ -240,6 +256,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       setItems([]);
       setSelectedHash(null);
       setDraftText('');
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setListError(err);
     } finally {
       if (loadSeqRef.current === seq) {
@@ -268,6 +287,11 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
         ...(pageSize ? { limit: pageSize } : {}),
       });
       if (loadSeqRef.current !== seq) return;
+      if (res.tenantLocked === true) {
+        onTenantStatusDetected?.('LOCKED');
+      } else if (res.tenantLocked === false && tenantStatusRef.current === 'LOCKED') {
+        onTenantStatusDetected?.('ACTIVE');
+      }
       setItems((prev) => mergeReviewItems(prev, res.items));
       setTabCursors(extractResponseTabCursors(res, labelFilter));
       if (!selectedHashRef.current && res.items.length > 0) {
@@ -278,6 +302,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       }
     } catch (err) {
       if (loadSeqRef.current !== seq) return;
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setLoadMoreError(err);
     } finally {
       if (loadSeqRef.current === seq) {
@@ -322,6 +349,8 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     setSelectedHash(item.hash);
     setDraftText(item.tgtText);
     setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     setSuccessMessage(null);
     setConflictLatest(null);
   };
@@ -462,6 +491,8 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     if (invIds.length === 0) return;
 
     setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     setCacheStatusByHash((prev) => ({
       ...prev,
       [item.hash]: { state: 'IN_PROGRESS', outcome },
@@ -516,6 +547,8 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     if (!selectedItem || !canEdit) return;
     setSubmitting(true);
     setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     setSuccessMessage(null);
     try {
       const res = await api.acceptTranslation({
@@ -530,6 +563,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       if (err instanceof ReviewApiError && err.code === 'VERSION_CONFLICT' && err.latest) {
         setConflictLatest(err.latest);
       }
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setActionError(err);
     } finally {
       setSubmitting(false);
@@ -540,6 +576,8 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     if (!selectedItem || !canEdit) return;
     setSubmitting(true);
     setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     setSuccessMessage(null);
     try {
       const res = await api.saveAndPublishTranslation({
@@ -572,6 +610,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       if (err instanceof ReviewApiError && err.code === 'VERSION_CONFLICT' && err.latest) {
         setConflictLatest(err.latest);
       }
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setActionError(err);
     } finally {
       setSubmitting(false);
@@ -582,6 +623,8 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     if (!selectedItem || !canEdit) return;
     setSubmitting(true);
     setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     setSuccessMessage(null);
     try {
       const res = await api.restoreMachineTranslation({
@@ -597,6 +640,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       if (err instanceof ReviewApiError && err.code === 'VERSION_CONFLICT' && err.latest) {
         setConflictLatest(err.latest);
       }
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setActionError(err);
     } finally {
       setSubmitting(false);
@@ -607,7 +653,11 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     if (!canEdit) return;
     setSubmitting(true);
     setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     try {
+      setActionErrorOperation('idempotent');
+      setRetryInvalidationTarget(item);
       const outcome = await api.retryInvalidation({
         srcLang: item.srcLang,
         tgtLang: item.tgtLang,
@@ -620,6 +670,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
         setActionError(new ReviewApiError('CACHE_INVALIDATION_FAILED', outcome.error ?? ''));
       }
     } catch (err) {
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
       setActionError(err);
     } finally {
       setSubmitting(false);
@@ -735,10 +788,18 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {!canEdit && (
-            <span className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
+            <span
+              className={
+                tenantStatusUnknown && hasReviewRole && !tenantLocked
+                  ? 'px-3 py-1.5 rounded-lg bg-slate-100 border border-slate-300 text-slate-700 text-xs font-medium'
+                  : 'px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium'
+              }
+            >
               {tenantLocked
                 ? 'Tổ chức đang bị tạm khóa – chỉ xem'
-                : `Chế độ chỉ xem (${ROLE_DISPLAY_LABEL[session.role]})`}
+                : tenantStatusUnknown && hasReviewRole
+                  ? 'Chưa xác minh trạng thái tổ chức – tạm khóa thao tác ghi'
+                  : `Chế độ chỉ xem (${ROLE_DISPLAY_LABEL[session.role]})`}
             </span>
           )}
           <div className="flex items-center gap-2 text-xs text-gray-600 bg-white px-3 py-2 rounded-lg border border-gray-200">
@@ -774,6 +835,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
           error={listError}
           scope="review"
           formatMessage={reviewErrorMessage}
+          operation="read"
           onRetry={() => void loadItems()}
         />
       )}
@@ -940,6 +1002,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
               <div className="p-4 space-y-2">
                 <ErrorAlert
                   error={listError}
+                  operation="read"
                   scope="review"
                   formatMessage={reviewErrorMessage}
                   compact
@@ -1073,6 +1136,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                 error={loadMoreError}
                 scope="review"
                 formatMessage={reviewErrorMessage}
+                operation="read"
                 onRetry={() => void loadMoreItems()}
                 compact
               />
@@ -1121,10 +1185,22 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
               {/* Thông báo lỗi hoặc thành công */}
               <ErrorAlert
                 error={actionError}
+                operation={actionErrorOperation}
+                onRetry={
+                  actionErrorOperation === 'idempotent' && retryInvalidationTarget && canEdit
+                    ? () => void handleRetryInvalidation(retryInvalidationTarget)
+                    : undefined
+                }
+                onCheckStatus={() => void loadItems()}
+                checkStatusLabel="Tải lại danh sách bản dịch"
                 title="Không thể thực hiện thao tác"
                 scope="review"
                 formatMessage={reviewErrorMessage}
-                onDismiss={() => setActionError(null)}
+                onDismiss={() => {
+                  setActionError(null);
+                  setActionErrorOperation('write');
+                  setRetryInvalidationTarget(null);
+                }}
                 compact
               />
 
@@ -1168,6 +1244,8 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                       onClick={() => {
                         updateItemInState(conflictLatest);
                         setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
                         setSuccessMessage(`Đã nạp bản mới nhất (v${conflictLatest.version}).`);
                       }}
                       className="px-3 py-1.5 rounded-lg bg-white border border-gray-300 text-gray-800 font-medium hover:bg-gray-50"
@@ -1261,6 +1339,8 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                   onChange={(e) => {
                     setDraftText(e.target.value);
                     setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
                   }}
                   className={`w-full rounded-lg border p-3 text-sm leading-relaxed focus:outline-none focus:ring-2 disabled:bg-gray-100 disabled:text-gray-600 ${
                     !placeholderCheck.ok

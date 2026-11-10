@@ -11,7 +11,9 @@
 import {
   extractApiErrorPayload,
   formatPlaceholderMismatchMessage,
+  mapErrorCodeToVietnamese,
   resolveConsoleError,
+  type ResolveConsoleErrorOptions,
   type KnownConsoleErrorCode,
 } from './errorMapping.js';
 import type {
@@ -172,17 +174,18 @@ const REVIEW_ERROR_OVERRIDES: Partial<Record<KnownConsoleErrorCode, string>> = O
     'Tổ chức đang bị tạm khóa (chế độ chỉ xem); không thể lưu hoặc duyệt bản dịch.',
   UNAUTHORIZED: 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.',
   NOT_FOUND: 'Không tìm thấy bản dịch trong bộ nhớ dịch của tổ chức.',
-  NETWORK_ERROR: 'Không kết nối được tới máy chủ, vui lòng kiểm tra mạng và thử lại.',
+  // NETWORK_ERROR và INTERNAL_ERROR được xử lý theo loại thao tác trong errorMapping.ts
 });
 
 /** Thông báo tiếng Việt cho các mã lỗi của nhóm F5 (Bảng 2.10) */
-export function reviewErrorMessage(err: unknown): string {
+export function reviewErrorMessage(err: unknown, opts: ResolveConsoleErrorOptions = {}): string {
   if (!(err instanceof ReviewApiError)) {
-    return 'Có lỗi tạm thời khi xử lý bản dịch, vui lòng thử lại.';
+    return mapErrorCodeToVietnamese('INTERNAL_ERROR', opts);
   }
   return resolveConsoleError(err, {
+    ...opts,
     scope: 'review',
-    overrides: REVIEW_ERROR_OVERRIDES,
+    overrides: { ...REVIEW_ERROR_OVERRIDES, ...opts.overrides },
   }).message;
 }
 
@@ -616,14 +619,22 @@ export function createHttpReviewApi(opts: HttpReviewApiOptions): ReviewApi {
           const itemsRaw = Array.isArray(data.items) ? (data.items as Json[]) : [];
           const mapped = itemsRaw.map(reviewItemFromJson).filter((it) => Boolean(it.hash));
           const nextCur = str(data.next_cursor ?? data.nextCursor).trim();
-          return { tab, mapped, nextCur };
+          const rawLocked = data.tenantLocked ?? data.tenant_locked;
+          const tenantLocked = typeof rawLocked === 'boolean' ? rawLocked : undefined;
+          return { tab, mapped, nextCur, tenantLocked };
         }),
       );
 
       const byHash = new Map<string, ReviewSentenceItem>();
       const nextTabCursors: ReviewTabCursors = {};
+      let detectedTenantLocked: boolean | undefined;
 
-      for (const { tab, mapped, nextCur } of pageResults) {
+      for (const { tab, mapped, nextCur, tenantLocked } of pageResults) {
+        if (tenantLocked === true) {
+          detectedTenantLocked = true;
+        } else if (tenantLocked === false && detectedTenantLocked === undefined) {
+          detectedTenantLocked = false;
+        }
         for (const item of mapped) {
           if (!byHash.has(item.hash)) {
             byHash.set(item.hash, item);
@@ -649,6 +660,7 @@ export function createHttpReviewApi(opts: HttpReviewApiOptions): ReviewApi {
       return {
         items,
         ...(singleNextCursor ? { nextCursor: singleNextCursor } : {}),
+        ...(detectedTenantLocked !== undefined ? { tenantLocked: detectedTenantLocked } : {}),
         nextTabCursors,
         hasMore,
       };

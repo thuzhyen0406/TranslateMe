@@ -2,6 +2,8 @@ import React from 'react';
 import {
   errorToUiPayload,
   type ConsoleErrorScope,
+  type ConsoleOperationKind,
+  type ResolveConsoleErrorOptions,
 } from '../services/errorMapping.js';
 
 export interface ErrorAlertProps {
@@ -11,11 +13,19 @@ export interface ErrorAlertProps {
   title?: string;
   /** Ngữ cảnh màn hình để ánh xạ câu chữ phù hợp khi chưa truyền formatMessage */
   scope?: ConsoleErrorScope;
+  /**
+   * Loại thao tác ('read' | 'idempotent' | 'write') quyết định lời khuyên khi gặp lỗi 5xx/mạng:
+   * chỉ khuyên thử lại an toàn cho 'read'/'idempotent'; với 'write' (hoặc bỏ trống) sẽ nhắc kiểm tra trạng thái.
+   */
+  operation?: ConsoleOperationKind;
   /** Hàm chuyển thông báo tiếng Việt chuyên biệt của từng màn (websiteErrorMessage, glossaryErrorMessage...) */
-  formatMessage?: (err: unknown) => string;
-  /** Nút thử lại (tự động nổi bật nếu lỗi có thể thử lại) */
+  formatMessage?: (err: unknown, resolveOpts?: ResolveConsoleErrorOptions) => string;
+  /** Nút thử lại (chỉ hiển thị gợi ý thử lại an toàn khi `payload.retryable = true`) */
   onRetry?: () => void;
   retryLabel?: string;
+  /** Nút tải lại / kiểm tra trạng thái hiện tại khi lỗi 5xx hoặc lỗi mạng ở thao tác ghi */
+  onCheckStatus?: () => void;
+  checkStatusLabel?: string;
   onDismiss?: () => void;
   compact?: boolean;
   className?: string;
@@ -26,24 +36,36 @@ export interface ErrorAlertProps {
  * Hộp thông báo lỗi thống nhất toàn Web Console (Hạng mục 5.8 / QC-2):
  *  - Giữ nguyên mã lỗi gốc (`code`, không dịch) để dễ đối chiếu Bảng 2.10;
  *  - Hiển thị nội dung thông báo tiếng Việt rõ ràng, an toàn, không lộ dữ liệu tenant khác;
- *  - Hiển thị `request_id` (nếu API trả về) và gợi ý / nút Thử lại khi lỗi thuộc nhóm 429/5xx/NETWORK_ERROR.
+ *  - Hiển thị `request_id` (nếu API trả về), chỉ khuyên "thử lại an toàn" khi lỗi có thể thử lại an toàn,
+ *    và nhắc kiểm tra trạng thái hiện tại nếu lỗi 5xx/mạng xảy ra trên thao tác ghi không chống lặp.
  */
 export const ErrorAlert: React.FC<ErrorAlertProps> = ({
   error,
   title,
   scope = 'generic',
+  operation,
   formatMessage,
   onRetry,
   retryLabel = 'Thử lại',
+  onCheckStatus,
+  checkStatusLabel = 'Kiểm tra trạng thái',
   onDismiss,
   compact = false,
   className = '',
   children,
 }) => {
-  const payload = errorToUiPayload(error, { scope, formatMessage });
+  const payload = errorToUiPayload(error, { scope, operation, formatMessage });
   if (!payload) return null;
 
   const hasHeader = Boolean(title || payload.code || payload.requestId || onDismiss);
+  const canShowRetryButton = Boolean(onRetry && !payload.requiresStatusCheck);
+  const canShowCheckStatusButton = Boolean(onCheckStatus && payload.requiresStatusCheck);
+  const showFooter = Boolean(
+    canShowRetryButton ||
+      canShowCheckStatusButton ||
+      payload.retryable ||
+      payload.requiresStatusCheck,
+  );
 
   return (
     <div
@@ -87,9 +109,9 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
         {payload.message}
       </p>
 
-      {(onRetry || payload.retryable) && (
+      {showFooter && (
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          {onRetry && (
+          {canShowRetryButton && onRetry && (
             <button
               type="button"
               onClick={onRetry}
@@ -98,9 +120,23 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
               {retryLabel}
             </button>
           )}
+          {canShowCheckStatusButton && onCheckStatus && (
+            <button
+              type="button"
+              onClick={onCheckStatus}
+              className="px-3 py-1 rounded-lg border border-red-300 bg-white hover:bg-red-100/60 text-xs font-semibold text-red-800 transition-colors"
+            >
+              {checkStatusLabel}
+            </button>
+          )}
           {payload.retryable && (
             <span className="text-[11px] text-red-700">
               Đây là lỗi tạm thời, bạn có thể thử lại an toàn.
+            </span>
+          )}
+          {payload.requiresStatusCheck && (
+            <span className="text-[11px] text-red-700">
+              Lỗi xảy ra sau khi gửi yêu cầu; máy chủ có thể đã xử lý. Vui lòng kiểm tra lại trạng thái trước khi gửi lại để tránh lặp tác động.
             </span>
           )}
         </div>

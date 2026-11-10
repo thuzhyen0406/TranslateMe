@@ -114,16 +114,50 @@ describe('Task 5.8 – Ánh xạ mã lỗi chuẩn Bảng 2.10 & nguyên tắc Q
     assert.match(phUi.message, /thừa ký hiệu: \{9\}/);
   });
 
-  it('phân loại đúng lỗi tạm thời có thể thử lại (429 RATE_LIMITED, 5xx INTERNAL_ERROR, NETWORK_ERROR)', () => {
-    for (const code of [
-      'INTERNAL_ERROR',
-      'RATE_LIMITED',
-      'CACHE_INVALIDATION_FAILED',
-      'NETWORK_ERROR',
-    ]) {
-      const resolved = resolveConsoleError({ code, message: 'Temporary failure' });
-      assert.equal(resolved.retryable, true, `${code} phải cho phép thử lại`);
+  it('phân loại đúng lỗi tạm thời có thể thử lại (RATE_LIMITED, CACHE_INVALIDATION_FAILED luôn retryable; 5xx/NETWORK_ERROR chỉ an toàn ở read/idempotent)', () => {
+    for (const code of ['RATE_LIMITED', 'CACHE_INVALIDATION_FAILED']) {
+      for (const operation of [undefined, 'read', 'idempotent', 'write'] as const) {
+        const resolved = resolveConsoleError({ code, message: 'Temporary failure' }, { operation });
+        assert.equal(resolved.retryable, true, `${code} (${operation ?? 'default'}) phải cho phép thử lại`);
+        assert.equal(resolved.requiresStatusCheck, undefined);
+      }
     }
+
+    for (const code of ['INTERNAL_ERROR', 'NETWORK_ERROR']) {
+      for (const operation of ['read', 'idempotent'] as const) {
+        const safe = resolveConsoleError({ code, message: 'Temporary failure' }, { operation });
+        assert.equal(safe.retryable, true, `${code} (${operation}) phải an toàn để thử lại`);
+        assert.equal(safe.requiresStatusCheck, undefined);
+        assert.equal(/kiểm tra trạng thái/i.test(safe.message), false);
+      }
+
+      for (const operation of ['write', undefined] as const) {
+        const unsafe = resolveConsoleError({ code, message: 'Temporary failure' }, { operation });
+        assert.equal(
+          unsafe.retryable,
+          false,
+          `${code} (${operation ?? 'default'}) không được đánh dấu thử lại an toàn`,
+        );
+        assert.equal(unsafe.requiresStatusCheck, true);
+        assert.match(unsafe.message, /kiểm tra.*trạng thái hiện tại trước khi gửi lại/i);
+      }
+    }
+
+    const uncoded502Read = resolveConsoleError(
+      { httpStatus: 502, message: 'Bad Gateway' },
+      { operation: 'read' },
+    );
+    assert.equal(uncoded502Read.code, 'INTERNAL_ERROR');
+    assert.equal(uncoded502Read.retryable, true);
+    assert.equal(uncoded502Read.requiresStatusCheck, undefined);
+
+    const uncoded502Write = resolveConsoleError(
+      { httpStatus: 502, message: 'Bad Gateway' },
+      { operation: 'write' },
+    );
+    assert.equal(uncoded502Write.code, 'INTERNAL_ERROR');
+    assert.equal(uncoded502Write.retryable, false);
+    assert.equal(uncoded502Write.requiresStatusCheck, true);
 
     for (const code of [
       'REQUEST_QUOTA_EXCEEDED',
@@ -140,14 +174,40 @@ describe('Task 5.8 – Ánh xạ mã lỗi chuẩn Bảng 2.10 & nguyên tắc Q
       assert.equal(resolved.retryable, false, `${code} không tự động đánh dấu lỗi tạm thời`);
     }
 
-    const fetchErr = resolveConsoleError(new TypeError('Failed to fetch'));
-    assert.equal(fetchErr.code, 'NETWORK_ERROR');
-    assert.equal(fetchErr.retryable, true);
-    assert.match(fetchErr.message, /kết nối/i);
+    const fetchErrRead = resolveConsoleError(new TypeError('Failed to fetch'), { operation: 'read' });
+    assert.equal(fetchErrRead.code, 'NETWORK_ERROR');
+    assert.equal(fetchErrRead.retryable, true);
+    assert.equal(fetchErrRead.requiresStatusCheck, undefined);
+    assert.match(fetchErrRead.message, /kết nối/i);
+
+    const fetchErrWrite = resolveConsoleError(new TypeError('Failed to fetch'), { operation: 'write' });
+    assert.equal(fetchErrWrite.code, 'NETWORK_ERROR');
+    assert.equal(fetchErrWrite.retryable, false);
+    assert.equal(fetchErrWrite.requiresStatusCheck, true);
+    assert.match(fetchErrWrite.message, /kiểm tra.*trạng thái hiện tại/i);
 
     const runtimeErr = resolveConsoleError(new Error('Something crashed'));
     assert.equal(runtimeErr.code, undefined);
     assert.equal(runtimeErr.retryable, false);
+
+    // Các hàm formatMessage theo màn phải truyền operation xuống errorMapping
+    for (const formatFn of [
+      websiteErrorMessage,
+      glossaryErrorMessage,
+      reviewErrorMessage,
+      mapCognitoErrorToVietnamese,
+    ]) {
+      const readMsg = formatFn({ code: 'INTERNAL_ERROR', httpStatus: 500 }, { operation: 'read' });
+      const writeMsg = formatFn({ code: 'INTERNAL_ERROR', httpStatus: 500 }, { operation: 'write' });
+      assert.match(readMsg, /an toàn để thử lại/i);
+      assert.match(writeMsg, /kiểm tra trạng thái hiện tại trước khi gửi lại/i);
+
+      const netReadMsg = formatFn({ code: 'NETWORK_ERROR' }, { operation: 'idempotent' });
+      const netWriteMsg = formatFn({ code: 'NETWORK_ERROR' }, { operation: 'write' });
+      assert.match(netReadMsg, /thử lại/i);
+      assert.equal(/kiểm tra.*trạng thái hiện tại/i.test(netReadMsg), false);
+      assert.match(netWriteMsg, /trạng thái hiện tại trước khi gửi lại/i);
+    }
   });
 
   it('bảo vệ riêng tư QC-2: NOT_FOUND khác tenant trả thông báo đồng nhất, tuyệt đối không lộ khóa nội bộ hoặc stack trace', () => {
@@ -308,13 +368,27 @@ describe('Task 5.8 – Ánh xạ mã lỗi chuẩn Bảng 2.10 & nguyên tắc Q
     await assert.rejects(
       rErr500.listTranslations({ srcLang: 'vi', tgtLang: 'en' }),
       (err: unknown) => {
-        const ui = errorToUiPayload(err, { scope: 'review', formatMessage: reviewErrorMessage });
+        const readUi = errorToUiPayload(err, {
+          scope: 'review',
+          operation: 'read',
+          formatMessage: reviewErrorMessage,
+        });
+        const writeUi = errorToUiPayload(err, {
+          scope: 'review',
+          operation: 'write',
+          formatMessage: reviewErrorMessage,
+        });
         return Boolean(
-          ui &&
-            ui.code === 'INTERNAL_ERROR' &&
-            ui.requestId === 'req-r-500' &&
-            ui.retryable === true &&
-            !ui.message.includes('DynamoDB'),
+          readUi &&
+            readUi.code === 'INTERNAL_ERROR' &&
+            readUi.requestId === 'req-r-500' &&
+            readUi.retryable === true &&
+            readUi.requiresStatusCheck === undefined &&
+            !readUi.message.includes('DynamoDB') &&
+            writeUi &&
+            writeUi.retryable === false &&
+            writeUi.requiresStatusCheck === true &&
+            /kiểm tra trạng thái/i.test(writeUi.message),
         );
       },
     );

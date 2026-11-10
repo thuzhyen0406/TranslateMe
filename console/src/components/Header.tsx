@@ -8,6 +8,7 @@ interface HeaderProps {
   onSelectAuthMode: (mode: AuthScreenMode) => void;
   onSignOut: () => void;
   onSwitchRoleDemo?: (role: ConsoleRole) => void;
+  onSwitchTenantStatusDemo?: (status: 'ACTIVE' | 'LOCKED') => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -16,6 +17,7 @@ export const Header: React.FC<HeaderProps> = ({
   onSelectAuthMode,
   onSignOut,
   onSwitchRoleDemo,
+  onSwitchTenantStatusDemo,
 }) => {
   return (
     <header className="h-16 bg-white border-b border-gray-200 px-6 lg:px-10 flex items-center justify-between sticky top-0 z-30">
@@ -72,6 +74,28 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
 
+          {IS_DEMO_AUTH_MODE && onSwitchTenantStatusDemo && (
+            <div className="hidden lg:flex items-center gap-1 text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-md">
+              <span>Trạng thái:</span>
+              {(['ACTIVE', 'LOCKED'] as const).map((st) => (
+                <button
+                  key={st}
+                  type="button"
+                  onClick={() => onSwitchTenantStatusDemo(st)}
+                  className={`px-2 py-0.5 rounded font-medium transition-colors ${
+                    session.tenantStatus === st
+                      ? st === 'LOCKED'
+                        ? 'bg-amber-600 text-white'
+                        : 'bg-[#146c54] text-white'
+                      : 'text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {st === 'ACTIVE' ? 'Hoạt động' : 'Tạm khóa'}
+                </button>
+              ))}
+            </div>
+          )}
+
           <span className="hidden sm:inline text-gray-600 font-normal truncate max-w-[220px]" title={session.email}>
             {session.email}
           </span>
@@ -81,6 +105,11 @@ export const Header: React.FC<HeaderProps> = ({
           {session.tenantStatus === 'LOCKED' && (
             <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-200">
               Tổ chức tạm khóa
+            </span>
+          )}
+          {session.tenantStatus === 'UNKNOWN' && (
+            <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-300">
+              Chưa rõ trạng thái tổ chức
             </span>
           )}
           <button

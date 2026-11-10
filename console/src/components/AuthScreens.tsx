@@ -396,6 +396,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
           <ErrorAlert
             error={rawError}
             scope="auth"
+            operation="write"
             formatMessage={mapCognitoErrorToVietnamese}
             compact
             className="mb-5"

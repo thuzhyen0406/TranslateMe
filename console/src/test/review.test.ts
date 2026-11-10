@@ -456,6 +456,53 @@ describe('createHttpReviewApi – kết nối trực tiếp với route và sche
   });
 });
 
+  it('createHttpReviewApi.listTranslations đọc đúng tenantLocked từ cả tenantLocked và tenant_locked', async () => {
+    const camelApi = createHttpReviewApi({
+      baseUrl: 'https://api.translateme.example',
+      getToken: () => 'jwt',
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({ items: [], tenantLocked: true }),
+          { status: 200 },
+        ),
+    });
+    const camelRes = await camelApi.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'MACHINE',
+    });
+    assert.equal(camelRes.tenantLocked, true);
+
+    const snakeApi = createHttpReviewApi({
+      baseUrl: 'https://api.translateme.example',
+      getToken: () => 'jwt',
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({ items: [], tenant_locked: false }),
+          { status: 200 },
+        ),
+    });
+    const snakeRes = await snakeApi.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'ALL',
+    });
+    assert.equal(snakeRes.tenantLocked, false);
+
+    const omittedApi = createHttpReviewApi({
+      baseUrl: 'https://api.translateme.example',
+      getToken: () => 'jwt',
+      fetchFn: async () =>
+        new Response(JSON.stringify({ items: [] }), { status: 200 }),
+    });
+    const omittedRes = await omittedApi.listTranslations({
+      srcLang: 'vi',
+      tgtLang: 'en',
+      labelFilter: 'HUMAN',
+    });
+    assert.equal(omittedRes.tenantLocked, undefined);
+  });
+
 describe('createMockReviewApi – toàn bộ luồng duyệt Q4 trong chế độ demo', () => {
   it('lọc câu theo trang, theo nhãn (Máy dịch, Đã duyệt, Cần xem lại, Không còn sử dụng) và từ khóa', async () => {
     const api = createMockReviewApi();
