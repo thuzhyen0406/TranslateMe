@@ -44,7 +44,8 @@ invocation permissions remain in `api-gateway.yaml`.
 - The actual tenant ID format is `t_` followed by the generated identifier.
   Session tags bind each target role's maximum policy to the assumed tenant;
   tenant session policies further restrict `dynamodb:LeadingKeys`. Only the
-  website creation client adds the platform slug reservation partition.
+  website creation client adds the exact platform slug key for its transaction;
+  the role's maximum policy still limits that access to the slug prefix.
   Execution roles have no direct tenant-partition data permissions.
   Data-layer validation remains defense in depth and must not be removed.
 - Tenant isolation currently relies on the application creating each STS

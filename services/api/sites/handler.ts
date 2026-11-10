@@ -26,6 +26,7 @@ export interface WebsiteHandlerDependencies {
   pause: typeof pauseSite;
   resume: typeof resumeSite;
   verify: typeof verifySite;
+  update: typeof updateSite;
 }
 
 const defaultDependencies: WebsiteHandlerDependencies = {
@@ -36,6 +37,7 @@ const defaultDependencies: WebsiteHandlerDependencies = {
   pause: pauseSite,
   resume: resumeSite,
   verify: verifySite,
+  update: updateSite,
 };
 
 export function createWebsiteHandler(dependencies: WebsiteHandlerDependencies = defaultDependencies) {
@@ -86,7 +88,7 @@ return async function handler(event: WebsiteEvent) {
 
     let result: unknown;
     if ((path === '/console/websites' || path === '/console/hosts') && method === 'GET') {
-      const sites = await db.listTenantSites(ctx);
+      const sites = await dependencies.listTenantSites(ctx);
       result = { websites: sites, hosts: sites };
     } else if ((path === '/console/websites' || path === '/console/hosts') && method === 'POST') {
       if (
@@ -99,24 +101,27 @@ return async function handler(event: WebsiteEvent) {
       ) {
         throw new AppError('INVALID_REQUEST', 'Thiếu hoặc sai kiểu thông tin website');
       }
-      result = await createSite(ctx, body as never);
+      result = await dependencies.create(ctx, body as never);
       result = { ...(result as Record<string, unknown>), host: result };
     } else if (!slug) {
       throw new AppError('NOT_FOUND', 'Không tìm thấy website');
     } else if (path.endsWith('/verify') && method === 'POST') {
       if (body.method !== 'META' && body.method !== 'FILE') throw new AppError('INVALID_REQUEST', 'method phải là META hoặc FILE');
-      result = await verifySite(ctx, slug, body.method);
+      await dependencies.verify(ctx, slug, body.method);
+      const site = await dependencies.getHost(ctx, slug);
+      if (!site) throw new AppError('NOT_FOUND', 'Không tìm thấy website');
+      result = { host: site };
     } else if (path.endsWith('/pause') && method === 'PATCH') {
-      result = await pauseSite(ctx, slug);
+      result = await dependencies.pause(ctx, slug);
     } else if (path.endsWith('/resume') && method === 'PATCH') {
-      result = await resumeSite(ctx, slug);
+      result = await dependencies.resume(ctx, slug);
     } else if (isExactHostPath && method === 'PATCH') {
       // Yêu cầu [P1]: Giữ hợp đồng PATCH /console/hosts/{slug} (Cập nhật status, targetLangs, CSS selectors, cache TTL)
-      result = await updateSite(ctx, slug, body);
+      result = await dependencies.update(ctx, slug, body);
       result = { ...(result as Record<string, unknown>), host: result };
     } else if (isExactHostPath && method === 'GET') {
       // Yêu cầu [P2]: Chỉ trả detail khi path khớp chính xác /console/hosts/{slug}
-      const site = await db.get(ctx, keys.host(ctx, slug));
+      const site = await dependencies.getHost(ctx, slug);
       if (!site) throw new AppError('NOT_FOUND', 'Không tìm thấy website');
       result = { website: site, host: site };
     } else {

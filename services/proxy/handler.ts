@@ -604,6 +604,8 @@ function sharedFromEnv(
       env.TENANT_PAYLOAD_BUCKET_ARN ?? '',
       'worker',
       'proxy-payload',
+      undefined,
+      env.DATA_KMS_KEY_ARN,
     ), env.DATA_KMS_KEY_ARN) : undefined,
     quota: quotaStub((e) => logger.info(e)),
     concurrency: positive(env.TRANSLATE_CONCURRENCY, DEFAULT_CONCURRENCY),

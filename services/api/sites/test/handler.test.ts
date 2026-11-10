@@ -18,6 +18,7 @@ function setup(overrides: Partial<WebsiteHandlerDependencies> = {}) {
     pause: async () => ({ status: 'PAUSED' }) as never,
     resume: async () => ({ status: 'ACTIVE' }) as never,
     verify: async () => ({ status: 'ACTIVE' as const }),
+    update: async () => ({ slug: 'example', status: 'ACTIVE' }) as never,
     ...overrides,
   };
   return { handler: createWebsiteHandler(dependencies), getCreateInput: () => createInput };

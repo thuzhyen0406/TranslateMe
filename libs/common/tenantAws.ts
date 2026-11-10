@@ -26,10 +26,10 @@ function tenantFromPartitionKey(value: unknown): string | undefined {
   return /^t_[A-Za-z0-9_-]{1,64}$/.test(id) ? id : undefined;
 }
 
-function collectPartitionKeys(value: unknown, keys: Set<string>): void {
+function collectPartitionKeys(value: unknown, keys: Set<string>, platformSlugKeys: Set<string>): void {
   if (!value || typeof value !== 'object') return;
   if (Array.isArray(value)) {
-    for (const item of value) collectPartitionKeys(item, keys);
+    for (const item of value) collectPartitionKeys(item, keys, platformSlugKeys);
     return;
   }
   for (const [name, child] of Object.entries(value as Record<string, unknown>)) {
@@ -39,8 +39,11 @@ function collectPartitionKeys(value: unknown, keys: Set<string>): void {
         : child;
       const tenant = tenantFromPartitionKey(partitionKey);
       if (tenant) keys.add(tenant);
+      if (typeof partitionKey === 'string' && /^TENANT#PLATFORM#SLUG#[a-z0-9-]{1,253}$/.test(partitionKey)) {
+        platformSlugKeys.add(partitionKey);
+      }
     }
-    collectPartitionKeys(child, keys);
+    collectPartitionKeys(child, keys, platformSlugKeys);
   }
 }
 
@@ -54,11 +57,18 @@ export function tenantSessionPolicy(
     dataKmsKeyArn?: string;
     dataTableName?: string;
     allowPlatformSlugReservation?: boolean;
+    platformSlugReservationKey?: string;
   } = {},
 ): string {
   if (!/^t_[A-Za-z0-9_-]{1,64}$/.test(tenantId)) throw new TypeError('Invalid tenant ID');
   const leadingKeys = [`TENANT#${tenantId}`, `TENANT#${tenantId}#*`];
-  if (buckets.allowPlatformSlugReservation) leadingKeys.push('TENANT#PLATFORM#SLUG#*');
+  if (buckets.allowPlatformSlugReservation) {
+    if (!buckets.platformSlugReservationKey) throw new TypeError('Platform slug reservation key is required');
+    if (!/^TENANT#PLATFORM#SLUG#[a-z0-9-]{1,253}$/.test(buckets.platformSlugReservationKey)) {
+      throw new TypeError('Invalid platform slug reservation key');
+    }
+    leadingKeys.push(buckets.platformSlugReservationKey);
+  }
   const statements: Array<Record<string, unknown>> = [{
     Effect: 'Allow',
     Action: [
@@ -73,22 +83,6 @@ export function tenantSessionPolicy(
       },
     },
   }];
-  if (buckets.allowPlatformSlugReservation) {
-    statements.push({
-      Effect: 'Allow',
-      Action: ['dynamodb:PutItem', 'dynamodb:ConditionCheckItem', 'dynamodb:TransactWriteItems'],
-      Resource: '*',
-      Condition: {
-        'ForAllValues:StringLike': {
-          'dynamodb:LeadingKeys': [
-            `TENANT#${tenantId}`,
-            `TENANT#${tenantId}#*`,
-            'TENANT#PLATFORM#SLUG#*',
-          ],
-        },
-      },
-    });
-  }
   if (buckets.dataKmsKeyArn && buckets.dataTableName) {
     statements.push({
       Effect: 'Allow',
@@ -104,6 +98,19 @@ export function tenantSessionPolicy(
   }
   if (buckets.payloadBucketArn) {
     statements.push({ Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject'], Resource: `${buckets.payloadBucketArn}/tenant/${tenantId}/worker/*` });
+    if (buckets.payloadBucketKmsKeyArn) {
+      statements.push({
+        Effect: 'Allow',
+        Action: ['kms:Decrypt', 'kms:GenerateDataKey'],
+        Resource: buckets.payloadBucketKmsKeyArn,
+        Condition: {
+          StringEquals: {
+            'kms:ViaService': `s3.${process.env.AWS_REGION ?? 'ap-southeast-1'}.amazonaws.com`,
+            'kms:EncryptionContext:aws:s3:arn': buckets.payloadBucketArn,
+          },
+        },
+      });
+    }
   }
   if (buckets.batchUploadBucketArn) {
     statements.push({
@@ -135,7 +142,6 @@ function createTenantCredentialsProvider(
   roleArn: string,
   tenantId: string,
   policyOptions: TenantPolicyOptions = {},
-  allowPlatformSlugReservations = false,
   sts: Pick<STSClient, 'send'> = new STSClient({}),
   sessionName = 'tenant',
   logger: (message: Record<string, unknown>) => void = (message) => console.error(JSON.stringify(message)),
@@ -155,7 +161,6 @@ function createTenantCredentialsProvider(
             dataKmsKeyArn: policyOptions.dataKmsKeyArn ?? process.env.DATA_KMS_KEY_ARN,
             dataTableName: policyOptions.dataTableName ?? process.env.TABLE_NAME,
           },
-          allowPlatformSlugReservations,
         );
         result = await sts.send(new AssumeRoleCommand({
           RoleArn: roleArn,
@@ -216,8 +221,9 @@ export function createTenantDocumentClientRouter(
   const sts = options.sts ?? new STSClient({});
   const clients = new Map<string, Promise<SendClient>>();
 
-  const clientFor = (tenantId: string): Promise<SendClient> => {
-    let pending = clients.get(tenantId);
+  const clientFor = (tenantId: string, platformSlugReservationKey?: string): Promise<SendClient> => {
+    const clientKey = `${tenantId}:${platformSlugReservationKey ?? ''}`;
+    let pending = clients.get(clientKey);
     if (!pending) {
       pending = (async () => {
         if (!roleArn) throw new Error('TENANT_DATA_ACCESS_ROLE_ARN is required in Lambda');
@@ -226,12 +232,13 @@ export function createTenantDocumentClientRouter(
           payloadBucketKmsKeyArn: options.payloadBucketKmsKeyArn,
           batchUploadBucketArn: options.batchUploadBucketArn,
           batchUploadKmsKeyArn: options.batchUploadKmsKeyArn,
+          allowPlatformSlugReservation: Boolean(platformSlugReservationKey && options.allowPlatformSlugReservations),
+          platformSlugReservationKey,
         };
         const credentials = createTenantCredentialsProvider(
           roleArn,
           tenantId,
           policyOptions,
-          options.allowPlatformSlugReservations,
           sts,
           options.sessionName,
           options.logger,
@@ -242,8 +249,8 @@ export function createTenantDocumentClientRouter(
           { marshallOptions: { removeUndefinedValues: true } },
         );
       })();
-      clients.set(tenantId, pending);
-      pending.catch(() => clients.delete(tenantId));
+      clients.set(clientKey, pending);
+      pending.catch(() => clients.delete(clientKey));
     }
     return pending;
   };
@@ -251,12 +258,17 @@ export function createTenantDocumentClientRouter(
   return {
     async send(command: never): Promise<never> {
       const keys = new Set<string>();
-      collectPartitionKeys((command as AwsCommand).input, keys);
+      const platformSlugKeys = new Set<string>();
+      collectPartitionKeys((command as AwsCommand).input, keys, platformSlugKeys);
       if (keys.size > 1) throw new Error('DynamoDB request cannot span tenant partitions');
+      if (platformSlugKeys.size > 1) throw new Error('DynamoDB request cannot span platform slug reservations');
       const tenantId = keys.values().next().value as string | undefined;
       if (!tenantId) return base.send(command);
       if (!roleArn && localFallback) return base.send(command);
-      return (await clientFor(tenantId)).send(command);
+      const platformSlugReservationKey = options.allowPlatformSlugReservations
+        ? platformSlugKeys.values().next().value as string | undefined
+        : undefined;
+      return (await clientFor(tenantId, platformSlugReservationKey)).send(command);
     },
   } as SendClient;
 }
@@ -268,9 +280,10 @@ export function createTenantS3Client(
   prefix: 'worker' | 'batch',
   sessionName = 'tenant-s3',
   batchUploadKmsKeyArn = process.env.TENANT_BATCH_UPLOAD_KMS_KEY_ARN,
+  payloadBucketKmsKeyArn = process.env.DATA_KMS_KEY_ARN,
 ): S3Client {
-  const buckets = prefix === 'worker'
-    ? { payloadBucketArn: bucketArn, payloadBucketKmsKeyArn: kmsKeyArn }
-    : { batchUploadBucketArn: bucketArn, batchUploadKmsKeyArn: kmsKeyArn };
-  return new S3Client({ credentials: createTenantCredentialsProvider(roleArn, tenantId, buckets, false, undefined, sessionName) });
+  const options = prefix === 'worker'
+    ? { payloadBucketArn: bucketArn, payloadBucketKmsKeyArn }
+    : { batchUploadBucketArn: bucketArn, batchUploadKmsKeyArn };
+  return new S3Client({ credentials: createTenantCredentialsProvider(roleArn, tenantId, options, undefined, sessionName) });
 }
