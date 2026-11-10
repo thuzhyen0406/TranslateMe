@@ -22,7 +22,7 @@ cd ../../services/proxy && npm ci && npm test
 | Bộ nhớ | Đề xuất 1024 MB, vì phân tích HTML tới 3 MB |
 | Gói triển khai | Chạy `npm ci --omit=dev && npm run build`, rồi zip `dist/`, `node_modules/` và `package.json` (cần `"type": "module"`) |
 | Function URL | `AuthType: AWS_IAM`; chỉ CloudFront gọi được, qua OAC (SigV4) |
-| IAM | `translate:TranslateText`; `dynamodb:BatchGetItem`, `dynamodb:UpdateItem` (TM) và `dynamodb:BatchWriteItem` (SEG) trên bảng chính, giới hạn bằng điều kiện `dynamodb:LeadingKeys` theo tiền tố `TENANT#`; `lambda:InvokeFunction` trên worker; `s3:PutObject` trên `worker/*` của bucket tải trọng; quyền ghi log CloudWatch |
+| IAM | `translate:TranslateText`; đọc mapping slug/API key tối thiểu; AssumeRole cho DynamoDB theo tenant và `TenantPayloadAccessRole` cho S3; chỉ gọi đúng Worker Lambda ARN; quyền ghi log CloudWatch |
 | CloudFront | Chỉ cho GET, HEAD; khoá cache gồm đường dẫn và query; tôn trọng `Cache-Control` của origin |
 
 ### Biến môi trường
@@ -37,6 +37,10 @@ cd ../../services/proxy && npm ci && npm test
 | `TRANSLATE_CONCURRENCY` | Không | Số lời gọi TranslateText song song, mặc định 4 |
 | `WORKER_FUNCTION_NAME` | Không | Tên Lambda worker C13. Không có thì không hoàn tất nền, ghi log `WORKER_DISABLED` |
 | `WORKER_PAYLOAD_BUCKET` | Không | Bucket S3 chứa danh sách câu lớn gửi worker (khoá `worker/<tenantId>/…`). Nên đặt Lifecycle xoá sau 1 ngày |
+| `TENANT_DATA_ACCESS_ROLE_ARN` | Có khi chạy Lambda | Role AssumeRole cho thao tác DynamoDB có session policy theo tenant |
+| `TENANT_PAYLOAD_ROLE_ARN` | Có khi bật payload S3 | ARN output `TenantPayloadAccessRoleArn`; session S3 chỉ truy cập `worker/<tenantId>/*` |
+| `TENANT_PAYLOAD_BUCKET_ARN` | Có khi bật payload S3 | ARN payload bucket dùng khi tạo session policy |
+| `DATA_KMS_KEY_ARN` | Có khi bật payload S3 | ARN CMK mặc định của payload bucket; Proxy gửi rõ SSE-KMS key khi ghi object |
 | `USE_FETCH_STUB` | Không | `1` = dùng `safeFetch.stub` (trang mẫu cố định, không gọi mạng) để demo |
 
 ```json
@@ -115,7 +119,7 @@ Các hàm ReadSitemap, PrewarmPages (C13 chế độ trang), FinishPrewarm, Mark
 | Timeout | 300 giây (ngân sách nội bộ `WORKER_BUDGET_MS`, mặc định 240000) |
 | Lời gọi lại tự động | Đặt `MaximumRetryAttempts: 0` cho lời gọi bất đồng bộ, tránh dịch và tính phí trùng |
 | Biến môi trường | `TABLE_NAME` (bắt buộc), `PROXY_SITES_JSON`, `WORKER_PAYLOAD_BUCKET`, `TRANSLATE_CONCURRENCY`, `WORKER_BUDGET_MS` |
-| IAM | `translate:TranslateText`; `dynamodb:BatchGetItem`, `dynamodb:UpdateItem` (như proxy); `s3:GetObject` trên `worker/*`; ghi log |
+| IAM | `translate:TranslateText`; DynamoDB qua tenant session; đọc payload qua `TenantPayloadAccessRole`; ghi log |
 
 Worker kiểm tra lại sự kiện và tenant (B.1.1): slug thuộc đúng `tenantId`, website `ACTIVE`, tenant không `LOCKED`, ngôn ngữ đã bật, khoá S3 nằm dưới `worker/<tenantId>/`. Sau đó tra lại TM, tự đặt trước hạn mức cho phần mình dịch, dịch, ghi bản `MACHINE` và `settleUsage` với `{ kind: 'WEB', slug }`. Worker không throw; kết quả (`DONE`, `NOTHING_TO_DO`, `QUOTA_EXCEEDED`, `REJECTED`, `ERROR`) nằm trong log.
 

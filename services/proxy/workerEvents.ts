@@ -7,7 +7,7 @@
  *  - vượt quá maxInlineEvents sự kiện và có kho S3 thì ghi danh sách câu ra S3, sự kiện chỉ mang `sentencesS3Key`;
  *  - một câu riêng lẻ đã làm sự kiện vượt maxBytes thì bắt buộc đi qua S3; không có kho S3 thì bỏ câu đó
  *    (báo trong `dropped`) để không sự kiện nào vượt giới hạn tải trọng.
- * Khoá S3 luôn nằm dưới tiền tố worker/<tenantId>/ để worker kiểm tra được tenant.
+ * Khoá S3 luôn nằm dưới tiền tố tenant/<tenantId>/worker/ để worker kiểm tra được tenant.
  */
 import type { SentenceWithHash } from '../../libs/common/tm.js';
 import type { Lang } from '../../libs/common/types.js';
@@ -28,8 +28,8 @@ export interface WorkerEvent {
 }
 
 export interface PayloadStore {
-  put(key: string, body: string): Promise<void>;
-  get(key: string): Promise<string>;
+  put(key: string, body: string, tenantId?: string): Promise<void>;
+  get(key: string, tenantId?: string): Promise<string>;
 }
 
 /** Giới hạn an toàn cho tải trọng lời gọi bất đồng bộ (thấp hơn giới hạn của Lambda). */
@@ -38,7 +38,7 @@ export const MAX_INLINE_EVENTS = 4;
 /** Mỗi tệp S3 chứa tối đa bấy nhiêu byte JSON câu */
 export const MAX_S3_PAYLOAD_BYTES = 4_000_000;
 
-export const workerKeyPrefix = (tenantId: string): string => `worker/${tenantId}/`;
+export const workerKeyPrefix = (tenantId: string): string => `tenant/${tenantId}/worker/`;
 
 const jsonBytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), 'utf8');
 
@@ -109,7 +109,7 @@ export async function buildWorkerEvents(
   const events: WorkerEvent[] = [];
   for (let i = 0; i < files.length; i++) {
     const key = `${workerKeyPrefix(base.tenantId)}${id}-${i}.json`;
-    await opts.store.put(key, JSON.stringify(files[i]));
+    await opts.store.put(key, JSON.stringify(files[i]), base.tenantId);
     events.push({ ...base, sentencesS3Key: key });
   }
   return { events, dropped: [] };

@@ -7,6 +7,18 @@ type SendClient = Pick<DynamoDBDocumentClient, 'send'>;
 type AwsCommand = { input?: Record<string, unknown> };
 type TenantCredentials = { accessKeyId: string; secretAccessKey: string; sessionToken: string; expiration?: Date };
 type TenantCredentialsProvider = () => Promise<TenantCredentials>;
+type TenantPolicyOptions = Parameters<typeof tenantSessionPolicy>[1];
+
+export class TenantAssumeRoleError extends Error {
+  constructor(
+    public readonly awsCode: string,
+    public readonly requestId: string | undefined,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'TenantAssumeRoleError';
+  }
+}
 
 function tenantFromPartitionKey(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.startsWith('TENANT#')) return undefined;
@@ -14,10 +26,10 @@ function tenantFromPartitionKey(value: unknown): string | undefined {
   return /^t_[A-Za-z0-9_-]{1,64}$/.test(id) ? id : undefined;
 }
 
-function collectPartitionKeys(value: unknown, keys: Set<string>): void {
+function collectPartitionKeys(value: unknown, keys: Set<string>, platformSlugKeys: Set<string>): void {
   if (!value || typeof value !== 'object') return;
   if (Array.isArray(value)) {
-    for (const item of value) collectPartitionKeys(item, keys);
+    for (const item of value) collectPartitionKeys(item, keys, platformSlugKeys);
     return;
   }
   for (const [name, child] of Object.entries(value as Record<string, unknown>)) {
@@ -27,17 +39,37 @@ function collectPartitionKeys(value: unknown, keys: Set<string>): void {
         : child;
       const tenant = tenantFromPartitionKey(partitionKey);
       if (tenant) keys.add(tenant);
+      if (typeof partitionKey === 'string' && /^TENANT#PLATFORM#SLUG#[a-z0-9-]{1,253}$/.test(partitionKey)) {
+        platformSlugKeys.add(partitionKey);
+      }
     }
-    collectPartitionKeys(child, keys);
+    collectPartitionKeys(child, keys, platformSlugKeys);
   }
 }
 
 /** Restricts an STS session to one tenant partition and its payload object prefixes. */
 export function tenantSessionPolicy(
   tenantId: string,
-  buckets: { payloadBucketArn?: string; batchUploadBucketArn?: string; batchUploadKmsKeyArn?: string } = {},
+  buckets: {
+    payloadBucketArn?: string;
+    payloadBucketKmsKeyArn?: string;
+    batchUploadBucketArn?: string;
+    batchUploadKmsKeyArn?: string;
+    dataKmsKeyArn?: string;
+    dataTableName?: string;
+    allowPlatformSlugReservation?: boolean;
+    platformSlugReservationKey?: string;
+  } = {},
 ): string {
   if (!/^t_[A-Za-z0-9_-]{1,64}$/.test(tenantId)) throw new TypeError('Invalid tenant ID');
+  const leadingKeys = [`TENANT#${tenantId}`, `TENANT#${tenantId}#*`];
+  if (buckets.allowPlatformSlugReservation) {
+    if (!buckets.platformSlugReservationKey) throw new TypeError('Platform slug reservation key is required');
+    if (!/^TENANT#PLATFORM#SLUG#[a-z0-9-]{1,253}$/.test(buckets.platformSlugReservationKey)) {
+      throw new TypeError('Invalid platform slug reservation key');
+    }
+    leadingKeys.push(buckets.platformSlugReservationKey);
+  }
   const statements: Array<Record<string, unknown>> = [{
     Effect: 'Allow',
     Action: [
@@ -48,12 +80,38 @@ export function tenantSessionPolicy(
     Resource: '*',
     Condition: {
       'ForAllValues:StringLike': {
-        'dynamodb:LeadingKeys': [`TENANT#${tenantId}`, `TENANT#${tenantId}#*`, 'TENANT#PLATFORM#SLUG#*'],
+        'dynamodb:LeadingKeys': leadingKeys,
       },
     },
   }];
+  if (buckets.dataKmsKeyArn && buckets.dataTableName) {
+    statements.push({
+      Effect: 'Allow',
+      Action: ['kms:Decrypt', 'kms:Encrypt', 'kms:ReEncrypt*', 'kms:GenerateDataKey*', 'kms:DescribeKey', 'kms:CreateGrant'],
+      Resource: buckets.dataKmsKeyArn,
+      Condition: {
+        StringEquals: {
+          'kms:ViaService': `dynamodb.${process.env.AWS_REGION ?? 'ap-southeast-1'}.amazonaws.com`,
+          'kms:EncryptionContext:aws:dynamodb:tableName': buckets.dataTableName,
+        },
+      },
+    });
+  }
   if (buckets.payloadBucketArn) {
-    statements.push({ Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject'], Resource: `${buckets.payloadBucketArn}/worker/${tenantId}/*` });
+    statements.push({ Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject'], Resource: `${buckets.payloadBucketArn}/tenant/${tenantId}/worker/*` });
+    if (buckets.payloadBucketKmsKeyArn) {
+      statements.push({
+        Effect: 'Allow',
+        Action: ['kms:Decrypt', 'kms:GenerateDataKey'],
+        Resource: buckets.payloadBucketKmsKeyArn,
+        Condition: {
+          StringEquals: {
+            'kms:ViaService': `s3.${process.env.AWS_REGION ?? 'ap-southeast-1'}.amazonaws.com`,
+            'kms:EncryptionContext:aws:s3:arn': buckets.payloadBucketArn,
+          },
+        },
+      });
+    }
   }
   if (buckets.batchUploadBucketArn) {
     statements.push({
@@ -81,27 +139,53 @@ export function tenantSessionPolicy(
   });
 }
 
-export function createTenantCredentialsProvider(
+function createTenantCredentialsProvider(
   roleArn: string,
   tenantId: string,
-  policy: string,
+  policyOptions: TenantPolicyOptions = {},
   sts: Pick<STSClient, 'send'> = new STSClient({}),
   sessionName = 'tenant',
+  logger: (message: Record<string, unknown>) => void = (message) => console.error(JSON.stringify(message)),
+  metric: (name: string) => void = () => undefined,
 ): TenantCredentialsProvider {
   let cached: TenantCredentials | undefined;
   let refreshing: Promise<TenantCredentials> | undefined;
   return async () => {
     if (cached?.expiration && cached.expiration.getTime() > Date.now() + 60_000) return cached;
     refreshing ??= (async () => {
-      const result = await sts.send(new AssumeRoleCommand({
-        RoleArn: roleArn,
-        RoleSessionName: `${sessionName}-${tenantId}`.slice(0, 64),
-        SourceIdentity: tenantId,
-        Tags: [{ Key: 'tenantId', Value: tenantId }],
-        Policy: policy,
-      })) as { Credentials?: { AccessKeyId?: string; SecretAccessKey?: string; SessionToken?: string; Expiration?: Date } };
+      let result: { Credentials?: { AccessKeyId?: string; SecretAccessKey?: string; SessionToken?: string; Expiration?: Date } };
+      try {
+        const policy = tenantSessionPolicy(
+          tenantId,
+          {
+            ...policyOptions,
+            dataKmsKeyArn: policyOptions.dataKmsKeyArn ?? process.env.DATA_KMS_KEY_ARN,
+            dataTableName: policyOptions.dataTableName ?? process.env.TABLE_NAME,
+          },
+        );
+        result = await sts.send(new AssumeRoleCommand({
+          RoleArn: roleArn,
+          RoleSessionName: `${sessionName}-${tenantId}`.slice(0, 64),
+          SourceIdentity: tenantId,
+          Tags: [{ Key: 'TenantId', Value: tenantId }],
+          Policy: policy,
+        })) as typeof result;
+      } catch (error) {
+        const awsError = error as { name?: string; Code?: string; $metadata?: { requestId?: string } };
+        const awsCode = awsError.name ?? awsError.Code ?? 'UnknownError';
+        try {
+          metric('tenant.assume_role.failed');
+          logger({ event: 'TENANT_ASSUME_ROLE_FAILED', tenantId, roleArn, sessionName, awsCode, requestId: awsError.$metadata?.requestId });
+        } catch {
+          // Telemetry failures must not mask the security failure.
+        }
+        throw new TenantAssumeRoleError(awsCode, awsError.$metadata?.requestId, 'Không thể tạo phiên truy cập dữ liệu tenant');
+      }
       const c = result.Credentials;
-      if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken) throw new Error('STS AssumeRole returned incomplete credentials');
+      if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken) {
+        try { metric('tenant.assume_role.incomplete_credentials'); } catch {}
+        throw new TenantAssumeRoleError('IncompleteCredentials', undefined, 'STS AssumeRole returned incomplete credentials');
+      }
       cached = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration };
       return cached;
     })().finally(() => { refreshing = undefined; });
@@ -122,8 +206,16 @@ export function createTenantDocumentClientRouter(
     localFallback?: boolean;
     payloadBucketArn?: string;
     batchUploadBucketArn?: string;
+    payloadBucketKmsKeyArn?: string;
+    batchUploadKmsKeyArn?: string;
+    dataKmsKeyArn?: string;
+    dataTableName?: string;
+    allowPlatformSlugReservation?: boolean;
+    allowPlatformSlugReservations?: boolean;
     sts?: Pick<STSClient, 'send'>;
     createClient?: (credentials: TenantCredentialsProvider) => SendClient;
+    logger?: (message: Record<string, unknown>) => void;
+    metric?: (name: string) => void;
   } = {},
 ): SendClient {
   const roleArn = options.roleArn?.trim();
@@ -131,22 +223,36 @@ export function createTenantDocumentClientRouter(
   const sts = options.sts ?? new STSClient({});
   const clients = new Map<string, Promise<SendClient>>();
 
-  const clientFor = (tenantId: string): Promise<SendClient> => {
-    let pending = clients.get(tenantId);
+  const clientFor = (tenantId: string, platformSlugReservationKey?: string): Promise<SendClient> => {
+    const clientKey = `${tenantId}:${platformSlugReservationKey ?? ''}`;
+    let pending = clients.get(clientKey);
     if (!pending) {
       pending = (async () => {
         if (!roleArn) throw new Error('TENANT_DATA_ACCESS_ROLE_ARN is required in Lambda');
+        const policyOptions: TenantPolicyOptions = {
+          payloadBucketArn: options.payloadBucketArn,
+          payloadBucketKmsKeyArn: options.payloadBucketKmsKeyArn,
+          batchUploadBucketArn: options.batchUploadBucketArn,
+          batchUploadKmsKeyArn: options.batchUploadKmsKeyArn,
+          allowPlatformSlugReservation: Boolean(platformSlugReservationKey && (options.allowPlatformSlugReservation || options.allowPlatformSlugReservations)),
+          platformSlugReservationKey,
+        };
         const credentials = createTenantCredentialsProvider(
           roleArn,
           tenantId,
-          tenantSessionPolicy(tenantId, options),
+          policyOptions,
           sts,
           options.sessionName,
+          options.logger,
+          options.metric,
         );
-        return options.createClient?.(credentials) ?? DynamoDBDocumentClient.from(new DynamoDBClient({ credentials }));
+        return options.createClient?.(credentials) ?? DynamoDBDocumentClient.from(
+          new DynamoDBClient({ credentials }),
+          { marshallOptions: { removeUndefinedValues: true } },
+        );
       })();
-      clients.set(tenantId, pending);
-      pending.catch(() => clients.delete(tenantId));
+      clients.set(clientKey, pending);
+      pending.catch(() => clients.delete(clientKey));
     }
     return pending;
   };
@@ -154,12 +260,17 @@ export function createTenantDocumentClientRouter(
   return {
     async send(command: never): Promise<never> {
       const keys = new Set<string>();
-      collectPartitionKeys((command as AwsCommand).input, keys);
+      const platformSlugKeys = new Set<string>();
+      collectPartitionKeys((command as AwsCommand).input, keys, platformSlugKeys);
       if (keys.size > 1) throw new Error('DynamoDB request cannot span tenant partitions');
+      if (platformSlugKeys.size > 1) throw new Error('DynamoDB request cannot span platform slug reservations');
       const tenantId = keys.values().next().value as string | undefined;
       if (!tenantId) return base.send(command);
       if (!roleArn && localFallback) return base.send(command);
-      return (await clientFor(tenantId)).send(command);
+      const platformSlugReservationKey = (options.allowPlatformSlugReservation || options.allowPlatformSlugReservations)
+        ? platformSlugKeys.values().next().value as string | undefined
+        : undefined;
+      return (await clientFor(tenantId, platformSlugReservationKey)).send(command);
     },
   } as SendClient;
 }
@@ -170,11 +281,11 @@ export function createTenantS3Client(
   bucketArn: string,
   prefix: 'worker' | 'batch',
   sessionName = 'tenant-s3',
-  batchUploadKmsKeyArn?: string,
+  batchUploadKmsKeyArn = process.env.TENANT_BATCH_UPLOAD_KMS_KEY_ARN,
+  payloadBucketKmsKeyArn = process.env.DATA_KMS_KEY_ARN,
 ): S3Client {
-  const buckets = prefix === 'worker'
-    ? { payloadBucketArn: bucketArn }
+  const options = prefix === 'worker'
+    ? { payloadBucketArn: bucketArn, payloadBucketKmsKeyArn }
     : { batchUploadBucketArn: bucketArn, batchUploadKmsKeyArn };
-  const policy = tenantSessionPolicy(tenantId, buckets);
-  return new S3Client({ credentials: createTenantCredentialsProvider(roleArn, tenantId, policy, undefined, sessionName) });
+  return new S3Client({ credentials: createTenantCredentialsProvider(roleArn, tenantId, options, undefined, sessionName) });
 }
