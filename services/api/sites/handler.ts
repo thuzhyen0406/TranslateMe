@@ -106,17 +106,20 @@ return async function handler(event: WebsiteEvent) {
       result = { ...(created as Record<string, unknown>), host };
     } else if (!slug) {
       throw new AppError('NOT_FOUND', 'Không tìm thấy website');
-    } else if (path.endsWith('/verify') && method === 'POST') {
+    } else if (isExactHostActionRoute(path, slug, 'verify') && method === 'POST') {
       if (body.method !== 'META' && body.method !== 'FILE') throw new AppError('INVALID_REQUEST', 'method phải là META hoặc FILE');
       await dependencies.verify(ctx, slug, body.method);
       const site = await dependencies.getHost(ctx, slug);
       if (!site) throw new AppError('NOT_FOUND', 'Không tìm thấy website');
       result = { host: site };
-    } else if (path.endsWith('/pause') && (method === 'POST' || method === 'PATCH')) {
+    } else if (isExactHostActionRoute(path, slug, 'pause') && (method === 'POST' || method === 'PATCH')) {
       result = await dependencies.pause(ctx, slug);
-    } else if (path.endsWith('/resume') && (method === 'POST' || method === 'PATCH')) {
+    } else if (isExactHostActionRoute(path, slug, 'resume') && (method === 'POST' || method === 'PATCH')) {
       result = await dependencies.resume(ctx, slug);
     } else if (isExactHostPath && method === 'PATCH') {
+      if ('status' in body && body.status !== undefined) {
+        throw new AppError('INVALID_REQUEST', 'Không được phép thay đổi trạng thái qua PATCH; vui lòng dùng verify, pause hoặc resume');
+      }
       // Yêu cầu [P1]: Giữ hợp đồng PATCH /console/hosts/{slug} (Cập nhật status, targetLangs, CSS selectors, cache TTL)
       result = await dependencies.update(ctx, slug, body);
       result = { ...(result as Record<string, unknown>), host: result };
@@ -183,4 +186,16 @@ function isExactHostDetailRoute(path: string, slug: string): boolean {
          path === `/console/hosts/${slug}` ||
          path === `/console/websites/${decodedSlug}` || 
          path === `/console/hosts/${decodedSlug}`;
+}
+
+/**
+ * Kiểm tra xem đường dẫn có trùng khớp chính xác dạng /console/websites/{slug}/{action} hoặc /console/hosts/{slug}/{action} hay không
+ */
+function isExactHostActionRoute(path: string, slug: string, action: 'verify' | 'pause' | 'resume'): boolean {
+  if (!slug) return false;
+  const decodedSlug = encodeURIComponent(slug);
+  return path === `/console/websites/${slug}/${action}` || 
+         path === `/console/hosts/${slug}/${action}` ||
+         path === `/console/websites/${decodedSlug}/${action}` || 
+         path === `/console/hosts/${decodedSlug}/${action}`;
 }

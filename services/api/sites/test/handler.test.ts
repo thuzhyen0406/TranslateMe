@@ -102,4 +102,50 @@ describe('website HTTP handler', () => {
     assert.equal(resPatchResume.statusCode, 200);
     assert.equal(resumed, 2);
   });
+
+  it('từ chối các route con sai định dạng cho verify/pause/resume và trả 404', async () => {
+    const { handler } = setup();
+
+    const badPause = await handler({
+      httpMethod: 'POST', path: '/console/hosts/example/other/pause', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(badPause.statusCode, 404);
+
+    const badResume = await handler({
+      httpMethod: 'PATCH', path: '/console/hosts/example/sub/resume', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(badResume.statusCode, 404);
+
+    const badVerify = await handler({
+      httpMethod: 'POST', path: '/console/hosts/example/extra/verify', requestContext: { authorizer: { claims } },
+      body: JSON.stringify({ method: 'META' }),
+    });
+    assert.equal(badVerify.statusCode, 404);
+  });
+
+  it('từ chối đổi status qua PATCH /console/hosts/{slug} và trả 400 INVALID_REQUEST', async () => {
+    const { handler } = setup();
+    const res = await handler({
+      httpMethod: 'PATCH', path: '/console/hosts/example', requestContext: { authorizer: { claims } },
+      body: JSON.stringify({ status: 'ACTIVE' }),
+    });
+    assert.equal(res.statusCode, 400);
+    assert.equal(JSON.parse(res.body).error.code, 'INVALID_REQUEST');
+  });
+
+  it('cho phép cập nhật thông tin chung qua PATCH /console/hosts/{slug}', async () => {
+    let updatedInput: Record<string, unknown> | undefined;
+    const { handler } = setup({
+      update: async (_ctx, slug, input) => {
+        updatedInput = input;
+        return { slug, displayName: input.displayName } as never;
+      },
+    });
+    const res = await handler({
+      httpMethod: 'PATCH', path: '/console/hosts/example', requestContext: { authorizer: { claims } },
+      body: JSON.stringify({ display_name: 'New Name', target_langs: ['vi', 'ja'] }),
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(updatedInput?.displayName, 'New Name');
+  });
 });

@@ -316,6 +316,10 @@ export async function updateSite(
   requireRole(ctx, ['TENANT_ADMIN']);
   await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
 
+  if ('status' in input && input.status !== undefined) {
+    throw new AppError('INVALID_REQUEST', 'Không được phép cập nhật trạng thái website qua endpoint này; vui lòng dùng verify, pause hoặc resume');
+  }
+
   const site = await deps.db.get(ctx, keys.host(ctx, slug));
   if (!site) {
     throw new AppError('NOT_FOUND', 'Không tìm thấy website');
@@ -336,9 +340,6 @@ export async function updateSite(
   }
   if (typeof input.cacheTtlSec === 'number') {
     updated.cacheTtlSec = input.cacheTtlSec;
-  }
-  if (typeof input.status === 'string' && (input.status === 'ACTIVE' || input.status === 'PAUSED')) {
-    updated.status = input.status;
   }
   updated.updatedAt = new Date().toISOString();
 

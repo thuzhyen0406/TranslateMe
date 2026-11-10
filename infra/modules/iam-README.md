@@ -59,6 +59,11 @@ invocation permissions remain in `api-gateway.yaml`.
   `sts:AssumeRole` can choose another tenant ID. If that threat must be blocked
   by IAM alone, this design is insufficient and needs tenant-bound AWS
   identities or a different authorization boundary.
+  A `DenyRoleChaining` statement on each tenant role's trust policy prevents
+  a caller that already carries a `TenantId` session tag from assuming the role
+  again — blocking an already-scoped session from pivoting to another tenant.
+  This does not prevent a Lambda execution role from choosing an arbitrary
+  tenant on the *first* assume, but it closes the role-chaining vector.
 - `PlatformApiExecutionRole` must query `HOST#` records so the current lock
   handler can collect slugs for CloudFront invalidation. IAM can scope this to
   tenant partition keys but not the `HOST#` sort-key prefix with
@@ -67,9 +72,12 @@ invocation permissions remain in `api-gateway.yaml`.
 - `ConsoleApiExecutionRole` is shared by multiple console routes. IAM cannot
   express the route matrix on one shared Lambda role. Keep route-level role
   checks in code; split handlers/roles if independent IAM boundaries are
-  required. Its `DeleteItem` permission is for implemented tenant operations
-  such as glossary deletion/member removal and must not be used to add DELETE
-  routes for websites, TM, or API keys.
+  required. The `ReserveWebsiteSlug` statement has been removed because
+  website creation now runs on the dedicated `WebsiteFunctionRole` via
+  `TenantWebsiteDataAccessRole`. Console API no longer needs write access
+  to `TENANT#PLATFORM#SLUG#*` keys. Its `DeleteItem` permission is for
+  implemented tenant operations such as glossary deletion/member removal
+  and must not be used to add DELETE routes for websites, TM, or API keys.
 - API-key create/rotate/revoke code is not present in this checkout. Add the
   exact API Gateway control-plane actions to a dedicated policy only after its
   implementation is known. In particular, do not grant `apigateway:GET` for
