@@ -19,6 +19,7 @@ import {
   postCheckGlossary,
   putTerm,
   terminologyNameOf,
+  type GlossaryCacheInvalidationResult,
   type GlossaryDependencies,
 } from '../glossaryManager.js';
 
@@ -401,6 +402,35 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     assert.equal(result.cacheInvalidation.error, 'CloudFront unavailable');
     const saved = await getGlossaryState(adminCtx, deps);
     assert.equal(saved.terms.some((term) => term.normalized === 'phở'), true);
+  });
+
+  it('endpoint thử lại chỉ gửi lại invalidation cho website ACTIVE, không tăng phiên bản glossary', async () => {
+    const { deps } = createMockHarness();
+    let receivedSlugs: readonly string[] = [];
+    deps.invalidateSites = async (_ctx, request) => {
+      receivedSlugs = request.slugs;
+      return { status: 'SUBMITTED', paths: ['/active-site/*'], mode: 'WILDCARD', invalidationIds: ['retry-123'] };
+    };
+
+    const before = await listGlossary(adminCtx, deps);
+    const result = await handleGlossaryRoute(adminCtx, {
+      method: 'POST',
+      path: '/console/glossary/cache-invalidation/retry',
+    }, deps) as GlossaryCacheInvalidationResult;
+    const after = await listGlossary(adminCtx, deps);
+
+    assert.deepEqual(receivedSlugs, ['active-site']);
+    assert.deepEqual(result.invalidationIds, ['retry-123']);
+    assert.equal(after.version, before.version);
+
+    deps.getInvalidationStatus = async (_ctx, id) => ({
+      id, status: 'COMPLETED', paths: ['/active-site/*'],
+    });
+    const status = await handleGlossaryRoute(adminCtx, {
+      method: 'GET',
+      path: '/console/glossary/cache-invalidation/retry-123',
+    }, deps) as { id: string; status: string };
+    assert.deepEqual(status, { id: 'retry-123', status: 'COMPLETED', paths: ['/active-site/*'] });
   });
 
   it('Optimistic Locking: phát hiện xung đột VERSION_CONFLICT, TENANT_SUSPENDED giữa chừng và NOT_FOUND khi thiếu CONFIG', async () => {

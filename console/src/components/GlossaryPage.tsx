@@ -21,6 +21,8 @@ import type { AuthenticatedSession } from '../types/auth.js';
 import type {
   CsvImportPreviewOrCommitResult,
   DuplicateHandlingMode,
+  GlossaryCacheInvalidation,
+  GlossaryCacheInvalidationProgress,
   GlossaryTermEntry,
   GlossaryTermType,
 } from '../types/glossary.js';
@@ -73,6 +75,37 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [cacheInvalidation, setCacheInvalidation] = useState<GlossaryCacheInvalidation | null>(null);
+  const [retryingCacheInvalidation, setRetryingCacheInvalidation] = useState(false);
+  const [invalidationProgress, setInvalidationProgress] = useState<Record<string, GlossaryCacheInvalidationProgress['status']>>({});
+  const invalidationIdKey = cacheInvalidation?.invalidationIds.join(',') ?? '';
+
+  useEffect(() => {
+    const ids = invalidationIdKey ? invalidationIdKey.split(',').filter(Boolean) : [];
+    if (ids.length === 0) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    setInvalidationProgress({});
+    const poll = async () => {
+      const results = await Promise.all(ids.map(async (id) => {
+        try {
+          return await api.getCacheInvalidationStatus(id);
+        } catch {
+          return null;
+        }
+      }));
+      if (!active) return;
+      const next: Record<string, GlossaryCacheInvalidationProgress['status']> = {};
+      for (const result of results) if (result) next[result.id] = result.status;
+      setInvalidationProgress(next);
+      if (ids.some((id) => next[id] !== 'COMPLETED')) timer = setTimeout(() => void poll(), 4000);
+    };
+    void poll();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [api, invalidationIdKey]);
 
   // Trạng thái khung Thêm / Sửa thuật ngữ
   const [showTermForm, setShowTermForm] = useState<boolean>(false);
@@ -192,6 +225,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     setSavingTerm(true);
     try {
       const res = await api.upsertTerm(payload);
+      setCacheInvalidation(res.cacheInvalidation ?? null);
       await loadGlossary();
       setShowTermForm(false);
       setSuccessMessage(
@@ -210,6 +244,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     setSuccessMessage(null);
     try {
       const res = await api.deleteTerm(entry.sourceTerm);
+      setCacheInvalidation(res.cacheInvalidation ?? null);
       await loadGlossary();
       setSuccessMessage(
         `Đã xóa thuật ngữ "${entry.sourceTerm}". Phiên bản bảng thuật ngữ hiện tại: v${res.version}.`,
@@ -266,6 +301,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     setErrorMessage(null);
     try {
       const res = await api.commitImportCsv(csvText, onDuplicate);
+      setCacheInvalidation(res.cacheInvalidation ?? null);
       await loadGlossary();
       setShowCsvModal(false);
       setCsvPreview(null);
@@ -278,6 +314,30 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
       setCsvBusy(false);
     }
   };
+
+  const handleRetryCacheInvalidation = async () => {
+    setRetryingCacheInvalidation(true);
+    try {
+      setCacheInvalidation(await api.retryCacheInvalidation());
+    } catch (err) {
+      setCacheInvalidation({
+        status: 'FAILED', mode: 'WILDCARD', paths: [], invalidationIds: [],
+        failedPaths: [], error: glossaryErrorMessage(err),
+      });
+    } finally {
+      setRetryingCacheInvalidation(false);
+    }
+  };
+
+  const allInvalidationsCompleted = Boolean(cacheInvalidation?.invalidationIds.length) &&
+    cacheInvalidation!.invalidationIds.every((id) => invalidationProgress[id] === 'COMPLETED');
+  const cacheInvalidationMessage = cacheInvalidation?.status === 'SUBMITTED'
+    ? (allInvalidationsCompleted ? 'Đã làm mới cache.' : 'Đang làm mới cache.')
+    : cacheInvalidation?.status === 'NOT_CONFIGURED'
+      ? 'Chưa cấu hình làm mới cache.'
+      : cacheInvalidation?.status === 'PARTIAL'
+        ? 'Chỉ một phần cache được gửi làm mới.'
+        : 'Làm mới cache thất bại.';
 
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-5">
@@ -353,6 +413,35 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
       {successMessage && (
         <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
           {successMessage}
+        </div>
+      )}
+
+      {cacheInvalidation && cacheInvalidation.status !== 'NOTHING_TO_DO' && (
+        <div
+          role={cacheInvalidation.status === 'FAILED' || cacheInvalidation.status === 'PARTIAL' ? 'alert' : 'status'}
+          className={`p-3.5 rounded-xl border text-xs ${
+            cacheInvalidation.status === 'FAILED' || cacheInvalidation.status === 'PARTIAL'
+              ? 'bg-red-50 border-red-200 text-red-800'
+              : cacheInvalidation.status === 'NOT_CONFIGURED'
+                ? 'bg-amber-50 border-amber-200 text-amber-800'
+                : 'bg-blue-50 border-blue-200 text-blue-800'
+          }`}
+        >
+          <strong>{cacheInvalidationMessage}</strong>
+          {cacheInvalidation.invalidationIds.length > 0 && (
+            <span> Mã theo dõi: {cacheInvalidation.invalidationIds.join(', ')}.</span>
+          )}
+          {cacheInvalidation.error && <span> {cacheInvalidation.error}</span>}
+          {(cacheInvalidation.status === 'FAILED' || cacheInvalidation.status === 'PARTIAL') && canWrite && (
+            <button
+              type="button"
+              disabled={retryingCacheInvalidation}
+              onClick={() => void handleRetryCacheInvalidation()}
+              className="ml-2 underline font-semibold disabled:opacity-50"
+            >
+              {retryingCacheInvalidation ? 'Đang thử lại...' : 'Thử làm mới lại'}
+            </button>
+          )}
         </div>
       )}
 

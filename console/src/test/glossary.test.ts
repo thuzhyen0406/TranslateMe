@@ -165,9 +165,21 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
           JSON.stringify({
             version: 4,
             terminologySynced: true,
+            cacheInvalidation: {
+              status: 'SUBMITTED', mode: 'WILDCARD', paths: ['/site-a/*'], invalidationIds: ['inv-123'],
+            },
           }),
           { status: 200 },
         );
+      }
+
+      if (url.endsWith('/console/glossary/cache-invalidation/retry') && method === 'POST') {
+        return new Response(JSON.stringify({
+          status: 'SUBMITTED', mode: 'WILDCARD', paths: ['/site-a/*'], invalidationIds: ['inv-retry'],
+        }), { status: 200 });
+      }
+      if (url.endsWith('/console/glossary/cache-invalidation/inv-123') && method === 'GET') {
+        return new Response(JSON.stringify({ id: 'inv-123', status: 'COMPLETED', paths: ['/site-a/*'] }), { status: 200 });
       }
 
       if (url.endsWith('/console/glossary/import/preview') && method === 'POST') {
@@ -216,6 +228,8 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
     });
     assert.equal(upserted.version, 4);
     assert.equal(upserted.terminologySynced, true);
+    assert.equal(upserted.cacheInvalidation?.status, 'SUBMITTED');
+    assert.deepEqual(upserted.cacheInvalidation?.invalidationIds, ['inv-123']);
     // F4 không trả term -> console dựng lại từ dữ liệu đã gửi
     assert.equal(upserted.term.sourceTerm, 'cao lầu');
     assert.equal(upserted.term.type, 'FIXED');
@@ -226,10 +240,18 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
     assert.equal('source_lang' in putBody, false);
     assert.equal('target_langs' in putBody, false);
 
+    const retried = await api.retryCacheInvalidation();
+    assert.equal(retried.status, 'SUBMITTED');
+    assert.deepEqual(retried.invalidationIds, ['inv-retry']);
+    assert.equal(calls[2].url, 'https://api.translateme.example/console/glossary/cache-invalidation/retry');
+    const invalidationStatus = await api.getCacheInvalidationStatus('inv-123');
+    assert.equal(invalidationStatus.status, 'COMPLETED');
+    assert.deepEqual(invalidationStatus.paths, ['/site-a/*']);
+
     const preview = await api.previewImportCsv(buildSampleGlossaryCsv(), 'OVERWRITE');
     assert.equal(preview.validRows, 4);
     assert.equal(preview.overwrittenCount, 1);
-    const previewBody = calls[2].body as Record<string, unknown>;
+    const previewBody = calls[4].body as Record<string, unknown>;
     assert.equal(previewBody.onDuplicate, 'OVERWRITE');
     assert.equal('on_duplicate' in previewBody, false);
 

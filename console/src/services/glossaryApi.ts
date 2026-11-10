@@ -18,6 +18,8 @@ import type {
   CsvImportRowError,
   DeleteGlossaryTermResponse,
   DuplicateHandlingMode,
+  GlossaryCacheInvalidation,
+  GlossaryCacheInvalidationProgress,
   GlossaryStateResponse,
   GlossaryTermEntry,
   GlossaryTermType,
@@ -703,6 +705,24 @@ export function csvImportResultFromJson(raw: Json): CsvImportPreviewOrCommitResu
     ...(raw.terminology_synced !== undefined || raw.terminologySynced !== undefined
       ? { terminologySynced: Boolean(raw.terminology_synced ?? raw.terminologySynced) }
       : {}),
+    ...(raw.cacheInvalidation || raw.cache_invalidation
+      ? { cacheInvalidation: glossaryCacheInvalidationFromJson((raw.cacheInvalidation ?? raw.cache_invalidation) as Json) }
+      : {}),
+  };
+}
+
+function glossaryCacheInvalidationFromJson(raw: Json): GlossaryCacheInvalidation {
+  const allowedStatuses = new Set(['SUBMITTED', 'PARTIAL', 'FAILED', 'NOTHING_TO_DO', 'NOT_CONFIGURED']);
+  const rawStatus = str(raw.status);
+  const ids = raw.invalidationIds ?? raw.invalidation_ids;
+  const failed = raw.failedPaths ?? raw.failed_paths;
+  return {
+    status: (allowedStatuses.has(rawStatus) ? rawStatus : 'FAILED') as GlossaryCacheInvalidation['status'],
+    paths: Array.isArray(raw.paths) ? raw.paths.map(str) : [],
+    mode: 'WILDCARD',
+    invalidationIds: Array.isArray(ids) ? ids.map(str) : [],
+    ...(Array.isArray(failed) ? { failedPaths: failed.map(str) } : {}),
+    ...(str(raw.error) ? { error: str(raw.error) } : {}),
   };
 }
 
@@ -722,6 +742,8 @@ export interface GlossaryApi {
     csvText: string,
     onDuplicate: DuplicateHandlingMode,
   ): Promise<CsvImportPreviewOrCommitResult>;
+  retryCacheInvalidation(): Promise<GlossaryCacheInvalidation>;
+  getCacheInvalidationStatus(id: string): Promise<GlossaryCacheInvalidationProgress>;
 }
 
 // ============================================================================
@@ -813,6 +835,9 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
         ...(data.terminology_synced !== undefined || data.terminologySynced !== undefined
           ? { terminologySynced: Boolean(data.terminology_synced ?? data.terminologySynced) }
           : {}),
+        ...(data.cacheInvalidation || data.cache_invalidation
+          ? { cacheInvalidation: glossaryCacheInvalidationFromJson((data.cacheInvalidation ?? data.cache_invalidation) as Json) }
+          : {}),
       };
     },
 
@@ -824,6 +849,9 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
         version: num(data.version, 1),
         ...(data.terminology_synced !== undefined || data.terminologySynced !== undefined
           ? { terminologySynced: Boolean(data.terminology_synced ?? data.terminologySynced) }
+          : {}),
+        ...(data.cacheInvalidation || data.cache_invalidation
+          ? { cacheInvalidation: glossaryCacheInvalidationFromJson((data.cacheInvalidation ?? data.cache_invalidation) as Json) }
           : {}),
       };
     },
@@ -844,6 +872,19 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
         onDuplicate,
       });
       return csvImportResultFromJson(data);
+    },
+    async retryCacheInvalidation() {
+      const data = await request('POST', '/console/glossary/cache-invalidation/retry', {});
+      return glossaryCacheInvalidationFromJson((data.cacheInvalidation ?? data) as Json);
+    },
+    async getCacheInvalidationStatus(id) {
+      const data = await request('GET', `/console/glossary/cache-invalidation/${encodeURIComponent(id)}`);
+      return {
+        id: str(data.id) || id,
+        status: data.status === 'COMPLETED' ? 'COMPLETED' : 'IN_PROGRESS',
+        paths: Array.isArray(data.paths) ? data.paths.map(str) : [],
+        ...(str(data.createdAt ?? data.created_at) ? { createdAt: str(data.createdAt ?? data.created_at) } : {}),
+      };
     },
   };
 }
@@ -1072,6 +1113,12 @@ export function createMockGlossaryApi(opts: MockGlossaryApiOptions = {}): Glossa
         version,
         terminologySynced: true,
       };
+    },
+    async retryCacheInvalidation() {
+      return { status: 'NOT_CONFIGURED', mode: 'WILDCARD', paths: [], invalidationIds: [] };
+    },
+    async getCacheInvalidationStatus(id) {
+      return { id, status: 'COMPLETED', paths: [] };
     },
   };
 }

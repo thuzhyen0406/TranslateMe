@@ -22,7 +22,12 @@ import {
   type ImportTerminologyCommandOutput,
 } from '@aws-sdk/client-translate';
 import { db, requireRole } from '../../../libs/common/db.js';
-import { invalidateForSites, type SiteInvalidationResult } from '../../../libs/common/invalidation.js';
+import {
+  getInvalidationStatus as getCloudFrontInvalidationStatus,
+  invalidateForSitesSubmitOnly,
+  type InvalidationStatus,
+  type SiteInvalidationResult,
+} from '../../../libs/common/invalidation.js';
 import {
   cleanTermText,
   clearGlossaryCache,
@@ -106,7 +111,7 @@ export interface ImportCsvResult {
 
 export type GlossaryCacheInvalidationResult =
   | SiteInvalidationResult
-  | { status: 'FAILED'; error: string; paths: string[]; mode: 'WILDCARD'; invalidationIds: string[] };
+  | { status: 'FAILED'; error: string; paths: string[]; mode: 'WILDCARD'; invalidationIds: string[]; failedPaths: string[] };
 
 export interface TranslateTerminologyClient {
   send(
@@ -118,7 +123,8 @@ export interface GlossaryDependencies {
   db: Pick<typeof db, 'get' | 'put' | 'query' | 'transact' | 'listTenantSites'> & Partial<Pick<typeof db, 'update'>>;
   translateClient: TranslateTerminologyClient;
   now: () => number;
-  invalidateSites?: typeof invalidateForSites;
+  invalidateSites?: typeof invalidateForSitesSubmitOnly;
+  getInvalidationStatus?: typeof getCloudFrontInvalidationStatus;
 }
 
 let defaultTranslateClient: TranslateClient | undefined;
@@ -135,7 +141,8 @@ const defaultDependencies: GlossaryDependencies = {
     send: (cmd) => getDefaultTranslateClient().send(cmd),
   },
   now: () => Date.now(),
-  invalidateSites: invalidateForSites,
+  invalidateSites: invalidateForSitesSubmitOnly,
+  getInvalidationStatus: getCloudFrontInvalidationStatus,
 };
 
 async function invalidateGlossarySites(ctx: Ctx, deps: GlossaryDependencies): Promise<GlossaryCacheInvalidationResult> {
@@ -146,7 +153,7 @@ async function invalidateGlossarySites(ctx: Ctx, deps: GlossaryDependencies): Pr
       .filter((site) => site.status === 'ACTIVE' && typeof site.SK === 'string' && site.SK.startsWith('HOST#'))
       .map((site) => String(site.SK).slice('HOST#'.length));
     paths = slugs.map((slug) => `/${slug}/*`);
-    return await (deps.invalidateSites ?? invalidateForSites)(ctx, { slugs });
+    return await (deps.invalidateSites ?? invalidateForSitesSubmitOnly)(ctx, { slugs });
   } catch (error) {
     // A cache refresh must not undo a glossary commit.
     console.error(JSON.stringify({
@@ -161,8 +168,25 @@ async function invalidateGlossarySites(ctx: Ctx, deps: GlossaryDependencies): Pr
       paths,
       mode: 'WILDCARD',
       invalidationIds: [],
+      failedPaths: paths,
     };
   }
+}
+
+/** Re-submit a glossary cache refresh without changing glossary data or version. */
+export async function retryGlossaryCacheInvalidation(
+  ctx: Ctx,
+  deps: GlossaryDependencies = defaultDependencies,
+): Promise<GlossaryCacheInvalidationResult> {
+  return invalidateGlossarySites(ctx, deps);
+}
+
+export async function getGlossaryCacheInvalidationStatus(
+  ctx: Ctx,
+  id: string,
+  deps: GlossaryDependencies = defaultDependencies,
+): Promise<InvalidationStatus> {
+  return (deps.getInvalidationStatus ?? getCloudFrontInvalidationStatus)(ctx, id);
 }
 
 // ============================================================================
@@ -1140,6 +1164,14 @@ export async function handleGlossaryRoute(
   req: GlossaryHttpRequest,
   deps: GlossaryDependencies = defaultDependencies,
 ): Promise<unknown> {
+  const statusPrefix = '/console/glossary/cache-invalidation/';
+  if (req.method === 'GET' && req.path.startsWith(statusPrefix)) {
+    requireRole(ctx, ['TENANT_ADMIN']);
+    const id = req.path.slice(statusPrefix.length);
+    if (!id || id === 'retry' || id.includes('/')) throw new AppError('NOT_FOUND', 'Không tìm thấy lần làm mới');
+    return getGlossaryCacheInvalidationStatus(ctx, id, deps);
+  }
+
   if (req.method === 'GET') {
     requireRole(ctx, ['TENANT_ADMIN', 'DEVELOPER', 'REVIEWER']);
     return listGlossary(ctx, deps);
@@ -1191,6 +1223,10 @@ export async function handleGlossaryRoute(
   }
 
   if (req.method === 'POST') {
+    if (req.path === '/console/glossary/cache-invalidation/retry') {
+      requireRole(ctx, ['TENANT_ADMIN']);
+      return retryGlossaryCacheInvalidation(ctx, deps);
+    }
     const body = req.body ?? {};
     const csv = body.csv ?? '';
     const isPreviewPath = req.path.endsWith('/preview');

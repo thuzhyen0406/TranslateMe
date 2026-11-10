@@ -72,7 +72,7 @@ export interface InvalidationStatus {
 /** CloudFront: tối đa 15 đường dẫn wildcard đang xử lý trên mỗi distribution */
 export const CLOUDFRONT_WILDCARD_LIMIT = 15;
 
-export type SiteInvalidationStatus = 'SUBMITTED' | 'NOTHING_TO_DO' | 'NOT_CONFIGURED';
+export type SiteInvalidationStatus = 'SUBMITTED' | 'PARTIAL' | 'FAILED' | 'NOTHING_TO_DO' | 'NOT_CONFIGURED';
 
 export interface SiteInvalidationResult {
   paths: string[];
@@ -80,6 +80,8 @@ export interface SiteInvalidationResult {
   // ---- mở rộng (tùy chọn để không phá các bản giả sẵn có) ----
   status?: SiteInvalidationStatus;
   invalidationIds?: string[];
+  failedPaths?: string[];
+  error?: string;
 }
 
 export interface SiteInvalidationRequest {
@@ -195,7 +197,7 @@ export function createSiteInvalidatorSubmitOnly(
     if (!paths.length) return { paths, mode: 'WILDCARD', status: 'NOTHING_TO_DO', invalidationIds: [] };
 
     const invalidationIds: string[] = [];
-    let failed = 0;
+    const failedPaths: string[] = [];
     let firstError: string | undefined;
     for (let i = 0; i < paths.length; i += CLOUDFRONT_WILDCARD_LIMIT) {
       const batch = paths.slice(i, i + CLOUDFRONT_WILDCARD_LIMIT);
@@ -206,22 +208,20 @@ export function createSiteInvalidatorSubmitOnly(
         });
         invalidationIds.push(out.id);
       } catch (error) {
-        failed += batch.length;
+        failedPaths.push(...batch);
         firstError ??= errName(error);
       }
     }
     try {
-      deps.metric?.('invalidation.paths', paths.length - failed, { mode: 'site' });
+      deps.metric?.('invalidation.paths', paths.length - failedPaths.length, { mode: 'site' });
     } catch {
       // metric không bao giờ làm hỏng yêu cầu (QC-9)
     }
-    if (failed) {
-      throw new AppError(
-        'CACHE_INVALIDATION_FAILED',
-        `Chưa làm mới được cache của ${failed}/${paths.length} website (${firstError}), vui lòng thử lại`,
-      );
-    }
-    return { paths, mode: 'WILDCARD', status: 'SUBMITTED', invalidationIds };
+    if (failedPaths.length) return {
+      paths, mode: 'WILDCARD', status: invalidationIds.length ? 'PARTIAL' : 'FAILED',
+      invalidationIds, failedPaths, error: `Không gửi được invalidation cho ${failedPaths.length}/${paths.length} website (${firstError})`,
+    };
+    return { paths, mode: 'WILDCARD', status: 'SUBMITTED', invalidationIds, failedPaths: [] };
   };
 }
 
@@ -467,6 +467,7 @@ export function cloudFrontCdn(
 // ============================================================================
 
 let defaultSiteInvalidator: Promise<SiteInvalidator | null> | undefined;
+let defaultSubmitOnlySiteInvalidator: Promise<SiteInvalidator | null> | undefined;
 
 /** Thay bản mặc định (test, hoặc nơi khởi tạo muốn tự truyền cdn). null = chưa cấu hình CDN. */
 export function configureSiteInvalidation(cdn: CdnClient | null, o: Pick<InvalidationDeps, 'uuid' | 'metric'> = {}): void {
@@ -478,6 +479,13 @@ async function siteInvalidatorFromEnv(): Promise<SiteInvalidator | null> {
   if (!distributionId) return null;
   const sdk = await import('@aws-sdk/client-cloudfront');
   return createSiteInvalidator({ cdn: cloudFrontCdn(new sdk.CloudFrontClient({}), sdk, distributionId) });
+}
+
+async function submitOnlySiteInvalidatorFromEnv(): Promise<SiteInvalidator | null> {
+  const { distributionId } = invalidationConfigFromEnv(process.env);
+  if (!distributionId) return null;
+  const sdk = await import('@aws-sdk/client-cloudfront');
+  return createSiteInvalidatorSubmitOnly({ cdn: cloudFrontCdn(new sdk.CloudFrontClient({}), sdk, distributionId) });
 }
 
 /** Làm mới toàn bộ cache của các website khi trạng thái website hoặc tenant thay đổi (QC-3). */
@@ -505,6 +513,46 @@ export async function invalidateForSites(ctx: Ctx, req: SiteInvalidationRequest)
   }
   console.warn(JSON.stringify({ level: 'WARN', action: 'CDN_NOT_CONFIGURED', tenantId: ctx.tenantId, paths: paths.length }));
   return { paths, mode: 'WILDCARD', status: 'NOT_CONFIGURED', invalidationIds: [] };
+}
+
+/** Submit CloudFront wildcard paths and return without polling for completion (safe for short Lambda handlers). */
+export async function invalidateForSitesSubmitOnly(ctx: Ctx, req: SiteInvalidationRequest): Promise<SiteInvalidationResult> {
+  const paths = sitePaths(req.slugs);
+  if (!paths.length) return { paths, mode: 'WILDCARD', status: 'NOTHING_TO_DO', invalidationIds: [] };
+  if (!defaultSubmitOnlySiteInvalidator) {
+    defaultSubmitOnlySiteInvalidator = submitOnlySiteInvalidatorFromEnv();
+    defaultSubmitOnlySiteInvalidator.catch(() => { defaultSubmitOnlySiteInvalidator = undefined; });
+  }
+  let invalidate: SiteInvalidator | null;
+  try {
+    invalidate = await defaultSubmitOnlySiteInvalidator;
+  } catch (err) {
+    throw new AppError('CACHE_INVALIDATION_FAILED', `Không khởi tạo được CloudFront (${errName(err)}), vui lòng thử lại`);
+  }
+  if (invalidate) return invalidate(ctx, req);
+  if (process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    throw new AppError('CACHE_INVALIDATION_FAILED', 'Chưa cấu hình CLOUDFRONT_DISTRIBUTION_ID');
+  }
+  console.warn(JSON.stringify({ level: 'WARN', action: 'CDN_NOT_CONFIGURED', tenantId: ctx.tenantId, paths: paths.length }));
+  return { paths, mode: 'WILDCARD', status: 'NOT_CONFIGURED', invalidationIds: [] };
+}
+
+/** Read a CloudFront invalidation owned by this tenant without exposing cross-tenant IDs. */
+export async function getInvalidationStatus(ctx: Ctx, id: string): Promise<InvalidationStatus> {
+  const notFound = () => new AppError('NOT_FOUND', 'Không tìm thấy lần làm mới');
+  if (!INVALIDATION_ID_RE.test(id)) throw notFound();
+  const { distributionId } = invalidationConfigFromEnv(process.env);
+  if (!distributionId) throw new AppError('CACHE_INVALIDATION_FAILED', 'Chưa cấu hình CLOUDFRONT_DISTRIBUTION_ID');
+  const sdk = await import('@aws-sdk/client-cloudfront');
+  const cdn = cloudFrontCdn(new sdk.CloudFrontClient({}), sdk, distributionId);
+  const inv = await cdn.getInvalidation(id);
+  if (!inv || !inv.callerReference.startsWith(callerReferencePrefix(ctx.tenantId))) throw notFound();
+  return {
+    id: inv.id,
+    status: inv.status.toLowerCase() === 'completed' ? 'COMPLETED' : 'IN_PROGRESS',
+    paths: inv.paths,
+    ...(inv.createdAt ? { createdAt: inv.createdAt } : {}),
+  };
 }
 
 /**
