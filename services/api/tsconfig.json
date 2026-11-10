@@ -36,7 +36,6 @@
     "../../libs/common/api-key-transaction.ts",
     "../../libs/common/tenant.ts",
     "../../libs/common/invalidation.ts",
-    "../../libs/common/cacheInvalidation.ts",
     "../../libs/common/glossary.ts",
     "../../libs/common/markers.ts",
     "../../libs/common/seg.ts",
@@ -50,7 +49,7 @@
     "../../libs/common/htmlDom.ts",
     "../../libs/common/tenantAws.ts",
     "../../libs/common/usage/usage.ts",
-    "../../tests/unit/cache_invalidation.test.ts"
+    "../../tests/unit/invalidation_contract.test.ts"
   ],
   "exclude": ["dist", "node_modules"]
 }

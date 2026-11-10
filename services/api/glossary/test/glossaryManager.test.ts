@@ -159,6 +159,13 @@ function createMockHarness(
         }
         return results;
       },
+      async listTenantSites(ctx) {
+        assertTenantKey(ctx, `TENANT#${ctx.tenantId}`);
+        return [
+          { SK: 'HOST#active-site', status: 'ACTIVE' },
+          { SK: 'HOST#paused-site', status: 'PAUSED' },
+        ];
+      },
       async transact(ctx, ops: any[]) {
         transactCount++;
         for (const op of ops) {
@@ -352,6 +359,48 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     // Bản dịch MACHINE cũ (entryGlossaryVersion = 1) chứa từ vừa xóa PHẢI bị coi là lỗi thời
     assert.equal(isStale('Thưởng thức món cao lầu đặc sản.', 1, stateV2), true);
     assert.equal(isStale('Phòng có ban công hướng biển.', 1, stateV2), false);
+  });
+
+  it('sau khi lưu thuật ngữ, chỉ invalidates website ACTIVE qua invalidator chung và trả trạng thái refresh', async () => {
+    const { deps } = createMockHarness();
+    let receivedSlugs: readonly string[] = [];
+    deps.invalidateSites = async (_ctx, request) => {
+      receivedSlugs = request.slugs;
+      return {
+        paths: ['/active-site/*'],
+        mode: 'WILDCARD',
+        status: 'SUBMITTED',
+        invalidationIds: ['invalidation-123'],
+      };
+    };
+
+    const result = await putTerm(adminCtx, {
+      sourceTerm: 'Cao Lầu',
+      sourceLang: 'vi',
+      type: 'KEEP',
+    }, deps);
+
+    assert.deepEqual(receivedSlugs, ['active-site']);
+    assert.equal(result.cacheInvalidation.status, 'SUBMITTED');
+    assert.deepEqual(result.cacheInvalidation.invalidationIds, ['invalidation-123']);
+  });
+
+  it('trả trạng thái refresh FAILED nhưng vẫn giữ glossary đã lưu khi invalidation lỗi', async () => {
+    const { deps } = createMockHarness();
+    deps.invalidateSites = async () => {
+      throw new Error('CloudFront unavailable');
+    };
+
+    const result = await putTerm(adminCtx, {
+      sourceTerm: 'Phở',
+      sourceLang: 'vi',
+      type: 'KEEP',
+    }, deps);
+
+    assert.equal(result.cacheInvalidation.status, 'FAILED');
+    assert.equal(result.cacheInvalidation.error, 'CloudFront unavailable');
+    const saved = await getGlossaryState(adminCtx, deps);
+    assert.equal(saved.terms.some((term) => term.normalized === 'phở'), true);
   });
 
   it('Optimistic Locking: phát hiện xung đột VERSION_CONFLICT, TENANT_SUSPENDED giữa chừng và NOT_FOUND khi thiếu CONFIG', async () => {

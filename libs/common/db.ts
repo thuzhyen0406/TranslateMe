@@ -23,11 +23,6 @@ const websiteSlugReservationClient = createTenantDocumentClientRouter(DynamoDBDo
   sessionName: 'website-slug-reservation',
   allowPlatformSlugReservations: true,
 });
-const websiteSlugReservationClient = createTenantDocumentClientRouter(DynamoDBDocumentClient.from(client), {
-  roleArn: process.env.TENANT_WEBSITE_DATA_ACCESS_ROLE_ARN,
-  sessionName: 'website-slug-reservation',
-  allowPlatformSlugReservations: true,
-});
 const TABLE_NAME = process.env.TABLE_NAME || 'translate-data';
 
 function assertTenantAccess(ctx: Ctx, key: { PK: string }): void {

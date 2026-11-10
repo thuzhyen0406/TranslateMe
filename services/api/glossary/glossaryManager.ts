@@ -22,7 +22,7 @@ import {
   type ImportTerminologyCommandOutput,
 } from '@aws-sdk/client-translate';
 import { db, requireRole } from '../../../libs/common/db.js';
-import { invalidateEdgeCache, type InvalidateCacheOptions } from '../../../libs/common/cacheInvalidation.js';
+import { invalidateForSites, type SiteInvalidationResult } from '../../../libs/common/invalidation.js';
 import {
   cleanTermText,
   clearGlossaryCache,
@@ -101,7 +101,12 @@ export interface ImportCsvResult {
   skippedCount: number;
   version: number;
   terminologySynced?: boolean;
+  cacheInvalidation?: GlossaryCacheInvalidationResult;
 }
+
+export type GlossaryCacheInvalidationResult =
+  | SiteInvalidationResult
+  | { status: 'FAILED'; error: string; paths: string[]; mode: 'WILDCARD'; invalidationIds: string[] };
 
 export interface TranslateTerminologyClient {
   send(
@@ -110,10 +115,10 @@ export interface TranslateTerminologyClient {
 }
 
 export interface GlossaryDependencies {
-  db: Pick<typeof db, 'get' | 'put' | 'query' | 'transact'> & Partial<Pick<typeof db, 'update'>>;
+  db: Pick<typeof db, 'get' | 'put' | 'query' | 'transact' | 'listTenantSites'> & Partial<Pick<typeof db, 'update'>>;
   translateClient: TranslateTerminologyClient;
   now: () => number;
-  invalidateCache?: (ctx: Ctx, options: InvalidateCacheOptions) => Promise<string | undefined>;
+  invalidateSites?: typeof invalidateForSites;
 }
 
 let defaultTranslateClient: TranslateClient | undefined;
@@ -130,17 +135,18 @@ const defaultDependencies: GlossaryDependencies = {
     send: (cmd) => getDefaultTranslateClient().send(cmd),
   },
   now: () => Date.now(),
-  invalidateCache: invalidateEdgeCache,
+  invalidateSites: invalidateForSites,
 };
 
-async function invalidateGlossarySites(ctx: Ctx, deps: GlossaryDependencies): Promise<void> {
+async function invalidateGlossarySites(ctx: Ctx, deps: GlossaryDependencies): Promise<GlossaryCacheInvalidationResult> {
+  let paths: string[] = [];
   try {
-    const hosts = await deps.db.query(ctx, `TENANT#${ctx.tenantId}`, 'HOST#');
-    await Promise.all(hosts
-      .filter((host) => host.status === 'ACTIVE' && typeof host.SK === 'string')
-      .map((host) => (deps.invalidateCache ?? invalidateEdgeCache)(ctx, {
-        slug: String(host.SK).slice('HOST#'.length),
-      })));
+    const sites = await deps.db.listTenantSites(ctx);
+    const slugs = sites
+      .filter((site) => site.status === 'ACTIVE' && typeof site.SK === 'string' && site.SK.startsWith('HOST#'))
+      .map((site) => String(site.SK).slice('HOST#'.length));
+    paths = slugs.map((slug) => `/${slug}/*`);
+    return await (deps.invalidateSites ?? invalidateForSites)(ctx, { slugs });
   } catch (error) {
     // A cache refresh must not undo a glossary commit.
     console.error(JSON.stringify({
@@ -149,6 +155,13 @@ async function invalidateGlossarySites(ctx: Ctx, deps: GlossaryDependencies): Pr
       tenantId: ctx.tenantId,
       error: error instanceof Error ? error.message : 'Unknown error',
     }));
+    return {
+      status: 'FAILED',
+      error: error instanceof Error ? error.message : 'Unknown error',
+      paths,
+      mode: 'WILDCARD',
+      invalidationIds: [],
+    };
   }
 }
 
@@ -531,7 +544,7 @@ export async function putTerm(
   ctx: Ctx,
   input: PutTermInput,
   deps: GlossaryDependencies = defaultDependencies,
-): Promise<{ version: number; terminologySynced: boolean }> {
+): Promise<{ version: number; terminologySynced: boolean; cacheInvalidation: GlossaryCacheInvalidationResult }> {
   const cleanedSource = cleanTermText(input?.sourceTerm ?? '');
   const normalized = normalizeTerm(cleanedSource);
 
@@ -667,9 +680,9 @@ export async function putTerm(
     langProfile.configuredTargetLangs,
     deps,
   );
-  await invalidateGlossarySites(ctx, deps);
+  const cacheInvalidation = await invalidateGlossarySites(ctx, deps);
 
-  return { version: newVersion, terminologySynced };
+  return { version: newVersion, terminologySynced, cacheInvalidation };
 }
 
 /**
@@ -682,7 +695,7 @@ export async function deleteTerm(
   ctx: Ctx,
   termOrNormalized: string,
   deps: GlossaryDependencies = defaultDependencies,
-): Promise<{ version: number; terminologySynced: boolean }> {
+): Promise<{ version: number; terminologySynced: boolean; cacheInvalidation: GlossaryCacheInvalidationResult }> {
   const normalized = normalizeTerm(termOrNormalized);
   if (!normalized) {
     throw new AppError('INVALID_REQUEST', 'Từ thuật ngữ cần xóa không hợp lệ');
@@ -746,9 +759,9 @@ export async function deleteTerm(
     langProfile.configuredTargetLangs,
     deps,
   );
-  await invalidateGlossarySites(ctx, deps);
+  const cacheInvalidation = await invalidateGlossarySites(ctx, deps);
 
-  return { version: newVersion, terminologySynced };
+  return { version: newVersion, terminologySynced, cacheInvalidation };
 }
 
 // ============================================================================
@@ -1079,7 +1092,7 @@ export async function importCsv(
     langProfile.configuredTargetLangs,
     deps,
   );
-  await invalidateGlossarySites(ctx, deps);
+  const cacheInvalidation = await invalidateGlossarySites(ctx, deps);
 
   return {
     validRows: parsedEntries.length,
@@ -1090,6 +1103,7 @@ export async function importCsv(
     skippedCount,
     version: newVersion,
     terminologySynced,
+    cacheInvalidation,
   };
 }
 
