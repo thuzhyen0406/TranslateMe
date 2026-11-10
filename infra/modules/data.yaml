@@ -213,8 +213,7 @@ Resources:
         Rules:
           - Id: ExpireTenantBatchFilesAfterSevenDays
             Status: Enabled
-            Filter:
-              Prefix: batch/
+            Prefix: batch/
             ExpirationInDays: 7
             NoncurrentVersionExpiration:
               NoncurrentDays: 7

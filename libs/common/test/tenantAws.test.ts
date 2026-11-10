@@ -1,8 +1,17 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createTenantDocumentClientRouter, tenantSessionPolicy } from '../tenantAws.js';
+
+function findRepositoryRoot(): string {
+  let cur = process.cwd();
+  while (cur && cur !== resolve(cur, '..')) {
+    if (existsSync(resolve(cur, 'infra/modules/iam.yaml'))) return cur;
+    cur = resolve(cur, '..');
+  }
+  return resolve(process.cwd(), '..');
+}
 
 describe('tenant-scoped AWS sessions', () => {
   it('session policy limits LeadingKeys to one tenant without platform slug reservations', () => {
@@ -36,7 +45,8 @@ describe('tenant-scoped AWS sessions', () => {
   });
 
   it('IAM tenant role grants transaction item actions and requires session tags', () => {
-    const iamTemplate = readFileSync(resolve(process.cwd(), '../../infra/modules/iam.yaml'), 'utf8');
+    const repositoryRoot = findRepositoryRoot();
+    const iamTemplate = readFileSync(resolve(repositoryRoot, 'infra/modules/iam.yaml'), 'utf8');
     assert.match(iamTemplate, /dynamodb:ConditionCheckItem/);
     assert.match(iamTemplate, /sts:TagSession/);
     assert.match(iamTemplate, /aws:RequestTag\/TenantId/);
@@ -54,7 +64,8 @@ describe('tenant-scoped AWS sessions', () => {
   });
 
   it('defines HostSlugResource as a valid child of HostsResource', () => {
-    const template = readFileSync(resolve(process.cwd(), '../../infra/modules/api-gateway.yaml'), 'utf8');
+    const repositoryRoot = findRepositoryRoot();
+    const template = readFileSync(resolve(repositoryRoot, 'infra/modules/api-gateway.yaml'), 'utf8');
     const slugResource = template.match(/  HostSlugResource:\s*([\s\S]*?)(?=\n  [A-Za-z][A-Za-z0-9]+:|\s*$)/);
     assert.ok(slugResource, 'HostSlugResource exists');
     assert.match(slugResource[1], /Type: AWS::ApiGateway::Resource/);
@@ -64,7 +75,7 @@ describe('tenant-scoped AWS sessions', () => {
   });
 
   it('keeps application AssumeRole calls behind the tenant-policy helper', () => {
-    const repositoryRoot = resolve(process.cwd(), '../..');
+    const repositoryRoot = findRepositoryRoot();
     const sourceRoots = [resolve(repositoryRoot, 'libs'), resolve(repositoryRoot, 'services')];
     const findings: string[] = [];
     const visit = (directory: string) => {
@@ -78,8 +89,8 @@ describe('tenant-scoped AWS sessions', () => {
       }
     };
     sourceRoots.forEach(visit);
-    assert.deepEqual(findings, [resolve(process.cwd(), 'tenantAws.ts')]);
-    const helper = readFileSync(resolve(process.cwd(), 'tenantAws.ts'), 'utf8');
+    assert.deepEqual(findings, [resolve(repositoryRoot, 'libs/common/tenantAws.ts')]);
+    const helper = readFileSync(resolve(repositoryRoot, 'libs/common/tenantAws.ts'), 'utf8');
     assert.match(helper, /function createTenantCredentialsProvider\(/);
     assert.doesNotMatch(helper, /export\s+function\s+createTenantCredentialsProvider\(/);
   });

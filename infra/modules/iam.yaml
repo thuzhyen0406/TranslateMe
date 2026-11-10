@@ -462,7 +462,6 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
-                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: TranslateText
                 Effect: Allow
@@ -496,7 +495,6 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
-                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: InvalidateWebsiteCache
                 Effect: Allow
@@ -526,7 +524,6 @@ Resources:
                   - sts:AssumeRole
                   - sts:SetSourceIdentity
                   - sts:TagSession
-                  - sts:SetSourceIdentity
                 Resource: !GetAtt TenantDataAccessRole.Arn
               - Sid: SetTenantClaimsOnConfirmedUser
                 Effect: Allow

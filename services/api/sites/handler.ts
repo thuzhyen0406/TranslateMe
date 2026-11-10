@@ -101,8 +101,9 @@ return async function handler(event: WebsiteEvent) {
       ) {
         throw new AppError('INVALID_REQUEST', 'Thiếu hoặc sai kiểu thông tin website');
       }
-      result = await dependencies.create(ctx, body as never);
-      result = { ...(result as Record<string, unknown>), host: result };
+      const created = await dependencies.create(ctx, body as never);
+      const host = (await dependencies.getHost(ctx, (created as { slug?: string }).slug ?? slug)) ?? created;
+      result = { ...(created as Record<string, unknown>), host };
     } else if (!slug) {
       throw new AppError('NOT_FOUND', 'Không tìm thấy website');
     } else if (path.endsWith('/verify') && method === 'POST') {

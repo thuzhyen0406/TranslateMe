@@ -52,6 +52,7 @@ export function tenantSessionPolicy(
   tenantId: string,
   buckets: {
     payloadBucketArn?: string;
+    payloadBucketKmsKeyArn?: string;
     batchUploadBucketArn?: string;
     batchUploadKmsKeyArn?: string;
     dataKmsKeyArn?: string;
@@ -209,6 +210,7 @@ export function createTenantDocumentClientRouter(
     batchUploadKmsKeyArn?: string;
     dataKmsKeyArn?: string;
     dataTableName?: string;
+    allowPlatformSlugReservation?: boolean;
     allowPlatformSlugReservations?: boolean;
     sts?: Pick<STSClient, 'send'>;
     createClient?: (credentials: TenantCredentialsProvider) => SendClient;
@@ -232,7 +234,7 @@ export function createTenantDocumentClientRouter(
           payloadBucketKmsKeyArn: options.payloadBucketKmsKeyArn,
           batchUploadBucketArn: options.batchUploadBucketArn,
           batchUploadKmsKeyArn: options.batchUploadKmsKeyArn,
-          allowPlatformSlugReservation: Boolean(platformSlugReservationKey && options.allowPlatformSlugReservations),
+          allowPlatformSlugReservation: Boolean(platformSlugReservationKey && (options.allowPlatformSlugReservation || options.allowPlatformSlugReservations)),
           platformSlugReservationKey,
         };
         const credentials = createTenantCredentialsProvider(
@@ -265,7 +267,7 @@ export function createTenantDocumentClientRouter(
       const tenantId = keys.values().next().value as string | undefined;
       if (!tenantId) return base.send(command);
       if (!roleArn && localFallback) return base.send(command);
-      const platformSlugReservationKey = options.allowPlatformSlugReservations
+      const platformSlugReservationKey = (options.allowPlatformSlugReservation || options.allowPlatformSlugReservations)
         ? platformSlugKeys.values().next().value as string | undefined
         : undefined;
       return (await clientFor(tenantId, platformSlugReservationKey)).send(command);

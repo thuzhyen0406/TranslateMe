@@ -306,3 +306,42 @@ export async function resumeSite(
   });
   return { status: 'ACTIVE' as const, invalidation };
 }
+
+export async function updateSite(
+  ctx: Ctx,
+  slug: string,
+  input: Record<string, unknown>,
+  deps: SiteManagerDependencies = defaultDependencies,
+): Promise<Record<string, unknown>> {
+  requireRole(ctx, ['TENANT_ADMIN']);
+  await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
+
+  const site = await deps.db.get(ctx, keys.host(ctx, slug));
+  if (!site) {
+    throw new AppError('NOT_FOUND', 'Không tìm thấy website');
+  }
+
+  const updated: Record<string, unknown> = { ...site };
+  if (Array.isArray(input.targetLangs)) {
+    updated.targetLangs = input.targetLangs;
+  }
+  if (Array.isArray(input.noTranslateSelectors)) {
+    updated.noTranslateSelectors = input.noTranslateSelectors;
+  }
+  if (typeof input.displayName === 'string') {
+    updated.displayName = input.displayName;
+  }
+  if (typeof input.cacheTTL === 'number') {
+    updated.cacheTTL = input.cacheTTL;
+  }
+  if (typeof input.cacheTtlSec === 'number') {
+    updated.cacheTtlSec = input.cacheTtlSec;
+  }
+  if (typeof input.status === 'string' && (input.status === 'ACTIVE' || input.status === 'PAUSED')) {
+    updated.status = input.status;
+  }
+  updated.updatedAt = new Date().toISOString();
+
+  await deps.db.put(ctx, updated);
+  return updated;
+}
