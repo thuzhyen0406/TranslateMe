@@ -73,6 +73,12 @@ export class GlossaryApiError extends Error {
   }
 }
 
+/** These status polling failures will not recover by repeating the same request. */
+export function isTerminalCacheInvalidationStatusError(error: unknown): boolean {
+  return error instanceof GlossaryApiError &&
+    ['NOT_FOUND', 'UNAUTHORIZED', 'PERMISSION_DENIED'].includes(error.code);
+}
+
 // ============================================================================
 // Hàm thuần chuẩn hóa, kiểm tra đầu vào và phân tích CSV UTF-8 (Mục 1.3.3 & Task 2.8)
 // ============================================================================

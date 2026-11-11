@@ -12,6 +12,7 @@ import {
   getEditableGlossaryTargetLangs,
   getGlossaryTableLangs,
   glossaryErrorMessage,
+  isTerminalCacheInvalidationStatusError,
   mergeGlossaryCacheInvalidations,
   glossaryTermFromJson,
   initGlossaryFormTranslations,
@@ -131,6 +132,13 @@ describe('Q3 – kiểm tra đầu vào thuật ngữ và giải mã CSV UTF-8 (
 });
 
 describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)', () => {
+  it('phân biệt lỗi trạng thái kết thúc với lỗi có thể thử lại', () => {
+    assert.equal(isTerminalCacheInvalidationStatusError(new GlossaryApiError('NOT_FOUND', 'missing')), true);
+    assert.equal(isTerminalCacheInvalidationStatusError(new GlossaryApiError('PERMISSION_DENIED', 'forbidden')), true);
+    assert.equal(isTerminalCacheInvalidationStatusError(new GlossaryApiError('NETWORK_ERROR', 'offline')), false);
+    assert.equal(isTerminalCacheInvalidationStatusError(new GlossaryApiError('INTERNAL_ERROR', 'server error')), false);
+  });
+
   it('giữ và gộp các invalidation ID cũ khi thử lại', () => {
     const merged = mergeGlossaryCacheInvalidations(
       {
