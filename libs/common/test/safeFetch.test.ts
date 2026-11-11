@@ -30,14 +30,18 @@ function assertBlocked(r: SafeFetchOutcome, reason?: string) {
 }
 
 // ============================================================================
-// KỊCH BẢN 6: 9/9 đích phải bị chặn
+// KỊCH BẢN 6: 9/9 ngăn kết nối IP nội bộ (8 bị chặn hoàn toàn + 1 ghim IP công khai)
 // ============================================================================
+let scenario6InternalPrevented = 0;
 let scenario6Blocked = 0;
+let scenario6AllowedPinnedPublic = 0;
 const SCENARIO6_TOTAL = 9;
 
-describe('Kịch bản 6 – 9 đích SSRF phải bị chặn', () => {
+describe('Kịch bản 6 – 9 tình huống SSRF: 0 kết nối tới IP nội bộ (8 bị chặn + 1 ghim IP công khai)', () => {
   after(() => {
-    console.log(`\n>>> Kịch bản 6: ${scenario6Blocked}/${SCENARIO6_TOTAL} đích bị chặn\n`);
+    console.log(
+      `\n>>> Kịch bản 6: ${scenario6InternalPrevented}/${SCENARIO6_TOTAL} tình huống ngăn kết nối IP nội bộ (${scenario6Blocked}/${SCENARIO6_TOTAL} yêu cầu BLOCKED, ${scenario6AllowedPinnedPublic}/${SCENARIO6_TOTAL} ghim IP công khai an toàn)\n`,
+    );
   });
 
   it('[6.1] http://169.254.169.254/latest/meta-data/ (IP metadata) -> BLOCKED PRIVATE_IP', async () => {
@@ -48,6 +52,7 @@ describe('Kịch bản 6 – 9 đích SSRF phải bị chặn', () => {
     assert.equal(transport.calls.length, 0);
     assert.equal(resolver.calls.length, 0, 'IP literal không cần DNS');
     scenario6Blocked++;
+    scenario6InternalPrevented++;
   });
 
   it('[6.2] http://localhost/ (resolver giả -> 127.0.0.1) -> BLOCKED PRIVATE_IP', async () => {
@@ -58,6 +63,7 @@ describe('Kịch bản 6 – 9 đích SSRF phải bị chặn', () => {
     assert.deepEqual(resolver.calls, ['localhost']);
     assert.equal(transport.calls.length, 0);
     scenario6Blocked++;
+    scenario6InternalPrevented++;
   });
 
   it('[6.3] http://127.0.0.1/ -> BLOCKED PRIVATE_IP', async () => {
@@ -66,6 +72,7 @@ describe('Kịch bản 6 – 9 đích SSRF phải bị chặn', () => {
     assertBlocked(r, 'PRIVATE_IP');
     assert.equal(transport.calls.length, 0);
     scenario6Blocked++;
+    scenario6InternalPrevented++;
   });
 
   it('[6.4] http://10.0.0.1/ -> BLOCKED PRIVATE_IP', async () => {
@@ -74,6 +81,7 @@ describe('Kịch bản 6 – 9 đích SSRF phải bị chặn', () => {
     assertBlocked(r, 'PRIVATE_IP');
     assert.equal(transport.calls.length, 0);
     scenario6Blocked++;
+    scenario6InternalPrevented++;
   });
 
   it('[6.5] http://[::1]/ -> BLOCKED PRIVATE_IP', async () => {
@@ -82,6 +90,7 @@ describe('Kịch bản 6 – 9 đích SSRF phải bị chặn', () => {
     assertBlocked(r, 'PRIVATE_IP');
     assert.equal(transport.calls.length, 0);
     scenario6Blocked++;
+    scenario6InternalPrevented++;
   });
 
   it('[6.6] http://[fd00::1]/ -> BLOCKED PRIVATE_IP', async () => {
@@ -90,6 +99,7 @@ describe('Kịch bản 6 – 9 đích SSRF phải bị chặn', () => {
     assertBlocked(r, 'PRIVATE_IP');
     assert.equal(transport.calls.length, 0);
     scenario6Blocked++;
+    scenario6InternalPrevented++;
   });
 
   it('[6.7] DNS rebinding (lần 1 IP công khai, lần 2 127.0.0.1) -> không phân giải lại, không bao giờ chạm IP nội bộ', async () => {
@@ -113,7 +123,9 @@ describe('Kịch bản 6 – 9 đích SSRF phải bị chặn', () => {
     assert.equal(resolver.calls.length, 1, 'lookup ghim không gọi resolver');
     assert.ok(!contactedIps(transport).includes('127.0.0.1'));
     assert.equal(r.kind, 'OK');
-    scenario6Blocked++; // đích nội bộ 127.0.0.1 không bao giờ được kết nối
+    // Yêu cầu kết nối an toàn tới IP công khai đã ghim (không tăng scenario6Blocked); đích nội bộ 127.0.0.1 không bao giờ được kết nối.
+    scenario6AllowedPinnedPublic++;
+    scenario6InternalPrevented++;
   });
 
   it('[6.8] Host công khai trả 302 Location http://10.0.0.1/ -> BLOCKED ở lần chuyển hướng', async () => {
@@ -124,6 +136,7 @@ describe('Kịch bản 6 – 9 đích SSRF phải bị chặn', () => {
     assert.equal(transport.calls.length, 1, 'không được gửi request tới 10.0.0.1');
     assert.deepEqual(contactedIps(transport), [PUBLIC_IP]);
     scenario6Blocked++;
+    scenario6InternalPrevented++;
   });
 
   it('[6.9] http://example.test:22/ (cổng 22) -> BLOCKED PORT, không phân giải DNS', async () => {
@@ -134,6 +147,7 @@ describe('Kịch bản 6 – 9 đích SSRF phải bị chặn', () => {
     assert.equal(resolver.calls.length, 0);
     assert.equal(transport.calls.length, 0);
     scenario6Blocked++;
+    scenario6InternalPrevented++;
   });
 });
 
