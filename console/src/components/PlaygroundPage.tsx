@@ -6,7 +6,15 @@ const LANGS = [['en','Tiếng Anh'],['vi','Tiếng Việt'],['ja','Tiếng Nhậ
 export const PlaygroundPage: React.FC<{ session: AuthenticatedSession }> = ({ session }) => {
   const [text, setText] = useState('Chào mừng bạn đến với homestay của chúng tôi.'); const [source, setSource] = useState('vi'); const [target, setTarget] = useState('en'); const [terminology, setTerminology] = useState(true); const [result, setResult] = useState<TranslateResult | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [copied, setCopied] = useState(false);
   const chars = Array.from(text).length;
-  const curl = useMemo(() => `curl -X POST "${(import.meta as unknown as { env?: Record<string,string> }).env?.VITE_API_BASE_URL ?? 'https://api.example.com'}/translate/realtime" \\\n+  -H "x-api-key: $TRANSLATEME_API_KEY" \\\n+  -H "Content-Type: application/json" \\\n+  -d '${JSON.stringify({ text, ...(source ? { source_lang: source } : {}), target_lang: target, use_terminology: terminology })}'`, [text, source, target, terminology]);
+  const curl = useMemo(() => {
+    const body = JSON.stringify({ text, ...(source ? { source_lang: source } : {}), target_lang: target, use_terminology: terminology });
+    const baseUrl = (import.meta as unknown as { env?: Record<string,string> }).env?.VITE_API_BASE_URL ?? 'https://api.example.com';
+    const shellBody = "'" + body.replace(/'/g, "'\\''") + "'";
+    return `curl -X POST "${baseUrl}/translate/realtime" \\
+  -H "x-api-key: $TRANSLATEME_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  --data-binary ${shellBody}`;
+  }, [text, source, target, terminology]);
   const run = async () => { setBusy(true); setError(''); setResult(null); try { setResult(await translateText(session, { text, ...(source ? { source_lang: source } : {}), target_lang: target, use_terminology: terminology })); } catch (e) { setError(e instanceof Error ? e.message : 'Không thể dịch văn bản.'); } finally { setBusy(false); } };
   return <div className="mx-auto max-w-6xl p-6 md:p-9"><div className="mb-6"><p className="text-xs font-bold uppercase tracking-wider text-[#146c54]">Dùng thử API</p><h1 className="mt-1 text-2xl font-bold text-gray-800">Thử dịch</h1><p className="mt-2 text-sm text-gray-500">Kiểm tra kết quả dịch realtime và cấu hình request API.</p></div>
     <div className="mb-5 flex items-start gap-3 rounded-xl border border-[#d3e8df] bg-[#eff8f4] p-4 text-sm text-[#315b4d]"><span className="text-lg">ⓘ</span><p><b>Được tính vào mức sử dụng tenant.</b> Console dùng phiên đăng nhập hiện tại thay cho API key; nội dung vẫn áp dụng TM và thuật ngữ của tổ chức.</p></div>
