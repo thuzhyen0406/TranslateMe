@@ -332,7 +332,7 @@ const batchBucketArn = process.env.TENANT_BATCH_UPLOAD_BUCKET_ARN;
 const batchKmsKeyArn = process.env.TENANT_BATCH_UPLOAD_KMS_KEY_ARN;
 const tableName = process.env.TABLE_NAME ?? 'translate-data';
 const bucket = process.env.BATCH_UPLOAD_BUCKET ?? '';
-  const routedDdb = createTenantDocumentClientRouter(baseDdb, { roleArn: tenantRoleArn, sessionName: 'batch-workflow' }) as DynamoDBDocumentClient;
+const routedDdb = createTenantDocumentClientRouter(baseDdb, { roleArn: tenantRoleArn, sessionName: 'batch-workflow' }) as DynamoDBDocumentClient;
 const usage = new UsageService(routedDdb, { tableName });
 const comprehend = new ComprehendClient({});
 const translator = createTranslator(new TranslateClient({}));
@@ -340,11 +340,18 @@ const clientCache = new Map<string, S3Client>();
 
 function tenantS3(tenantId: string): S3Client {
   if (!tenantRoleArn || !batchBucketArn || !batchKmsKeyArn) throw new Error('Tenant batch storage is not configured.');
-  let client = clientCache.get(tenantId);
-  if (!client) {
-    client = createTenantS3Client(tenantRoleArn, tenantId, batchBucketArn, 'batch', 'batch-workflow', batchKmsKeyArn);
-    clientCache.set(tenantId, client);
-  }
+  const cachedClient = clientCache.get(tenantId);
+  if (cachedClient) return cachedClient;
+
+  const client = createTenantS3Client(
+    tenantRoleArn,
+    tenantId,
+    batchBucketArn,
+    'batch',
+    'batch-workflow',
+    batchKmsKeyArn,
+  ) as unknown as S3Client;
+  clientCache.set(tenantId, client);
   return client;
 }
 

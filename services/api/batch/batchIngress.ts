@@ -113,6 +113,29 @@ function parseBody(body: string | null | undefined): Record<string, unknown> {
   }
 }
 
+/** Derive a stable JOB id from the upload record so retrying the same file_key reuses one job. */
+function jobIdForUpload(uploadId: string, createdAt: unknown): string {
+  const timestamp = typeof createdAt === 'string' ? Date.parse(createdAt) : Number.NaN;
+  if (!Number.isFinite(timestamp)) throw new AppError('INVALID_REQUEST', 'Upload record has no valid creation time.');
+  return newJobId(timestamp, () => uploadId);
+}
+
+function isExecutionAlreadyStarted(error: unknown): boolean {
+  return (error as { name?: string } | null)?.name === 'ExecutionAlreadyExists';
+}
+
+function sameBatchOptions(
+  job: Record<string, unknown>,
+  fileKey: string,
+  sourceLang: unknown,
+  targetLangs: string[],
+  sendEmail: boolean,
+): boolean {
+  return job.type === 'FILE' && job.fileKey === fileKey && job.sourceLang === sourceLang &&
+    job.sendEmail === sendEmail && Array.isArray(job.targetLangs) &&
+    JSON.stringify(job.targetLangs) === JSON.stringify(targetLangs);
+}
+
 /** Tạo bộ xử lý upload-url và POST batch; output là handler API Gateway chuẩn JSON. */
 export function createBatchIngressHandler(deps: BatchIngressDependencies) {
   /** Xử lý request batch sau khi xác thực phiên Cognito hoặc API key và phân giải tenant tin cậy. */
@@ -124,6 +147,38 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
       'access-control-allow-origin': '*',
     };
     const respond = (statusCode: number, payload: Record<string, unknown>) => ({ statusCode, headers, body: JSON.stringify({ request_id: requestId, ...payload }) });
+    const launchWorkflow = async (ctx: Ctx, jobId: string): Promise<boolean> => {
+      try {
+        await deps.startExecution({ name: jobId, input: JSON.stringify({ job_id: jobId, tenant_id: ctx.tenantId }) });
+      } catch (error) {
+        if (!isExecutionAlreadyStarted(error)) {
+          console.error(JSON.stringify({
+            level: 'ERROR', event: 'BATCH_WORKFLOW_START_PENDING', tenantId: ctx.tenantId,
+            request_id: requestId, job_id: jobId,
+            errorName: error instanceof Error ? error.name : 'UnknownError',
+          }));
+          return false;
+        }
+      }
+
+      // The Standard state machine uses jobId as execution name; retries with the same name/input
+      // resolve to that execution. Persist the acknowledgement to avoid another call on later retries.
+      try {
+        await deps.db.update(ctx, {
+          Key: jobKey(ctx, jobId),
+          UpdateExpression: 'SET #workflowStarted = :started',
+          ExpressionAttributeNames: { '#workflowStarted': 'workflowStarted' },
+          ExpressionAttributeValues: { ':started': true },
+        });
+      } catch (error) {
+        console.error(JSON.stringify({
+          level: 'ERROR', event: 'BATCH_WORKFLOW_ACK_WRITE_FAILED', tenantId: ctx.tenantId,
+          request_id: requestId, job_id: jobId,
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+        }));
+      }
+      return true;
+    };
     try {
       const ctx = await deps.resolveTenant(event, requestId);
       if (!ctx) throw new AppError('UNAUTHORIZED', 'Cần phiên đăng nhập hợp lệ hoặc API key hợp lệ.');
@@ -133,7 +188,7 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
       if (!config || config.status !== 'ACTIVE') throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị tạm khóa.');
       const method = (event.httpMethod ?? 'GET').toUpperCase();
       const path = event.path ?? event.rawPath ?? '';
-      const body = parseBody(event.body);
+      const body = method === 'GET' ? {} : parseBody(event.body);
 
       if (method === 'POST' && /\/translate\/batch\/(?:session\/)?upload-url\/?$/u.test(path)) {
         const file = validateFileName(body.file_name);
@@ -174,6 +229,35 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
         if (!upload || upload.fileKey !== fileKey || new Date(String(upload.expiresAt)).getTime() < deps.now().getTime()) {
           throw new AppError('FILE_NOT_UPLOADED', 'Tệp chưa được tải lên hoặc địa chỉ tải lên đã hết hạn.');
         }
+        const targetLangsValue = body.target_langs;
+        if (!Array.isArray(targetLangsValue) || !targetLangsValue.length || targetLangsValue.length > SUPPORTED_LANGUAGES.size ||
+            targetLangsValue.some((lang) => typeof lang !== 'string' || !SUPPORTED_LANGUAGES.has(lang)) ||
+            new Set(targetLangsValue).size !== targetLangsValue.length) {
+          throw new AppError('INVALID_REQUEST', 'target_langs phải là danh sách mã ngôn ngữ hợp lệ, không trùng.');
+        }
+        const targetLangs = targetLangsValue as string[];
+        if (body.source_lang !== undefined && (typeof body.source_lang !== 'string' || !SUPPORTED_LANGUAGES.has(body.source_lang))) {
+          throw new AppError('INVALID_REQUEST', 'source_lang không được hỗ trợ.');
+        }
+        if (body.send_email !== undefined && typeof body.send_email !== 'boolean') throw new AppError('INVALID_REQUEST', 'send_email phải là boolean.');
+        const sourceLang = typeof body.source_lang === 'string' ? body.source_lang : undefined;
+        const sendEmail = body.send_email === true;
+        const jobId = jobIdForUpload(uploadId, upload.createdAt);
+        const respondForExistingJob = async (existing: Record<string, unknown>) => {
+          if (!sameBatchOptions(existing, fileKey, sourceLang, targetLangs, sendEmail)) {
+            return respond(409, { error: { code: 'IDEMPOTENCY_CONFLICT', message: 'File này đã được gửi với các tùy chọn dịch khác.' } });
+          }
+          if (existing.status === 'QUEUED' && existing.workflowStarted !== true) {
+            const started = await launchWorkflow(ctx, jobId);
+            if (!started) {
+              return respond(503, { job_id: jobId, status: 'QUEUED', retryable: true, error: { code: 'WORKFLOW_START_PENDING', message: 'Chưa xác nhận được workflow; hãy gửi lại cùng file_key để tiếp tục job này.' } });
+            }
+          }
+          return respond(202, { job_id: jobId, status: String(existing.status ?? 'QUEUED'), estimated_characters: Number(existing.estimatedCharacters ?? 0) });
+        };
+        const existingJob = await deps.db.get(ctx, jobKey(ctx, jobId), { consistent: true });
+        if (existingJob) return await respondForExistingJob(existingJob);
+
         let head: { contentLength?: number; contentType?: string };
         try {
           head = await deps.s3.head({ tenantId: ctx.tenantId, bucket: deps.bucket, key: fileKey });
@@ -196,16 +280,6 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
           throw new AppError('INVALID_REQUEST', 'Kích thước tệp đã thay đổi sau khi kiểm tra.');
         }
         const sourceCharacters = inspectBatchFile(bytes, format);
-        const targetLangs = body.target_langs;
-        if (!Array.isArray(targetLangs) || !targetLangs.length || targetLangs.length > SUPPORTED_LANGUAGES.size ||
-            targetLangs.some((lang) => typeof lang !== 'string' || !SUPPORTED_LANGUAGES.has(lang)) ||
-            new Set(targetLangs).size !== targetLangs.length) {
-          throw new AppError('INVALID_REQUEST', 'target_langs phải là danh sách mã ngôn ngữ hợp lệ, không trùng.');
-        }
-        if (body.source_lang !== undefined && (typeof body.source_lang !== 'string' || !SUPPORTED_LANGUAGES.has(body.source_lang))) {
-          throw new AppError('INVALID_REQUEST', 'source_lang không được hỗ trợ.');
-        }
-        if (body.send_email !== undefined && typeof body.send_email !== 'boolean') throw new AppError('INVALID_REQUEST', 'send_email phải là boolean.');
         const estimatedCharacters = sourceCharacters * targetLangs.length;
         const source = ctx.via === 'JWT' ? { kind: 'CONSOLE' as const } : { kind: 'API' as const, keyId: ctx.keyId! };
         const ownerSub = ctx.sub ?? (typeof config.ownerSub === 'string' ? config.ownerSub : undefined);
@@ -216,7 +290,6 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
           if (typeof owner?.email !== 'string' || !owner.email.trim()) throw new AppError('INVALID_REQUEST', 'Email chủ tenant chưa được cấu hình để nhận thông báo batch.');
           notificationEmail = owner.email.trim();
         }
-        const jobId = newJobId(deps.now().getTime());
         let reservation: UsageReservation;
         try {
           reservation = await deps.usage.reserve({
@@ -251,8 +324,8 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
               fileKey,
               fileName: upload.fileName,
               format,
-              ...(typeof body.source_lang === 'string' ? { sourceLang: body.source_lang } : {}),
-              sendEmail: body.send_email === true,
+              ...(sourceLang ? { sourceLang } : {}),
+              sendEmail,
               estimatedCharacters,
               usageSource: source,
               ...(ownerSub ? { ownerSub } : {}),
@@ -260,14 +333,16 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
             },
           });
         } catch (error) {
+          if ((error as { name?: string })?.name === 'ConditionalCheckFailedException') {
+            const existing = await deps.db.get(ctx, jobKey(ctx, jobId), { consistent: true });
+            if (existing) return await respondForExistingJob(existing);
+          }
           throw error;
         }
 
-        try {
-          await deps.startExecution({ name: jobId, input: JSON.stringify({ job_id: jobId, tenant_id: ctx.tenantId }) });
-        } catch (error) {
-          await createJobStore(deps.db, () => deps.now().getTime()).finish(ctx, jobId, { status: 'FAILED', reason: 'START_FAILED' });
-          return respond(500, { error: { code: 'INTERNAL_ERROR', message: 'Không thể khởi chạy công việc batch.' } });
+        const started = await launchWorkflow(ctx, jobId);
+        if (!started) {
+          return respond(503, { job_id: jobId, status: 'QUEUED', retryable: true, error: { code: 'WORKFLOW_START_PENDING', message: 'Chưa xác nhận được workflow; hãy gửi lại cùng file_key để tiếp tục job này.' } });
         }
 
         return respond(202, { job_id: jobId, status: 'QUEUED', estimated_characters: estimatedCharacters });

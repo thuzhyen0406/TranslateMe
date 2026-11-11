@@ -28,11 +28,15 @@ function setup(options: {
   missingConfig?: boolean;
   tenant?: Ctx | null;
   resolveTenantError?: Error;
+  startErrors?: Error[];
 } = {}) {
   const records = new Map<string, Record<string, any>>();
   const s3Calls: Array<{ operation: string; input: Record<string, unknown> }> = [];
   const reservations: Array<Parameters<BatchIngressDependencies['usage']['reserve']>[0]> = [];
   const refunds: unknown[] = [];
+  const startCalls: Array<{ name: string; input: string }> = [];
+  const executions = new Map<string, string>();
+  const startErrors = [...(options.startErrors ?? [])];
   const charLimit = options.charLimit ?? 1000;
   let reservedCharacters = 0;
   const bytes = new TextEncoder().encode(options.text ?? 'Xin chào. Đây là tệp thử nghiệm.');
@@ -69,9 +73,16 @@ function setup(options: {
     async put(_ctx, item) {
       if (item.entityType === 'BATCH_UPLOAD' && options.failUploadWrite) throw new Error('DynamoDB unavailable');
       if (item.entityType === 'JOB' && options.failJobWrite) throw new Error('DynamoDB unavailable');
-      records.set(`${item.PK}|${item.SK}`, { ...item });
+      const storageKey = `${item.PK}|${item.SK}`;
+      if (records.has(storageKey)) throw Object.assign(new Error('conditional check failed'), { name: 'ConditionalCheckFailedException' });
+      records.set(storageKey, { ...item });
     },
-    async update() {},
+    async update(_ctx, params) {
+      const storageKey = `${params.Key.PK}|${params.Key.SK}`;
+      const item = records.get(storageKey);
+      if (!item) return;
+      if (params.ExpressionAttributeNames?.['#workflowStarted']) item.workflowStarted = params.ExpressionAttributeValues?.[':started'];
+    },
   };
   const usage: BatchIngressDependencies['usage'] = {
     async reserve(input) {
@@ -100,7 +111,19 @@ function setup(options: {
     usage,
     s3,
     bucket: 'translateme-batch-test',
-    startExecution: async ({ name, input }) => ({ executionArn: `arn:aws:states:test:execution:batch:${name}` }),
+    startExecution: async ({ name, input }) => {
+      startCalls.push({ name, input });
+      const error = startErrors.shift();
+      const executionArn = `arn:aws:states:test:execution:batch:${name}`;
+      if (error) {
+        // Model the ambiguous case where Step Functions accepted StartExecution but the reply timed out.
+        if (error.name === 'TimeoutError') executions.set(name, input);
+        throw error;
+      }
+      if (executions.has(name)) throw Object.assign(new Error('execution already exists'), { name: 'ExecutionAlreadyExists' });
+      executions.set(name, input);
+      return { executionArn };
+    },
     resolveTenant: async () => {
       if (options.resolveTenantError) throw options.resolveTenantError;
       return options.tenant === undefined ? ctx : options.tenant;
@@ -114,6 +137,8 @@ function setup(options: {
     bytes,
     reservations,
     refunds,
+    startCalls,
+    executions,
     getReservedCharacters: () => reservedCharacters,
   };
 }
@@ -202,6 +227,62 @@ describe('batch upload ingress', () => {
     assert.equal(h.reservations[0].n, jobResponse.payload.estimated_characters);
     assert.deepEqual(h.reservations[0].source, { kind: 'API', keyId: 'key-a' });
     assert.equal(h.reservations[0].now?.toISOString(), NOW.toISOString());
+  });
+
+  it('reuses the same job and execution when the client retries the same file_key', async () => {
+    const h = setup();
+    const upload = await createUpload(h);
+    const payload = { file_key: upload.payload.file_key, target_langs: ['en'], source_lang: 'vi' };
+
+    const first = await request(h, 'POST', '/translate/batch', payload);
+    const retry = await request(h, 'POST', '/translate/batch', payload);
+
+    assert.equal(first.statusCode, 202);
+    assert.equal(retry.statusCode, 202);
+    assert.equal(retry.payload.job_id, first.payload.job_id);
+    assert.equal([...h.records.values()].filter((item) => item.entityType === 'JOB').length, 1);
+    assert.equal(h.startCalls.length, 1);
+    assert.equal(h.executions.size, 1);
+    assert.equal(h.reservations.length, 1);
+  });
+
+  it('keeps a queued job retryable after an ambiguous StartExecution timeout', async () => {
+    const h = setup({ startErrors: [Object.assign(new Error('request timed out'), { name: 'TimeoutError' })] });
+    const upload = await createUpload(h);
+    const payload = { file_key: upload.payload.file_key, target_langs: ['en'] };
+
+    const first = await request(h, 'POST', '/translate/batch', payload);
+    assert.equal(first.statusCode, 503);
+    assert.equal(first.payload.status, 'QUEUED');
+    assert.equal(first.payload.retryable, true);
+    const jobId = first.payload.job_id as string;
+    const jobKey = keys.job(ctx, jobId);
+    const jobBeforeRetry = h.records.get(`${jobKey.PK}|${jobKey.SK}`);
+    assert.equal(jobBeforeRetry?.status, 'QUEUED');
+    assert.equal(jobBeforeRetry?.workflowStarted, undefined);
+
+    const retry = await request(h, 'POST', '/translate/batch', payload);
+    const jobAfterRetry = h.records.get(`${jobKey.PK}|${jobKey.SK}`);
+    assert.equal(retry.statusCode, 202);
+    assert.equal(retry.payload.job_id, jobId);
+    assert.equal(jobAfterRetry?.status, 'QUEUED');
+    assert.equal(jobAfterRetry?.workflowStarted, true);
+    assert.equal([...h.records.values()].filter((item) => item.entityType === 'JOB').length, 1);
+    assert.equal(h.startCalls.length, 2);
+    assert.equal(h.executions.size, 1);
+  });
+
+  it('rejects retrying a file_key with different translation options', async () => {
+    const h = setup();
+    const upload = await createUpload(h);
+    const first = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
+    const conflicting = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['ko'] });
+
+    assert.equal(first.statusCode, 202);
+    assert.equal(conflicting.statusCode, 409);
+    assert.equal(conflicting.payload.error.code, 'IDEMPOTENCY_CONFLICT');
+    assert.equal([...h.records.values()].filter((item) => item.entityType === 'JOB').length, 1);
+    assert.equal(h.startCalls.length, 1);
   });
 
   it('rejects missing or invalid authentication and inactive tenant configuration before storage access', async () => {
