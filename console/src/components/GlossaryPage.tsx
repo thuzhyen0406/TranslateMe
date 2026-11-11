@@ -13,6 +13,7 @@ import {
   glossaryErrorMessage,
   glossaryLangLabel,
   initGlossaryFormTranslations,
+  mergeGlossaryCacheInvalidations,
   validateUpsertTermInput,
   type GlossaryApi,
 } from '../services/glossaryApi.js';
@@ -316,14 +317,21 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
   };
 
   const handleRetryCacheInvalidation = async () => {
+    const previous = cacheInvalidation;
     setRetryingCacheInvalidation(true);
     try {
-      setCacheInvalidation(await api.retryCacheInvalidation(cacheInvalidation?.failedPaths ?? []));
+      const latest = await api.retryCacheInvalidation(previous?.failedPaths ?? []);
+      setCacheInvalidation((current) => current
+        ? mergeGlossaryCacheInvalidations(current, latest)
+        : latest);
     } catch (err) {
-      setCacheInvalidation({
+      const failedRetry: GlossaryCacheInvalidation = {
         status: 'FAILED', mode: 'WILDCARD', paths: [], invalidationIds: [],
-        failedPaths: [], error: glossaryErrorMessage(err),
-      });
+        failedPaths: previous?.failedPaths ?? [], error: glossaryErrorMessage(err),
+      };
+      setCacheInvalidation((current) => current
+        ? mergeGlossaryCacheInvalidations(current, failedRetry)
+        : failedRetry);
     } finally {
       setRetryingCacheInvalidation(false);
     }

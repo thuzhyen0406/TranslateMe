@@ -12,6 +12,7 @@ import {
   getEditableGlossaryTargetLangs,
   getGlossaryTableLangs,
   glossaryErrorMessage,
+  mergeGlossaryCacheInvalidations,
   glossaryTermFromJson,
   initGlossaryFormTranslations,
   validateUpsertTermInput,
@@ -130,6 +131,23 @@ describe('Q3 – kiểm tra đầu vào thuật ngữ và giải mã CSV UTF-8 (
 });
 
 describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)', () => {
+  it('giữ và gộp các invalidation ID cũ khi thử lại', () => {
+    const merged = mergeGlossaryCacheInvalidations(
+      {
+        status: 'PARTIAL', mode: 'WILDCARD', paths: ['/site-a/*', '/site-b/*'],
+        invalidationIds: ['inv-first'], failedPaths: ['/site-b/*'],
+      },
+      {
+        status: 'SUBMITTED', mode: 'WILDCARD', paths: ['/site-b/*'],
+        invalidationIds: ['inv-second'], failedPaths: [],
+      },
+    );
+
+    assert.deepEqual(merged.invalidationIds, ['inv-first', 'inv-second']);
+    assert.deepEqual(merged.paths, ['/site-a/*', '/site-b/*']);
+    assert.deepEqual(merged.failedPaths, []);
+  });
+
   it('gửi đúng JWT Bearer token cho GET/PUT/DELETE/POST import và ánh xạ lỗi tiếng Việt', async () => {
     const calls: Array<{ url: string; method: string; auth: string | null; body?: unknown }> = [];
 

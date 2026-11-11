@@ -711,6 +711,19 @@ export function csvImportResultFromJson(raw: Json): CsvImportPreviewOrCommitResu
   };
 }
 
+/** Combine retry results without dropping CloudFront requests that are still in flight. */
+export function mergeGlossaryCacheInvalidations(
+  previous: GlossaryCacheInvalidation,
+  latest: GlossaryCacheInvalidation,
+): GlossaryCacheInvalidation {
+  return {
+    ...latest,
+    paths: [...new Set([...previous.paths, ...latest.paths])],
+    invalidationIds: [...new Set([...previous.invalidationIds, ...latest.invalidationIds])],
+    failedPaths: latest.failedPaths ?? previous.failedPaths,
+  };
+}
+
 function glossaryCacheInvalidationFromJson(raw: Json): GlossaryCacheInvalidation {
   const allowedStatuses = new Set(['SUBMITTED', 'PARTIAL', 'FAILED', 'NOTHING_TO_DO', 'NOT_CONFIGURED']);
   const rawStatus = str(raw.status);
