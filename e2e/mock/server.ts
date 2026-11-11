@@ -5,7 +5,7 @@ import { createServer, IncomingMessage, Server, ServerResponse } from 'node:http
 import { createHash, randomBytes } from 'node:crypto';
 import { State, TenantState } from '../lib/state';
 
-type Leak = 'jobs' | 'file_key' | 'body_tenant' | 'perm_msg' | 'lock_cache' | 'lock_api' | 'platform_tm';
+type Leak = 'jobs' | 'file_key' | 'body_tenant' | 'perm_msg' | 'lock_cache' | 'lock_api' | 'platform_tm' | 'ssrf';
 interface Opts { leaks?: Leak[]; lockDelayMs?: number; rate?: number }
 interface Tenant { id: string; plan: string; status: 'ACTIVE' | 'LOCKED'; lockedAt: number; charUsed: number }
 interface Key { value: string; keyId: string; tenantId: string; plan: 'basic' | 'tiny'; used: number; win: number[] }
@@ -47,6 +47,8 @@ export function startMock(opts: Opts = {}) {
     return h === 'localhost' || /^127\./.test(h) || /^10\./.test(h) || /^169\.254\./.test(h) ||
       /^192\.168\./.test(h) || h === '::1' || h.startsWith('fd') || /^172\.(1[6-9]|2\d|3[01])\./.test(h);
   };
+  const leaksSsrftarget = (u: URL): boolean =>
+    leaks.has('ssrf') && u.hostname.replace(/^\[|\]$/g, '').toLowerCase() === '169.254.169.254';
 
   const server: Server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://x');
@@ -184,7 +186,7 @@ export function startMock(opts: Opts = {}) {
       if (path === '/console/hosts' && method === 'POST') {
         if (writeBlocked(t)) return;
         let u: URL; try { u = new URL(String(body.home_url)); } catch { return fail(res, 400, 'FORBIDDEN', 'URL không hợp lệ.'); }
-        if (!['http:', 'https:'].includes(u.protocol) || isPrivateHost(u)) return fail(res, 403, 'FORBIDDEN', 'URL không phải địa chỉ công khai.');
+        if (!['http:', 'https:'].includes(u.protocol) || (isPrivateHost(u) && !leaksSsrftarget(u))) return fail(res, 403, 'FORBIDDEN', 'URL không phải địa chỉ công khai.');
         const slug = u.hostname.replace(/[^a-z0-9-]/gi, '-').toLowerCase();
         if (hosts.has(slug)) return fail(res, 409, 'DUPLICATE_SLUG', 'Slug đã tồn tại.');
         hosts.set(slug, { tenantId: t.id, origin: body.home_url, status: 'PENDING' });
@@ -193,8 +195,12 @@ export function startMock(opts: Opts = {}) {
       const hm = path.match(/^\/console\/hosts\/([^/]+)(\/verify)?$/);
       if (hm) {
         const h = own(hosts as any, hm[1]);
-        if (!h) return hm[2] ? fail(res, 400, 'VERIFICATION_FAILED', 'Không thể xác minh website.') : denyOther(res);
+        if (!h) return hm[2] ? fail(res, 422, 'SITE_UNREACHABLE', 'Không thể xác minh website.') : denyOther(res);
         if (writeBlocked(t)) return;
+        if (hm[2] && leaksSsrftarget(new URL(h.origin))) {
+          h.status = 'ACTIVE';
+          return send(res, 200, { slug: hm[1], status: 'ACTIVE' });
+        }
         if (hm[2]) return fail(res, 400, 'VERIFICATION_FAILED', 'Không thể xác minh website.');
         return send(res, 200, { slug: hm[1], status: (h as any).status });
       }

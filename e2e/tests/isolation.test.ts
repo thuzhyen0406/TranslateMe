@@ -132,7 +132,7 @@ describe('Kịch bản 4 – phép thử chéo: A truy cập tài nguyên của 
     const run = (slug: string) => call('POST', R.hostVerify(slug), { token: tokA, body: { method: 'META' } });
     const [x, base] = [await run(Bt().slug), await run(lookalike(Bt().slug))];
     note('status', x.status); note('code', errCode(x));
-    assertDenied(x, base, { forbidden: [Bt().origin], expectCode: 'VERIFICATION_FAILED' });
+    assertDenied(x, base, { forbidden: [Bt().origin], expectCode: 'SITE_UNREACHABLE' });
   }));
 
   it('X7 file_key của B đưa vào batch của A (presigned URL / tệp)', ev(SC, 'X7', 'API key A -> POST /translate/batch {file_key B}', async (note) => {

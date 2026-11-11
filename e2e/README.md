@@ -10,7 +10,7 @@ npm install
 npm run selftest
 ```
 
-Selftest chạy mock local, không gọi AWS. Mock có các lỗi cố ý để xác nhận test phát hiện rò rỉ tenant, sai so sánh `NOT_FOUND`, SSRF và lỗi khóa tenant. Kết quả selftest không thay thế nghiệm thu trên API thật.
+Selftest chạy mock local, không gọi AWS. Các mode lỗi cố ý kiểm tra rò rỉ tenant, sai khác giữa lỗi quyền và `NOT_FOUND`, lộ dữ liệu Platform, lỗi khóa tenant và SSRF. Riêng mode SSRF cho phép xác minh địa chỉ metadata `169.254.169.254`; ca S1 phải thất bại trong chế độ này. Kết quả selftest không thay thế nghiệm thu trên API thật.
 
 ## Chạy trên môi trường đã seed dữ liệu
 

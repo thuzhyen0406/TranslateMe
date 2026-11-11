@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { startMock } from '../mock/server';
 import { saveState } from '../lib/state';
 
-type Leak = 'jobs' | 'file_key' | 'body_tenant' | 'perm_msg' | 'lock_cache' | 'lock_api' | 'platform_tm';
+type Leak = 'jobs' | 'file_key' | 'body_tenant' | 'perm_msg' | 'lock_cache' | 'lock_api' | 'platform_tm' | 'ssrf';
 const CASES: Array<{ leak: Leak | null; expectFail: string[] }> = [
   { leak: null, expectFail: [] },
   { leak: 'jobs', expectFail: ['X1'] },
@@ -16,6 +16,7 @@ const CASES: Array<{ leak: Leak | null; expectFail: string[] }> = [
   { leak: 'platform_tm', expectFail: ['E3'] },
   { leak: 'lock_api', expectFail: ['L4'] },
   { leak: 'lock_cache', expectFail: ['L4'] },
+  { leak: 'ssrf', expectFail: ['S1'] },
 ];
 
 async function main() {
