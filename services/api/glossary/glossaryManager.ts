@@ -145,13 +145,19 @@ const defaultDependencies: GlossaryDependencies = {
   getInvalidationStatus: getCloudFrontInvalidationStatus,
 };
 
-async function invalidateGlossarySites(ctx: Ctx, deps: GlossaryDependencies): Promise<GlossaryCacheInvalidationResult> {
+async function invalidateGlossarySites(
+  ctx: Ctx,
+  deps: GlossaryDependencies,
+  onlySlugs?: readonly string[],
+): Promise<GlossaryCacheInvalidationResult> {
   let paths: string[] = [];
   try {
     const sites = await deps.db.listTenantSites(ctx);
-    const slugs = sites
+    const activeSlugs = sites
       .filter((site) => site.status === 'ACTIVE' && typeof site.SK === 'string' && site.SK.startsWith('HOST#'))
       .map((site) => String(site.SK).slice('HOST#'.length));
+    const requestedSlugs = onlySlugs ? new Set(onlySlugs) : undefined;
+    const slugs = requestedSlugs ? activeSlugs.filter((slug) => requestedSlugs.has(slug)) : activeSlugs;
     paths = slugs.map((slug) => `/${slug}/*`);
     return await (deps.invalidateSites ?? invalidateForSitesSubmitOnly)(ctx, { slugs });
   } catch (error) {
@@ -176,9 +182,14 @@ async function invalidateGlossarySites(ctx: Ctx, deps: GlossaryDependencies): Pr
 /** Re-submit a glossary cache refresh without changing glossary data or version. */
 export async function retryGlossaryCacheInvalidation(
   ctx: Ctx,
+  failedPaths: readonly string[],
   deps: GlossaryDependencies = defaultDependencies,
 ): Promise<GlossaryCacheInvalidationResult> {
-  return invalidateGlossarySites(ctx, deps);
+  const failedSlugs = failedPaths.flatMap((path) => {
+    const match = /^\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/\*$/.exec(path);
+    return match ? [match[1]] : [];
+  });
+  return invalidateGlossarySites(ctx, deps, [...new Set(failedSlugs)]);
 }
 
 export async function getGlossaryCacheInvalidationStatus(
@@ -1225,7 +1236,10 @@ export async function handleGlossaryRoute(
   if (req.method === 'POST') {
     if (req.path === '/console/glossary/cache-invalidation/retry') {
       requireRole(ctx, ['TENANT_ADMIN']);
-      return retryGlossaryCacheInvalidation(ctx, deps);
+      const failedPaths = Array.isArray(req.body?.failedPaths)
+        ? req.body.failedPaths.filter((path): path is string => typeof path === 'string')
+        : [];
+      return retryGlossaryCacheInvalidation(ctx, failedPaths, deps);
     }
     const body = req.body ?? {};
     const csv = body.csv ?? '';

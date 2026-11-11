@@ -174,6 +174,7 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
       }
 
       if (url.endsWith('/console/glossary/cache-invalidation/retry') && method === 'POST') {
+        assert.deepEqual(body, { failedPaths: ['/site-b/*'] });
         return new Response(JSON.stringify({
           status: 'SUBMITTED', mode: 'WILDCARD', paths: ['/site-a/*'], invalidationIds: ['inv-retry'],
         }), { status: 200 });
@@ -240,7 +241,7 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
     assert.equal('source_lang' in putBody, false);
     assert.equal('target_langs' in putBody, false);
 
-    const retried = await api.retryCacheInvalidation();
+    const retried = await api.retryCacheInvalidation(['/site-b/*']);
     assert.equal(retried.status, 'SUBMITTED');
     assert.deepEqual(retried.invalidationIds, ['inv-retry']);
     assert.equal(calls[2].url, 'https://api.translateme.example/console/glossary/cache-invalidation/retry');

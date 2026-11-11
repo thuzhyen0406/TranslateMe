@@ -318,7 +318,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
   const handleRetryCacheInvalidation = async () => {
     setRetryingCacheInvalidation(true);
     try {
-      setCacheInvalidation(await api.retryCacheInvalidation());
+      setCacheInvalidation(await api.retryCacheInvalidation(cacheInvalidation?.failedPaths ?? []));
     } catch (err) {
       setCacheInvalidation({
         status: 'FAILED', mode: 'WILDCARD', paths: [], invalidationIds: [],

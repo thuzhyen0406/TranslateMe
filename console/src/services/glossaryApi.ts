@@ -742,7 +742,7 @@ export interface GlossaryApi {
     csvText: string,
     onDuplicate: DuplicateHandlingMode,
   ): Promise<CsvImportPreviewOrCommitResult>;
-  retryCacheInvalidation(): Promise<GlossaryCacheInvalidation>;
+  retryCacheInvalidation(failedPaths: readonly string[]): Promise<GlossaryCacheInvalidation>;
   getCacheInvalidationStatus(id: string): Promise<GlossaryCacheInvalidationProgress>;
 }
 
@@ -873,8 +873,8 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
       });
       return csvImportResultFromJson(data);
     },
-    async retryCacheInvalidation() {
-      const data = await request('POST', '/console/glossary/cache-invalidation/retry', {});
+    async retryCacheInvalidation(failedPaths) {
+      const data = await request('POST', '/console/glossary/cache-invalidation/retry', { failedPaths });
       return glossaryCacheInvalidationFromJson((data.cacheInvalidation ?? data) as Json);
     },
     async getCacheInvalidationStatus(id) {
@@ -1114,7 +1114,7 @@ export function createMockGlossaryApi(opts: MockGlossaryApiOptions = {}): Glossa
         terminologySynced: true,
       };
     },
-    async retryCacheInvalidation() {
+    async retryCacheInvalidation(_failedPaths) {
       return { status: 'NOT_CONFIGURED', mode: 'WILDCARD', paths: [], invalidationIds: [] };
     },
     async getCacheInvalidationStatus(id) {

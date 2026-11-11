@@ -416,6 +416,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     const result = await handleGlossaryRoute(adminCtx, {
       method: 'POST',
       path: '/console/glossary/cache-invalidation/retry',
+      body: { failedPaths: ['/paused-site/*', '/active-site/*'] },
     }, deps) as GlossaryCacheInvalidationResult;
     const after = await listGlossary(adminCtx, deps);
 

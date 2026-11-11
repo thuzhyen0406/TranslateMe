@@ -185,8 +185,8 @@ function sitePaths(slugs: readonly string[]): string[] {
 }
 
 /**
- * Biến thể cũ: gửi mọi lô rồi trả ID ngay, không chờ CloudFront hoàn tất.
- * Giữ lại để tương thích với callers cần semantics cũ; luồng pause/lock mặc định không dùng hàm này.
+ * Gửi lô wildcard rồi trả ID ngay, không chờ CloudFront hoàn tất. Nếu một lô lỗi,
+ * dừng tại đó và giữ lô lỗi cùng mọi lô chưa thử trong failedPaths để caller chỉ gửi lại phần còn lại.
  */
 export function createSiteInvalidatorSubmitOnly(
   deps: Pick<InvalidationDeps, 'cdn' | 'uuid' | 'metric'>,
@@ -208,8 +208,9 @@ export function createSiteInvalidatorSubmitOnly(
         });
         invalidationIds.push(out.id);
       } catch (error) {
-        failedPaths.push(...batch);
+        failedPaths.push(...paths.slice(i));
         firstError ??= errName(error);
+        break;
       }
     }
     try {
