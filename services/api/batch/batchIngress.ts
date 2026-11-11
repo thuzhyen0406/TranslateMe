@@ -314,7 +314,7 @@ const tenantS3Clients = new Map<string, ReturnType<typeof createTenantS3Client>>
 const sfnClient = new SFNClient({});
 
 /** Lấy client S3 STS theo tenant; mỗi client bị giới hạn trong prefix batch riêng của tenant. */
-function s3ClientForTenant(tenantId: string) {
+function s3ClientForTenant(tenantId: string): any {
   let client = tenantS3Clients.get(tenantId);
   if (!client) {
     const roleArn = process.env.TENANT_DATA_ACCESS_ROLE_ARN;
@@ -363,7 +363,7 @@ export async function handler(event: BatchIngressEvent) {
     },
     s3: {
       signPut: ({ tenantId, bucket: targetBucket, key, contentType, expiresIn }) => getSignedUrl(
-        s3ClientForTenant(tenantId),
+        s3ClientForTenant(tenantId) as any,
         new PutObjectCommand({ Bucket: targetBucket, Key: key, ContentType: contentType }),
         { expiresIn, signableHeaders: new Set(['content-type']) },
       ),
@@ -372,7 +372,7 @@ export async function handler(event: BatchIngressEvent) {
         return { contentLength: result.ContentLength, contentType: result.ContentType };
       },
       async get({ tenantId, bucket: targetBucket, key }) {
-        const result = await s3ClientForTenant(tenantId).send(new GetObjectCommand({ Bucket: targetBucket, Key: key }));
+        const result = await s3ClientForTenant(tenantId).send(new GetObjectCommand({ Bucket: targetBucket, Key: key })) as any;
         if (!result.Body) throw new Error('S3 object body is empty');
         return result.Body.transformToByteArray();
       },

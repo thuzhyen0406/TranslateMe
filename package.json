@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "lint": "cfn-lint -i W3037 -- infra/modules/*.yaml",
+    "test:unit": "npm test --prefix libs/common && npm test --prefix services/api && npm test --prefix services/proxy"
+  },
   "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^18.0.9",

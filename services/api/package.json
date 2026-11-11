@@ -8,9 +8,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node --test dist/services/api/auth/test/auth.test.js dist/services/api/sites/test/siteManager.test.js dist/services/api/glossary/test/glossaryManager.test.js dist/services/api/keys/test/keyManager.test.js dist/services/api/keys/test/apiKeyTransaction.test.js dist/services/api/review/test/reviewManager.test.js dist/services/api/console/test/handler.test.js dist/services/api/batch/test/batchIngress.test.js dist/services/api/batch/test/batchWorkflow.test.js dist/services/api/translate/test/realtime.test.js dist/services/api/platform/test/tenantStatus.test.js dist/services/api/prewarm/test/prewarmManager.test.js"
-  },
+  "build": "tsc -p tsconfig.json",
+  "test": "tsc -p tsconfig.json && node --test \"dist/services/api/**/*.test.js\""
+},
   "dependencies": {
     "@aws-sdk/client-api-gateway": "^3.1164.0",
     "@aws-sdk/client-cloudfront": "^3.650.0",

@@ -121,7 +121,7 @@ describe('sitemap – đọc <loc> và lọc URL (hàm thuần)', () => {
 });
 
 describe('ReadSitemap', () => {
-  it('đọc sitemap của trang chủ, chia lô ghi S3 dưới worker/<tenant>/prewarm/<job>/, JOB -> RUNNING với tổng URL × ngôn ngữ', async () => {
+  it('đọc sitemap của trang chủ, chia lô ghi S3 dưới tenant/<tenant>/worker/prewarm/<job>/, JOB -> RUNNING với tổng URL × ngôn ngữ', async () => {
     const locs = Array.from({ length: 9 }, (_, i) => `https://homestay-abc.vn/trang-${i}/`).concat(['https://evil.com/x', 'https://homestay-abc.vn/anh.jpg']);
     const s = setup({ sitemaps: { 'https://homestay-abc.vn/sitemap.xml': xml(urlset(locs)) } });
     await queued(s);
@@ -244,12 +244,12 @@ describe('PrewarmPages (C13 chế độ trang)', () => {
     await assert.rejects(prewarmPages({ ...ev, urls_key: `${prewarmKeyPrefix(SITE.tenantId, JOB)}khac.json` }, s.deps), { name: 'INVALID_EVENT' });
   });
 
-  it('urls_key ngoài worker/<tenant>/prewarm/<job>/ hoặc tenant không khớp -> từ chối', async () => {
+  it('urls_key ngoài tenant/<tenant>/worker/prewarm/<job>/ hoặc tenant không khớp -> từ chối', async () => {
     const s = setup();
     const ev = await lot(s, ['']);
-    await assert.rejects(prewarmPages({ ...ev, urls_key: `worker/t_khac/prewarm/${JOB}/lot-0000.json` }, s.deps), { name: 'INVALID_EVENT' });
+    await assert.rejects(prewarmPages({ ...ev, urls_key: `tenant/t_khac/worker/prewarm/${JOB}/lot-0000.json` }, s.deps), { name: 'INVALID_EVENT' });
     await assert.rejects(prewarmPages({ ...ev, urls_key: `${prewarmKeyPrefix(SITE.tenantId, JOB)}../x.json` }, s.deps), { name: 'INVALID_EVENT' });
-    await assert.rejects(prewarmPages({ ...ev, tenant_id: 't_khac', urls_key: `worker/t_khac/prewarm/${JOB}/lot-0000.json` }, s.deps), { name: 'SITE_NOT_FOUND' });
+    await assert.rejects(prewarmPages({ ...ev, tenant_id: 't_khac', urls_key: `tenant/t_khac/worker/prewarm/${JOB}/lot-0000.json` }, s.deps), { name: 'SITE_NOT_FOUND' });
   });
 });
 
@@ -319,7 +319,7 @@ describe('state machine PREWARM (ASL)', () => {
     for (const sub of ['ReadSitemapFunctionArn', 'PrewarmPagesFunctionArn', 'FinishPrewarmFunctionArn', 'MarkPrewarmFailedFunctionArn']) assert.ok(text.includes(`\${${sub}}`), sub);
   });
 
-  it('khoá lô dùng được với kho S3 thật của proxy (tiền tố worker/<tenant>/ theo session policy tenant)', async () => {
+  it('khoá lô dùng được với kho S3 thật của proxy (tiền tố tenant/<tenant>/worker theo session policy tenant)', async () => {
     const objects = new Map<string, string>();
     const s3 = {
       async send(c: { input: { Key: string; Body?: string } }) {
@@ -331,10 +331,9 @@ describe('state machine PREWARM (ASL)', () => {
       },
     };
     const key = `${prewarmKeyPrefix(SITE.tenantId, JOB)}lot-0000.json`;
-    assert.ok(key.startsWith(`worker/${SITE.tenantId}/`));
+    assert.ok(key.startsWith(`tenant/${SITE.tenantId}/worker/`));
     const store = s3PayloadStore(s3 as never, 'payload-bucket');
     await store.put(key, '["a/"]');
     assert.equal(await store.get(key), '["a/"]');
   });
 });
-

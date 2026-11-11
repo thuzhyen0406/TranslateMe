@@ -55,6 +55,13 @@ Tài liệu này dành cho **TV1 (IaC Terraform/CDK)** và **TV3 (REST API / Aut
 
 ### 1. IAM Policy cho Lambda Trigger `PostConfirmation`
 
+Trong triển khai hiện tại, `PostConfirmation` dùng execution role riêng và
+assume `TenantDataAccessRole` với session policy giới hạn partition của tenant
+đang khởi tạo. Quyền Cognito chỉ gồm `AdminUpdateUserAttributes` trên User Pool
+được cấu hình. Ví dụ policy bên dưới mô tả quyền tối thiểu tương đương khi triển
+khai không dùng role session; không gắn đồng thời quyền ghi DynamoDB trực tiếp
+vào execution role nếu đã dùng role session.
+
 Lambda Trigger chỉ được phép:
 - Ghi giao dịch (`dynamodb:TransactWriteItems`, `dynamodb:PutItem`) trên **đúng ARN của bảng DynamoDB**.
 - Sử dụng khóa KMS (`kms:Decrypt`, `kms:GenerateDataKey`) của bảng đó (nếu bảng dùng Customer Managed CMK).

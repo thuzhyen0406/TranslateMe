@@ -48,7 +48,8 @@
     "../../libs/common/rebuild.ts",
     "../../libs/common/htmlDom.ts",
     "../../libs/common/tenantAws.ts",
-    "../../libs/common/usage/usage.ts"
+    "../../libs/common/usage/usage.ts",
+    "../../tests/unit/cache_invalidation.test.ts"
   ],
   "exclude": ["dist", "node_modules"]
 }
