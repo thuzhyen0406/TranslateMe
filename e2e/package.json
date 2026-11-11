@@ -13,7 +13,8 @@
     "selftest": "ts-node --transpile-only scripts/selftest.ts",
     "demo:preflight": "ts-node --transpile-only demo/preflight.ts",
     "demo:deploy": "ts-node --transpile-only demo/deploy.ts",
-    "demo:seed": "ts-node --transpile-only demo/seed.ts"
+    "demo:seed": "ts-node --transpile-only demo/seed.ts",
+    "evidence": "ts-node --transpile-only tools/aggregate-evidence.ts"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",

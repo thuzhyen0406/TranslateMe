@@ -16,6 +16,8 @@
     "lib",
     "tests",
     "mock",
-    "scripts"
+    "scripts",
+    "tools",
+    "demo"
   ]
 }
