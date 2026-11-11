@@ -10,11 +10,17 @@
     "test:ssrf": "node --require ts-node/register/transpile-only --test tests/ssrf.test.ts",
     "test:gate": "npm run test:isolation && npm run test:ssrf",
     "test:all": "node --require ts-node/register/transpile-only --test --test-concurrency=1 tests/isolation.test.ts tests/ssrf.test.ts tests/limits.test.ts",
-    "selftest": "ts-node --transpile-only scripts/selftest.ts"
+    "selftest": "ts-node --transpile-only scripts/selftest.ts",
+    "demo:preflight": "ts-node --transpile-only demo/preflight.ts",
+    "demo:deploy": "ts-node --transpile-only demo/deploy.ts",
+    "demo:seed": "ts-node --transpile-only demo/seed.ts"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
     "ts-node": "^10.9.2",
     "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.9"
   }
 }

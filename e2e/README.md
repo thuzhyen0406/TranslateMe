@@ -14,7 +14,7 @@ Selftest chạy mock local, không gọi AWS. Các mode lỗi cố ý kiểm tra
 
 ## Chạy trên môi trường đã seed dữ liệu
 
-Tạo file `.env.<stage>` từ `.env.example`, nạp biến môi trường rồi chạy các lệnh trong thư mục `e2e/`:
+Tạo file `.env.<stage>` từ `.env.example`; package tự nạp file tương ứng với `TM_STAGE` (hoặc file được chỉ định bằng `TM_ENV_FILE`). Chạy các lệnh trong thư mục `e2e/`:
 
 ```sh
 npm run test:isolation
@@ -22,9 +22,25 @@ npm run test:ssrf
 TM_ALLOW_MUTATION=1 npm run test:limits
 ```
 
-Test cần `.state/<stage>.json` có tài khoản tenant A/B/C, Platform Admin, API keys, job và file_key. File state chứa mật khẩu và key, không được commit. Phần tạo dữ liệu demo thuộc nhánh triển khai demo; không có seed AWS trong package của nhánh này.
+Test cần `.state/<stage>.json` có tài khoản tenant A/B/C, Platform Admin, API keys, job và file_key. Tạo state bằng `npm run demo:seed -- all` sau khi cấu hình AWS và API. File state chứa mật khẩu và key, không được commit.
 
 `limits.test.ts` đổi hạn mức và khóa tenant A. Chỉ bật `TM_ALLOW_MUTATION=1` trên dev/demo, và không chạy song song với isolation. SSRF S7/S8 cần fixture do TV4 cung cấp; nếu thiếu fixture, test đánh dấu SKIP và không được tính là đủ bằng chứng. Vì API chưa có route xóa website, test sẽ nhận diện slug từ hostname fixture và tái sử dụng bản ghi `PENDING` cùng origin ở lần chạy sau; nếu slug đó đã được dùng bởi origin khác hoặc website không còn `PENDING`, test dừng với thông báo rõ ràng.
+
+## Preflight, deploy và seed demo
+
+Các lệnh nhánh vận hành cũng chạy từ `e2e/`:
+
+```sh
+npm run demo:preflight
+npm run demo:deploy -- --stage dev --dry-run
+npm run demo:seed -- all --dry-run
+```
+
+Preflight chỉ gọi API AWS đọc trạng thái; bước kiểm tra Translate dùng `list-terminologies`, không gửi yêu cầu dịch tính phí. Deploy mặc định cần bảy stack entry-point `data.yaml`, `identity.yaml`, `api.yaml`, `edge.yaml`, `workflow.yaml`, `console.yaml`, `ops.yaml` trong `TM_TEMPLATE_DIR`. Có thể chỉ định từng file qua `TM_TEMPLATE_DATA`, `TM_TEMPLATE_IDENTITY`, v.v. Script kiểm tra đủ file trước khi bắt đầu deploy để tránh deploy được vài stack rồi mới gặp file thiếu.
+
+Repo hiện có `infra/modules/{data,iam,lambdas,api-gateway}.yaml` và một `infra/template.yaml`; các file này chưa phải bảy stack entry-point độc lập, và `infra/template.yaml` là template dev riêng. Vì vậy cần cung cấp/ghép các stack templates trước khi deploy thật. `TM_PARAMS_<STACK>` dùng để truyền parameter overrides theo phụ thuộc giữa stack.
+
+Seed tenant yêu cầu `TM_DEMO_ORIGIN_A/B/C` trỏ tới ba hostname khác nhau, có thể truy cập và xác minh bằng META. API tự sinh slug từ hostname. Script lấy `tenant_id` từ ID token Cognito, lưu state trước các thao tác tạo tài nguyên để hỗ trợ chạy lại sau gián đoạn, và tải batch file lên bằng đúng `Content-Type` do API yêu cầu. Seed Platform Config vẫn cần route `/platform/config` được triển khai trong API.
 
 ## Hợp đồng khớp project hiện tại
 
@@ -40,3 +56,4 @@ Project hiện tại chưa đăng ký một số route mà bộ nghiệm thu tu�
 - `lib/`: cấu hình, Cognito JWT, HTTP retry, API contract, so sánh lỗi và evidence.
 - `tests/`: isolation (kịch bản 4), limits (kịch bản 5), SSRF (kịch bản 6).
 - `mock/`, `scripts/selftest.ts`: mock và tự kiểm tra offline.
+- `demo/`: AWS preflight, deploy bảy stack theo thứ tự và seed tài khoản/dữ liệu demo.
