@@ -200,7 +200,9 @@ export function startMock(opts: Opts = {}) {
         const actualHost = hosts.get(hm[1]);
         const h = actualHost?.tenantId === t.id ? actualHost : undefined;
         if (!h) {
-          if (!hm[2] && method === 'PATCH' && actualHost && leaks.has('host')) return send(res, 200, { slug: hm[1], status: actualHost.status });
+          if (!hm[2] && method === 'GET' && actualHost && leaks.has('host')) {
+            return send(res, 200, { slug: hm[1], status: actualHost.status, home_url: actualHost.origin });
+          }
           return denyOther(res);
         }
         if (writeBlocked(t)) return;

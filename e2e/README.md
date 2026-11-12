@@ -40,6 +40,12 @@ Các phép thử TM dùng route hiện có `GET /console/translations?tab=MACHIN
 
 `TM_FLOOD_N` mặc định là 30 để kiểm tra throttling mà không tạo burst quá lớn trên Lambda. Có thể giảm theo quota của môi trường; không tăng nếu chưa xác nhận concurrency limit.
 
+## Bằng chứng SSRF bổ sung
+
+Các test `safeFetch` trong `libs/common/test/safeFetch.test.ts` dùng transport giả có ghi lại mọi IP được kết nối: các IP nội bộ phải có 0 lần gọi transport, redirect về IP private chỉ được gọi transport cho host public. Cùng bộ test xác nhận redirect không mang tiếp `Cookie`, `Authorization`, `Proxy-Authorization` hoặc `X-Forwarded-For`.
+
+Để kiểm tra header của request S8 từ API đang chạy, TV4 có thể cung cấp `TM_SSRF_HEADER_REPORT_URL`. Endpoint này cần trả JSON dạng `{"header_names":["host","accept"]}` mô tả tên header mà fixture redirect nhận ở request S8 gần nhất; không trả giá trị header. Khi biến này được cấu hình, test xác nhận không có cookie/header xác thực; nếu thiếu, evidence ghi riêng `S8H` là `SKIP` thay vì coi tiêu chí đó đã đạt. CloudWatch không có log kết nối outbound theo từng request trong cấu hình hiện tại, nên test không tuyên bố rằng đã kiểm tra log AWS.
+
 ## Cấu trúc
 
 - `lib/`: cấu hình, Cognito JWT, HTTP retry, API contract, so sánh lỗi và evidence.

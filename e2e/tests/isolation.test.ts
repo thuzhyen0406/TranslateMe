@@ -98,11 +98,11 @@ describe('Kịch bản 4 – phép thử chéo: A truy cập tài nguyên của 
     assertDenied(x, base, { forbidden: [Bt().jobId, Bt().fileKey] });
   }));
 
-  it('X2 JWT của A sửa website của B', ev(SC, 'X2', 'JWT A -> PATCH /console/hosts/{slug B}', async (note) => {
-    const run = (slug: string) => call('PATCH', R.host(slug), { token: tokA, body: B.noopHostPatch() });
+  it('X2 JWT của A đọc chi tiết website của B', ev(SC, 'X2', 'JWT A -> GET /console/hosts/{slug B}', async (note) => {
+    const run = (slug: string) => call('GET', R.host(slug), { token: tokA });
     const [x, base] = [await run(Bt().slug), await run(lookalike(Bt().slug))];
     note('status', x.status); note('code', errCode(x));
-    assertDenied(x, base, { forbidden: [Bt().origin] });
+    assertDenied(x, base, { forbidden: [Bt().slug, Bt().origin] });
   }));
 
   it('X3 tenant A không tìm thấy bản dịch TM chỉ có ở B', ev(SC, 'X3', 'JWT A -> GET /console/translations?tab=MACHINE&search', async (note) => {
