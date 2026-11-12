@@ -57,10 +57,8 @@ async function seedPlatform(st: State): Promise<void> {
 }
 
 async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
-  if (st.tenants[label]?.apiKey && st.tenants[label]?.websiteStatus === 'ACTIVE' && !force) {
-    console.log(`Tenant ${label}: đã có và website ACTIVE, bỏ qua (dùng --force để làm lại)`);
-    return;
-  }
+  // Không bỏ qua tenant chỉ dựa trên vài trường trong state: chạy tiếp các bước
+  // idempotent bên dưới để bổ sung tài nguyên còn thiếu sau khi seed bị ngắt.
   const c = cfg();
   const pool = need('TM_CONSOLE_USER_POOL_ID');
   const existing = st.tenants[label];
@@ -127,17 +125,21 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
     saveState(st);
   }
 
-  if (!t.apiKey || force) {
+  if (!t.apiKey || !t.keyId || force) {
     const k = must(await call('POST', R.apiKeys, { token: tok, body: B.createKey(`e2e-${label}`) }), 'POST /console/api-keys');
     t.apiKey = keyValueOf(k.body); t.keyId = keyIdOf(k.body);
     if (!t.apiKey || !t.keyId) throw new Error(`Tenant ${label}: response API key thiếu key_id hoặc api_key`);
     saveState(st);
   }
 
-  if (!t.tmText || force) { t.tmText = `Xin chào từ tenant ${label} ${hex(3)}`; t.tmHash = hashSentence(t.tmText); saveState(st); }
+  if (!t.tmText || !t.tmHash || force) {
+    if (!t.tmText || force) t.tmText = `Xin chào từ tenant ${label} ${hex(3)}`;
+    t.tmHash = hashSentence(t.tmText);
+    saveState(st);
+  }
   must(await call('POST', R.translate, { apiKey: t.apiKey, body: B.translate(t.tmText) }), 'POST /translate/realtime');
 
-  if (!t.jobId || force) {
+  if (!t.jobId || !t.fileKey || force) {
     const contents = 'Xin chào\n';
     const contentType = 'text/plain';
     const up = must(await call('POST', R.uploadUrl, {
@@ -153,7 +155,7 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
     saveState(st);
   }
 
-  if (label === 'C' && (!t.tinyApiKey || force)) {
+  if (label === 'C' && (!t.tinyApiKey || !t.tinyKeyId || force)) {
     // Key thứ hai sẽ được chuyển sang usage plan nhỏ ở bước tiny-plan
     const k2 = must(await call('POST', R.apiKeys, { token: tok, body: B.createKey('e2e-C-tiny') }), 'POST /console/api-keys (tiny)');
     t.tinyApiKey = keyValueOf(k2.body); t.tinyKeyId = keyIdOf(k2.body);
