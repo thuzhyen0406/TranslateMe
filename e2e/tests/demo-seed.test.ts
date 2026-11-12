@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ensureUsagePlanKey } from '../demo/usagePlan';
-import { recoverBatchJob } from '../demo/batchRecovery';
+import { batchRecoveryWaitSeconds, recoverBatchJob } from '../demo/batchRecovery';
 
 const envBefore = {
   AWS_BIN: process.env.AWS_BIN,
@@ -112,8 +112,8 @@ test('tiny-plan rollback key về Basic nếu attach vào tiny thất bại', ()
 test('batch recovery query theo tenant/fileKey bằng consistent read trước khi gửi lại', async () => {
   const log = setupFakeAws('batch-found');
   process.env.TM_TABLE = 'translate-data';
-  process.env.TM_BATCH_RECOVERY_WAIT_S = '0';
-  const jobId = await recoverBatchJob('tenant-c', 'batch/tenant-c/input/upload.txt', { waitSeconds: 0 });
+  process.env.TM_BATCH_RECOVERY_WAIT_S = '90';
+  const jobId = await recoverBatchJob('tenant-c', 'batch/tenant-c/input/upload.txt');
   assert.equal(jobId, 'job-20261113-0123456789ab');
   const [query] = calls(log);
   assert.deepEqual(query.slice(0, 2), ['dynamodb', 'query']);
@@ -125,5 +125,12 @@ test('batch recovery query theo tenant/fileKey bằng consistent read trước k
 test('batch recovery từ chối tiếp tục nếu không thể đọc state để đối soát', async () => {
   setupFakeAws();
   delete process.env.TM_TABLE;
-  await assert.rejects(() => recoverBatchJob('tenant-c', 'some-file', { waitSeconds: 0 }), /TM_TABLE/u);
+  await assert.rejects(() => recoverBatchJob('tenant-c', 'some-file'), /TM_TABLE/u);
+});
+
+test('batch recovery không cho cấu hình thời gian dò ngắn hơn Lambda timeout cộng đệm', () => {
+  delete process.env.TM_BATCH_RECOVERY_WAIT_S;
+  assert.equal(batchRecoveryWaitSeconds(undefined), 90);
+  assert.equal(batchRecoveryWaitSeconds('120'), 120);
+  assert.throws(() => batchRecoveryWaitSeconds('35'), /không được ngắn hơn timeout Lambda/u);
 });

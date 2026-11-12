@@ -1,5 +1,10 @@
 import { aws } from './aws';
 
+// Keep in sync with TranslateFunction.Timeout in infra/modules/lambdas.yaml (60s)
+// plus a 30s margin for Lambda completion and DynamoDB visibility.
+export const MIN_BATCH_RECOVERY_WAIT_SECONDS = 90;
+const MAX_BATCH_RECOVERY_WAIT_SECONDS = 1200;
+
 const need = (name: string): string => {
   const value = process.env[name];
   if (!value) throw new Error(`Thiếu biến môi trường ${name}; không thể đối soát batch chưa rõ kết quả.`);
@@ -33,18 +38,19 @@ export function findBatchJobByFileKey(tenantId: string, fileKey: string, region:
   return jobId;
 }
 
-export async function recoverBatchJob(
-  tenantId: string,
-  fileKey: string,
-  options: { region?: string[]; waitSeconds?: number } = {},
-): Promise<string | undefined> {
-  const waitSeconds = options.waitSeconds ?? Number(process.env.TM_BATCH_RECOVERY_WAIT_S ?? '35');
-  if (!Number.isFinite(waitSeconds) || waitSeconds < 0 || waitSeconds > 300) {
-    throw new Error('TM_BATCH_RECOVERY_WAIT_S phải nằm trong khoảng 0–300 giây.');
+export function batchRecoveryWaitSeconds(raw = process.env.TM_BATCH_RECOVERY_WAIT_S): number {
+  const waitSeconds = Number(raw ?? String(MIN_BATCH_RECOVERY_WAIT_SECONDS));
+  if (!Number.isFinite(waitSeconds) || waitSeconds < MIN_BATCH_RECOVERY_WAIT_SECONDS || waitSeconds > MAX_BATCH_RECOVERY_WAIT_SECONDS) {
+    throw new Error(`TM_BATCH_RECOVERY_WAIT_S phải nằm trong khoảng ${MIN_BATCH_RECOVERY_WAIT_SECONDS}–${MAX_BATCH_RECOVERY_WAIT_SECONDS} giây; không được ngắn hơn timeout Lambda cộng khoảng đệm.`);
   }
+  return waitSeconds;
+}
+
+export async function recoverBatchJob(tenantId: string, fileKey: string, region: string[] = []): Promise<string | undefined> {
+  const waitSeconds = batchRecoveryWaitSeconds();
   const deadline = Date.now() + waitSeconds * 1000;
   do {
-    const found = findBatchJobByFileKey(tenantId, fileKey, options.region);
+    const found = findBatchJobByFileKey(tenantId, fileKey, region);
     if (found) return found;
     if (Date.now() >= deadline) break;
     await new Promise((resolve) => setTimeout(resolve, Math.min(1000, deadline - Date.now())));

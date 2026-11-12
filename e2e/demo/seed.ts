@@ -161,7 +161,7 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
     const contents = 'Xin chào\n';
     if (t.batchSubmissionState === 'SUBMITTING' || t.batchSubmissionState === 'UPLOADING') t.jobId = '';
     if (t.batchSubmissionState === 'SUBMITTING' && t.fileKey && !force) {
-      const recovered = await recoverBatchJob(t.tenantId, t.fileKey, { region });
+      const recovered = await recoverBatchJob(t.tenantId, t.fileKey, region);
       if (recovered) {
         t.jobId = recovered;
         t.batchSubmissionState = 'SUBMITTED';
