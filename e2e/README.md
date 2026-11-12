@@ -62,7 +62,16 @@ Preflight chỉ gọi AWS API đọc trạng thái. Deploy xác nhận `TM_ACCOU
 
 Repo hiện chưa có bảy entry-point này. `infra/template.yaml` là template dev riêng chỉ tạo budget và Hello Lambda, không chứa hạ tầng TranslateMe; `infra/modules/*.yaml` là module, không thể deploy trực tiếp thành bảy stack. Vì vậy deploy thật vẫn dừng trước mọi lệnh CloudFormation cho đến khi các entry-point đúng phạm vi được cung cấp. Không dùng template Hello Lambda làm bản thay thế cho hạ tầng demo.
 
-Seed tenant yêu cầu `TM_DEMO_ORIGIN_A/B/C` trỏ tới ba hostname riêng, xác minh được. Nếu website chưa `ACTIVE`, seed dừng. Seed chạy tiếp từng tài nguyên còn thiếu, không bỏ qua tenant chỉ vì đã có API key. `seed all` chỉ PUT Platform Config khi `TM_E2E_HAS_PLATFORM_CONFIG=1`; mặc định ghi chú skip vì route `/platform/config` chưa có trong API hiện tại.
+Seed tenant yêu cầu `TM_DEMO_ORIGIN_A/B/C` trỏ tới ba hostname riêng. Nếu website chưa `ACTIVE`, seed thử xác minh bằng `META` mặc định; có thể chọn `FILE` bằng `TM_DEMO_VERIFY_METHOD=FILE`. Script lấy `verification_code` từ response host. Nếu nội dung xác minh chưa được publish tại hostname, seed dừng và in token cùng hướng dẫn chính xác, không đánh dấu website sẵn sàng. Sau khi publish, chạy lại `npm run demo:seed -- tenants`; state đã lưu nên seed tiếp tục các tài nguyên còn thiếu. Seed không thể tự ghi vào website bên ngoài nếu chưa cấu hình quyền/đích hosting của hostname. `seed all` chỉ PUT Platform Config khi `TM_E2E_HAS_PLATFORM_CONFIG=1`; mặc định ghi chú skip vì route `/platform/config` chưa có trong API hiện tại.
+
+### Xác minh hostname demo
+
+API trả `verification_code` trong đối tượng `host` khi tạo website và trong danh sách website. Seed dùng code đó để gọi verify. Nếu hostname chưa xác minh, thông báo lỗi của seed in hướng dẫn chứa token:
+
+- Với `META` (mặc định), đặt `<meta name="translateme-site-verification" content="<token>">` bên trong `<head>` của trang chủ tại `TM_DEMO_ORIGIN_<A|B|C>`.
+- Với `FILE`, đặt nội dung tệp chỉ gồm token (text/plain) tại đường dẫn gốc `/translateme-verification.txt`; bật bằng `TM_DEMO_VERIFY_METHOD=FILE`.
+
+Đảm bảo trang/file được phục vụ công khai qua HTTPS và phản hồi GET được, rồi chạy lại `npm run demo:seed -- tenants`. Backend yêu cầu nội dung file khớp token chính xác sau khi trim khoảng trắng. Seed chỉ tiếp tục tạo API key, TM và batch job khi API xác nhận trạng thái website `ACTIVE`.
 
 Tenant Cognito được tạo bằng `SignUp` rồi `AdminConfirmSignUp` để kích hoạt PostConfirmation và sinh `custom:tenant_id`; seed không đặt password permanent trước bước confirm. API key dùng payload `{ name, plan: "Basic" }` và đọc `key_id`/`value` từ response lồng trong `api_key` theo contract của API hiện tại.
 

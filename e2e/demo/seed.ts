@@ -16,6 +16,7 @@ import { loadState, saveState, State, stateFile, TenantState } from '../lib/stat
 import { idTokenClaims, login } from '../lib/auth';
 import { call, errCode, Resp } from '../lib/http';
 import { B, R, hashSentence, jobIdOf, keyIdOf, keyValueOf, listOf } from '../lib/contract';
+import { verificationInstructions, verificationMethod } from './siteVerification';
 
 const need = (k: string): string => { const v = process.env[k]; if (!v) throw new Error(`Thiếu biến môi trường ${k}`); return v; };
 const hex = (n: number) => randomBytes(n).toString('hex');
@@ -120,11 +121,15 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
   const existingHosts = must(await call('GET', R.hosts, { token: tok }), 'GET /console/hosts');
   const priorHost = listOf(existingHosts.body).find((h: any) => h?.slug === expectedSlug);
   let slug = expectedSlug;
+  let verificationCode = typeof priorHost?.verification_code === 'string' ? priorHost.verification_code : '';
   if (priorHost) {
     slug = String(priorHost.slug);
   } else {
     const created = must(await call('POST', R.hosts, { token: tok, body: B.addHost(`e2e-${label}`, origin) }), 'POST /console/hosts');
     slug = created.body?.host?.slug;
+    verificationCode = typeof created.body?.host?.verification_code === 'string'
+      ? created.body.host.verification_code
+      : '';
     if (typeof slug !== 'string' || slug !== expectedSlug) {
       throw new Error(`Tenant ${label}: API trả slug website không khớp hostname ${expectedSlug}`);
     }
@@ -133,13 +138,17 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
   t.websiteStatus = priorHost?.status === 'ACTIVE' ? 'ACTIVE' : 'PENDING';
   saveState(st);
   if (priorHost?.status !== 'ACTIVE') {
-    const ver = await call('POST', R.hostVerify(slug), { token: tok, body: { method: 'META' } });
+    const method = verificationMethod(process.env.TM_DEMO_VERIFY_METHOD);
+    const ver = await call('POST', R.hostVerify(slug), { token: tok, body: { method } });
     const verifiedStatus = ver.body?.host?.status ?? ver.body?.status;
     if (ver.status < 200 || ver.status >= 300 || verifiedStatus !== 'ACTIVE') {
+      const instructions = verificationCode
+        ? verificationInstructions(method, verificationCode, origin)
+        : 'API không trả verification_code; kiểm tra contract GET/POST /console/hosts trước khi tiếp tục.';
       throw new Error(
         `Tenant ${label}: website ${slug} chưa ACTIVE sau xác minh ` +
         `(HTTP ${ver.status}, status=${verifiedStatus ?? 'không có'}). Seed dừng tại đây; ` +
-        `kiểm tra TM_DEMO_ORIGIN_${label}, cấu hình META và hoàn tất xác minh website, ` +
+        `hoàn tất xác minh ${method} cho TM_DEMO_ORIGIN_${label}. ${instructions} ` +
         `sau đó chạy lại "npm run demo:seed -- tenants". State hiện tại chưa đủ điều kiện chạy bài test khóa tenant.`,
       );
     }
