@@ -58,7 +58,7 @@ export const ErrorAlert: React.FC<ErrorAlertProps> = ({
   if (!payload) return null;
 
   const hasHeader = Boolean(title || payload.code || payload.requestId || onDismiss);
-  const canShowRetryButton = Boolean(onRetry && !payload.requiresStatusCheck);
+  const canShowRetryButton = Boolean(onRetry && payload.retryable && !payload.requiresStatusCheck);
   const canShowCheckStatusButton = Boolean(onCheckStatus && payload.requiresStatusCheck);
   const showFooter = Boolean(
     canShowRetryButton ||
