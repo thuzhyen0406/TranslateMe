@@ -6,13 +6,14 @@ import { join } from 'node:path';
 import { startMock } from '../mock/server';
 import { saveState } from '../lib/state';
 
-type Leak = 'jobs' | 'file_key' | 'body_tenant' | 'perm_msg' | 'lock_cache' | 'lock_api' | 'platform_tm' | 'ssrf';
+type Leak = 'jobs' | 'host' | 'file_key' | 'body_tenant' | 'perm_msg' | 'lock_cache' | 'lock_api' | 'platform_tm' | 'ssrf';
 const CASES: Array<{ leak: Leak | null; expectFail: string[] }> = [
   { leak: null, expectFail: [] },
   { leak: 'jobs', expectFail: ['X1'] },
+  { leak: 'host', expectFail: ['X2'] },
   { leak: 'file_key', expectFail: ['X7'] },
   { leak: 'body_tenant', expectFail: ['X8'] },
-  { leak: 'perm_msg', expectFail: ['X1', 'X2', 'X3', 'X4'] },
+  { leak: 'perm_msg', expectFail: ['X1', 'X2', 'X4', 'X6'] },
   { leak: 'platform_tm', expectFail: ['E3'] },
   { leak: 'lock_api', expectFail: ['L4'] },
   { leak: 'lock_cache', expectFail: ['L4'] },
@@ -21,7 +22,10 @@ const CASES: Array<{ leak: Leak | null; expectFail: string[] }> = [
 
 async function main() {
   let bad = 0;
-  for (const cs of CASES) {
+  const selected = process.env.TM_SELFTEST_CASE;
+  const cases = selected ? CASES.filter((cs) => cs.leak === selected || (selected === 'clean' && cs.leak === null)) : CASES;
+  if (selected && !cases.length) throw new Error(`TM_SELFTEST_CASE không hợp lệ: ${selected}`);
+  for (const cs of cases) {
     const m = await startMock({ leaks: cs.leak ? [cs.leak] : [], lockDelayMs: 500, rate: 5 });
     const st = m.seed();
     st.stage = 'mock';
@@ -33,6 +37,7 @@ async function main() {
       TM_STAGE: 'mock', TM_API_BASE: `http://127.0.0.1:${m.port}`, TM_PUBLIC_BASE: `http://127.0.0.1:${m.port}/site`,
       TM_COGNITO_ENDPOINT: `http://127.0.0.1:${m.port}/cognito`, TM_ALLOW_MUTATION: '1',
       TM_LOCK_DEADLINE_S: '4', TM_LOCK_MAX_S: '3', TM_POLL_MS: '300', TM_FLOOD_N: '30', TM_RUN_ID: run,
+      TM_E2E_ASSUME_ALL_ROUTES: '1',
     };
     const out = await new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
       // Phải dùng spawn bất đồng bộ: mock chạy trong tiến trình này, spawnSync sẽ chặn nó

@@ -13,11 +13,19 @@
  *  - createHttpGlossaryApi: gọi REST API thật kèm Authorization: Bearer <idToken> (khi VITE_AUTH_MODE=cognito);
  *  - createMockGlossaryApi: giả lập đầy đủ trong trình duyệt (khi VITE_AUTH_MODE=mock) với dữ liệu mẫu Mục 1.3.3.
  */
+import {
+  extractApiErrorPayload,
+  resolveConsoleError,
+  type ResolveConsoleErrorOptions,
+  type KnownConsoleErrorCode,
+} from './errorMapping.js';
 import type {
   CsvImportPreviewOrCommitResult,
   CsvImportRowError,
   DeleteGlossaryTermResponse,
   DuplicateHandlingMode,
+  GlossaryCacheInvalidation,
+  GlossaryCacheInvalidationProgress,
   GlossaryStateResponse,
   GlossaryTermEntry,
   GlossaryTermType,
@@ -65,10 +73,18 @@ export class GlossaryApiError extends Error {
   constructor(
     public code: string,
     message: string,
+    public requestId?: string,
+    public httpStatus?: number,
   ) {
     super(message);
     this.name = 'GlossaryApiError';
   }
+}
+
+/** These status polling failures will not recover by repeating the same request. */
+export function isTerminalCacheInvalidationStatusError(error: unknown): boolean {
+  return error instanceof GlossaryApiError &&
+    ['NOT_FOUND', 'UNAUTHORIZED', 'PERMISSION_DENIED'].includes(error.code);
 }
 
 // ============================================================================
@@ -626,29 +642,23 @@ export function analyzeGlossaryCsv(
   };
 }
 
-export function glossaryErrorMessage(err: unknown): string {
-  if (!(err instanceof GlossaryApiError)) {
-    return 'Có lỗi tạm thời khi xử lý bảng thuật ngữ, vui lòng thử lại.';
-  }
-  switch (err.code) {
-    case 'INVALID_REQUEST':
-      return err.message || 'Dữ liệu thuật ngữ hoặc tệp CSV chưa hợp lệ.';
-    case 'FORBIDDEN':
-    case 'PERMISSION_DENIED':
-      return 'Chỉ Tenant Admin mới có quyền thêm, sửa, xóa thuật ngữ hoặc nhập CSV.';
-    case 'TENANT_SUSPENDED':
-      return 'Tổ chức đang bị tạm khóa (chế độ chỉ xem); không thể thay đổi bảng thuật ngữ.';
-    case 'VERSION_CONFLICT':
-      return 'Bảng thuật ngữ vừa được cập nhật từ phiên khác. Vui lòng tải lại và thử lại.';
-    case 'NOT_FOUND':
-      return 'Không tìm thấy thuật ngữ cần xóa hoặc chỉnh sửa.';
-    case 'UNAUTHORIZED':
-      return 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.';
-    case 'NETWORK_ERROR':
-      return 'Không kết nối được tới máy chủ, vui lòng kiểm tra mạng và thử lại.';
-    default:
-      return err.message || 'Có lỗi tạm thời, vui lòng thử lại.';
-  }
+const GLOSSARY_ERROR_OVERRIDES: Partial<Record<KnownConsoleErrorCode, string>> = Object.freeze({
+  INVALID_REQUEST: 'Dữ liệu thuật ngữ hoặc tệp CSV chưa hợp lệ.',
+  FORBIDDEN: 'Chỉ Tenant Admin mới có quyền thêm, sửa, xóa thuật ngữ hoặc nhập CSV.',
+  PERMISSION_DENIED: 'Chỉ Tenant Admin mới có quyền thêm, sửa, xóa thuật ngữ hoặc nhập CSV.',
+  TENANT_SUSPENDED: 'Tổ chức đang bị tạm khóa (chế độ chỉ xem); không thể thay đổi bảng thuật ngữ.',
+  VERSION_CONFLICT: 'Bảng thuật ngữ vừa được cập nhật từ phiên khác. Vui lòng tải lại và thử lại.',
+  NOT_FOUND: 'Không tìm thấy thuật ngữ cần xóa hoặc chỉnh sửa.',
+  UNAUTHORIZED: 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.',
+  // NETWORK_ERROR và INTERNAL_ERROR được xử lý theo loại thao tác trong errorMapping.ts
+});
+
+export function glossaryErrorMessage(err: unknown, opts: ResolveConsoleErrorOptions = {}): string {
+  return resolveConsoleError(err, {
+    ...opts,
+    scope: 'glossary',
+    overrides: { ...GLOSSARY_ERROR_OVERRIDES, ...opts.overrides },
+  }).message;
 }
 
 // ============================================================================
@@ -703,6 +713,37 @@ export function csvImportResultFromJson(raw: Json): CsvImportPreviewOrCommitResu
     ...(raw.terminology_synced !== undefined || raw.terminologySynced !== undefined
       ? { terminologySynced: Boolean(raw.terminology_synced ?? raw.terminologySynced) }
       : {}),
+    ...(raw.cacheInvalidation || raw.cache_invalidation
+      ? { cacheInvalidation: glossaryCacheInvalidationFromJson((raw.cacheInvalidation ?? raw.cache_invalidation) as Json) }
+      : {}),
+  };
+}
+
+/** Combine retry results without dropping CloudFront requests that are still in flight. */
+export function mergeGlossaryCacheInvalidations(
+  previous: GlossaryCacheInvalidation,
+  latest: GlossaryCacheInvalidation,
+): GlossaryCacheInvalidation {
+  return {
+    ...latest,
+    paths: [...new Set([...previous.paths, ...latest.paths])],
+    invalidationIds: [...new Set([...previous.invalidationIds, ...latest.invalidationIds])],
+    failedPaths: latest.failedPaths ?? previous.failedPaths,
+  };
+}
+
+function glossaryCacheInvalidationFromJson(raw: Json): GlossaryCacheInvalidation {
+  const allowedStatuses = new Set(['SUBMITTED', 'PARTIAL', 'FAILED', 'NOTHING_TO_DO', 'NOT_CONFIGURED']);
+  const rawStatus = str(raw.status);
+  const ids = raw.invalidationIds ?? raw.invalidation_ids;
+  const failed = raw.failedPaths ?? raw.failed_paths;
+  return {
+    status: (allowedStatuses.has(rawStatus) ? rawStatus : 'FAILED') as GlossaryCacheInvalidation['status'],
+    paths: Array.isArray(raw.paths) ? raw.paths.map(str) : [],
+    mode: 'WILDCARD',
+    invalidationIds: Array.isArray(ids) ? ids.map(str) : [],
+    ...(Array.isArray(failed) ? { failedPaths: failed.map(str) } : {}),
+    ...(str(raw.error) ? { error: str(raw.error) } : {}),
   };
 }
 
@@ -722,6 +763,8 @@ export interface GlossaryApi {
     csvText: string,
     onDuplicate: DuplicateHandlingMode,
   ): Promise<CsvImportPreviewOrCommitResult>;
+  retryCacheInvalidation(failedPaths: readonly string[]): Promise<GlossaryCacheInvalidation>;
+  getCacheInvalidationStatus(id: string): Promise<GlossaryCacheInvalidationProgress>;
 }
 
 // ============================================================================
@@ -765,15 +808,13 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
     }
 
     if (!res.ok) {
-      const errObj = (data.error ?? {}) as Json;
-      const code =
-        str(errObj.code) ||
-        (res.status === 401
-          ? 'UNAUTHORIZED'
-          : res.status === 403
-            ? 'PERMISSION_DENIED'
-            : 'INTERNAL_ERROR');
-      throw new GlossaryApiError(code, str(errObj.message));
+      const extracted = extractApiErrorPayload(data, res.status);
+      throw new GlossaryApiError(
+        extracted.code,
+        extracted.message,
+        extracted.requestId,
+        extracted.httpStatus,
+      );
     }
     return data;
   }
@@ -813,6 +854,9 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
         ...(data.terminology_synced !== undefined || data.terminologySynced !== undefined
           ? { terminologySynced: Boolean(data.terminology_synced ?? data.terminologySynced) }
           : {}),
+        ...(data.cacheInvalidation || data.cache_invalidation
+          ? { cacheInvalidation: glossaryCacheInvalidationFromJson((data.cacheInvalidation ?? data.cache_invalidation) as Json) }
+          : {}),
       };
     },
 
@@ -824,6 +868,9 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
         version: num(data.version, 1),
         ...(data.terminology_synced !== undefined || data.terminologySynced !== undefined
           ? { terminologySynced: Boolean(data.terminology_synced ?? data.terminologySynced) }
+          : {}),
+        ...(data.cacheInvalidation || data.cache_invalidation
+          ? { cacheInvalidation: glossaryCacheInvalidationFromJson((data.cacheInvalidation ?? data.cache_invalidation) as Json) }
           : {}),
       };
     },
@@ -844,6 +891,19 @@ export function createHttpGlossaryApi(opts: HttpGlossaryApiOptions): GlossaryApi
         onDuplicate,
       });
       return csvImportResultFromJson(data);
+    },
+    async retryCacheInvalidation(failedPaths) {
+      const data = await request('POST', '/console/glossary/cache-invalidation/retry', { failedPaths });
+      return glossaryCacheInvalidationFromJson((data.cacheInvalidation ?? data) as Json);
+    },
+    async getCacheInvalidationStatus(id) {
+      const data = await request('GET', `/console/glossary/cache-invalidation/${encodeURIComponent(id)}`);
+      return {
+        id: str(data.id) || id,
+        status: data.status === 'COMPLETED' ? 'COMPLETED' : 'IN_PROGRESS',
+        paths: Array.isArray(data.paths) ? data.paths.map(str) : [],
+        ...(str(data.createdAt ?? data.created_at) ? { createdAt: str(data.createdAt ?? data.created_at) } : {}),
+      };
     },
   };
 }
@@ -1072,6 +1132,12 @@ export function createMockGlossaryApi(opts: MockGlossaryApiOptions = {}): Glossa
         version,
         terminologySynced: true,
       };
+    },
+    async retryCacheInvalidation(_failedPaths) {
+      return { status: 'NOT_CONFIGURED', mode: 'WILDCARD', paths: [], invalidationIds: [] };
+    },
+    async getCacheInvalidationStatus(id) {
+      return { id, status: 'COMPLETED', paths: [] };
     },
   };
 }

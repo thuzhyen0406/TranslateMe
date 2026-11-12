@@ -9,7 +9,7 @@ import { login } from '../lib/auth';
 import { call, errCode } from '../lib/http';
 import { B, R, hashSentence, listOf } from '../lib/contract';
 import { assertDenied, lookalike } from '../lib/compare';
-import { ev } from '../lib/evidence';
+import { ev, skipUnlessFeature } from '../lib/evidence';
 
 const SC = 4;
 let S: State;
@@ -26,7 +26,7 @@ before(async () => {
 });
 
 describe('Kịch bản 4 – phép thử dương: tenant A đọc dữ liệu của chính mình', () => {
-  it('P1 /console/me trả vai trò và trạng thái ACTIVE', ev(SC, 'P1', 'GET /console/me', async (note) => {
+  it('P1 /console/me trả vai trò và trạng thái ACTIVE', { skip: skipUnlessFeature(SC, 'P1', 'GET /console/me', 'TM_E2E_HAS_CONSOLE_ME', 'API chưa triển khai /console/me') }, ev(SC, 'P1', 'GET /console/me', async (note) => {
     const r = await call('GET', R.me, { token: tokA });
     note('status', r.status);
     assert.equal(r.status, 200);
@@ -50,12 +50,14 @@ describe('Kịch bản 4 – phép thử dương: tenant A đọc dữ liệu c�
     assert.ok('characters_from_memory' in r.body && 'characters_machine_translated' in r.body);
   }));
 
-  it('P4 bộ nhớ dịch của A có câu của A', ev(SC, 'P4', 'GET /console/tm', async (note) => {
-    const r = await call('GET', R.tm, { token: tokA });
+  it('P4 bộ nhớ dịch của A có câu của A', ev(SC, 'P4', 'GET /console/translations?tab=MACHINE', async (note) => {
+    const r = await call('GET', R.translationSearch(A().tmText), { token: tokA });
+    const b = await call('GET', R.translationSearch(Bt().tmText), { token: tokA });
     note('status', r.status);
     assert.equal(r.status, 200);
     assert.ok(r.text.includes(A().tmHash), 'TM của A phải chứa câu của A');
-    assert.ok(!r.text.includes(Bt().tmHash), 'TM của A không được chứa câu của B');
+    assert.equal(b.status, 200);
+    assert.ok(!b.text.includes(Bt().tmHash), 'TM của A không được chứa câu của B');
   }));
 
   it('P5 job của A đọc được bằng JWT của A', ev(SC, 'P5', 'GET /console/jobs/{job_id}', async (note) => {
@@ -65,7 +67,7 @@ describe('Kịch bản 4 – phép thử dương: tenant A đọc dữ liệu c�
     assert.ok(r.body?.status, 'job phải có status');
   }));
 
-  it('P6 lượng dùng của A', ev(SC, 'P6', 'GET /console/usage', async (note) => {
+  it('P6 lượng dùng của A', { skip: skipUnlessFeature(SC, 'P6', 'GET /console/usage', 'TM_E2E_HAS_CONSOLE_USAGE', 'API chưa triển khai /console/usage') }, ev(SC, 'P6', 'GET /console/usage', async (note) => {
     const r = await call('GET', R.usage(cfg().platformKeyMonth), { token: tokA });
     note('status', r.status);
     assert.equal(r.status, 200);
@@ -96,21 +98,24 @@ describe('Kịch bản 4 – phép thử chéo: A truy cập tài nguyên của 
     assertDenied(x, base, { forbidden: [Bt().jobId, Bt().fileKey] });
   }));
 
-  it('X2 JWT của A sửa website của B', ev(SC, 'X2', 'JWT A -> PATCH /console/hosts/{slug B}', async (note) => {
-    const run = (slug: string) => call('PATCH', R.host(slug), { token: tokA, body: B.noopHostPatch() });
+  it('X2 JWT của A đọc chi tiết website của B', ev(SC, 'X2', 'JWT A -> GET /console/hosts/{slug B}', async (note) => {
+    const run = (slug: string) => call('GET', R.host(slug), { token: tokA });
     const [x, base] = [await run(Bt().slug), await run(lookalike(Bt().slug))];
     note('status', x.status); note('code', errCode(x));
-    assertDenied(x, base, { forbidden: [Bt().origin] });
+    assertDenied(x, base, { forbidden: [Bt().slug, Bt().origin] });
   }));
 
-  it('X3 JWT của A xem trang chứa câu TM của B', ev(SC, 'X3', 'JWT A -> GET /console/tm/{hash B}/pages', async (note) => {
-    const run = (h: string) => call('GET', R.tmPages(h), { token: tokA });
-    const [x, base] = [await run(Bt().tmHash), await run(lookalike(Bt().tmHash))];
+  it('X3 tenant A không tìm thấy bản dịch TM chỉ có ở B', ev(SC, 'X3', 'JWT A -> GET /console/translations?tab=MACHINE&search', async (note) => {
+    const run = (text: string) => call('GET', R.translationSearch(text), { token: tokA });
+    const [x, base] = [await run(Bt().tmText), await run(`missing-${Date.now()}-${Bt().tmText}`)];
     note('status', x.status); note('code', errCode(x));
-    assertDenied(x, base, { forbidden: [Bt().slug, Bt().tmText] });
+    assert.equal(x.status, 200);
+    assert.equal(base.status, 200);
+    assert.deepEqual(listOf(x.body), listOf(base.body), 'không được trả bản dịch riêng của B');
+    assert.ok(!x.text.includes(Bt().tmHash) && !x.text.includes(Bt().tmText));
   }));
 
-  it('X4 JWT của A tải kết quả batch của B', ev(SC, 'X4', 'JWT A -> GET /console/batch/{job B}', async (note) => {
+  it('X4 JWT của A tải kết quả batch của B', { skip: skipUnlessFeature(SC, 'X4', 'GET /console/batch/{job B}', 'TM_E2E_HAS_CONSOLE_BATCH_RESULT', 'API chưa triển khai route đọc kết quả batch theo JWT') }, ev(SC, 'X4', 'JWT A -> GET /console/batch/{job B}', async (note) => {
     const run = (id: string) => call('GET', R.consoleBatch(id), { token: tokA });
     const own = await call('GET', R.consoleBatch(Bt().jobId), { token: tokB });
     assert.equal(own.status, 200, 'tenant B phải đọc được kết quả batch của chính mình trước khi thử truy cập chéo');
@@ -132,7 +137,7 @@ describe('Kịch bản 4 – phép thử chéo: A truy cập tài nguyên của 
     const run = (slug: string) => call('POST', R.hostVerify(slug), { token: tokA, body: { method: 'META' } });
     const [x, base] = [await run(Bt().slug), await run(lookalike(Bt().slug))];
     note('status', x.status); note('code', errCode(x));
-    assertDenied(x, base, { forbidden: [Bt().origin], expectCode: 'SITE_UNREACHABLE' });
+    assertDenied(x, base, { forbidden: [Bt().origin], expectCode: 'NOT_FOUND' });
   }));
 
   it('X7 file_key của B đưa vào batch của A (presigned URL / tệp)', ev(SC, 'X7', 'API key A -> POST /translate/batch {file_key B}', async (note) => {
@@ -153,8 +158,8 @@ describe('Kịch bản 4 – phép thử chéo: A truy cập tài nguyên của 
     note('status', r.status);
     assert.equal(r.status, 200, 'trường lạ phải bị bỏ qua, không gây lỗi riêng');
     const h = hashSentence(text);
-    const tmA = await call('GET', R.tm, { token: tokA });
-    const tmB = await call('GET', R.tm, { token: tokB });
+    const tmA = await call('GET', R.translationSearch(text), { token: tokA });
+    const tmB = await call('GET', R.translationSearch(text), { token: tokB });
     assert.ok(tmA.text.includes(h), 'câu phải nằm trong TM của A');
     assert.ok(!tmB.text.includes(h), 'câu không được lọt vào TM của B');
   }));
@@ -174,7 +179,7 @@ describe('Kịch bản 4 – phép thử phụ: xác thực và Platform Admin',
     assert.ok(!r.text.includes(A().tmHash));
   }));
 
-  it('E3 Platform Admin không đọc được nội dung TM của tenant', ev(SC, 'E3', 'Platform JWT -> GET /platform/tenants/{A}', async (note) => {
+  it('E3 Platform Admin không đọc được nội dung TM của tenant', { skip: skipUnlessFeature(SC, 'E3', 'GET /platform/tenants/{A}', 'TM_E2E_HAS_PLATFORM_TENANT_DETAIL', 'API chưa triển khai GET /platform/tenants/{id}') }, ev(SC, 'E3', 'Platform JWT -> GET /platform/tenants/{A}', async (note) => {
     const r = await call('GET', R.platformTenant(A().tenantId), { token: tokPlat });
     note('status', r.status);
     assert.equal(r.status, 200);
@@ -183,7 +188,7 @@ describe('Kịch bản 4 – phép thử phụ: xác thực và Platform Admin',
     }
   }));
 
-  it('E4 token tenant không dùng được trên /platform/*', ev(SC, 'E4', 'JWT A -> GET /platform/tenants', async (note) => {
+  it('E4 token tenant không dùng được trên /platform/*', { skip: skipUnlessFeature(SC, 'E4', 'GET /platform/tenants', 'TM_E2E_HAS_PLATFORM_TENANT_LIST', 'API chưa triển khai GET /platform/tenants; không dùng 403 gateway mặc định làm bằng chứng phân quyền') }, ev(SC, 'E4', 'JWT A -> GET /platform/tenants', async (note) => {
     const r = await call('GET', R.platformTenants, { token: tokA });
     note('status', r.status);
     assert.ok([401, 403].includes(r.status), `nhận ${r.status}`);

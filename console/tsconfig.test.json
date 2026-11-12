@@ -4,6 +4,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2022", "DOM"],
+    "jsx": "react-jsx",
     "types": ["node"],
     "strict": true,
     "skipLibCheck": true,
@@ -13,6 +14,7 @@
   "include": [
     "src/types/**/*.ts",
     "src/services/**/*.ts",
+    "src/components/ConsoleFeedback.tsx",
     "src/test/**/*.ts"
   ]
 }

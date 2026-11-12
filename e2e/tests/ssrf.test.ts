@@ -96,9 +96,44 @@ describe('Kịch bản 6 – SSRF: 9 đích phải bị chặn', () => {
         const hosts = listOf((await call('GET', R.hosts, { token: tokC })).body);
         const mine = hosts.find((h: any) => h?.slug === slug);
         assert.ok(!mine || mine.status !== 'ACTIVE', 'website SSRF không được ở trạng thái ACTIVE');
+
+        // TV4 có thể expose side-channel chỉ trả tên header mà endpoint redirect
+        // nhận được. Không có fixture thì ghi SKIP riêng, không tính là đạt.
+        if (t.id === 'S8') {
+          const reportUrl = process.env.TM_SSRF_HEADER_REPORT_URL;
+          if (!reportUrl) {
+            const reason = 'TV4 chưa cấu hình TM_SSRF_HEADER_REPORT_URL';
+            note('header_forwarding', `SKIP: ${reason}`);
+            record(SC, 'S8H', 'Fixture S8 không nhận header nhạy cảm', 'skip', { reason });
+          } else {
+            try {
+              const report = await fetch(reportUrl, { signal: AbortSignal.timeout(5_000) });
+              assert.equal(report.status, 200, 'fixture report phải trả HTTP 200');
+              const payload = await report.json() as { header_names?: unknown };
+              assert.ok(Array.isArray(payload.header_names), 'fixture report cần trả header_names');
+              const received = new Set(payload.header_names.map((name) => String(name).toLowerCase()));
+              const sensitive = ['cookie', 'authorization', 'proxy-authorization', 'x-forwarded-for', 'x-api-key'];
+              for (const name of sensitive) {
+                assert.ok(!received.has(name), `fixture redirect nhận header nhạy cảm: ${name}`);
+              }
+              note('headers_nhan_duoc', [...received]);
+              record(SC, 'S8H', 'Fixture S8 không nhận header nhạy cảm', 'pass', { header_names: [...received] });
+            } catch (error) {
+              record(SC, 'S8H', 'Fixture S8 không nhận header nhạy cảm', 'fail', {
+                error: error instanceof Error ? error.message : String(error),
+              });
+              throw error;
+            }
+          }
+        }
       });
       await run();
     });
-    if (skip) record(SC, t.id, `SSRF ${t.name}`, 'skip', { reason: 'thiếu fixture của TV4' });
+    if (skip) {
+      record(SC, t.id, `SSRF ${t.name}`, 'skip', { reason: 'thiếu fixture của TV4' });
+      if (t.id === 'S8') {
+        record(SC, 'S8H', 'Fixture S8 không nhận header nhạy cảm', 'skip', { reason: 'fixture redirect S8 chưa cấu hình' });
+      }
+    }
   }
 });

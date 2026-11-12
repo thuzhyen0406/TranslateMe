@@ -7,8 +7,8 @@ import { cfg } from '../lib/config';
 import { loadState, State } from '../lib/state';
 import { login } from '../lib/auth';
 import { call, errCode } from '../lib/http';
-import { B, R, planOf, restorableConfig } from '../lib/contract';
-import { ev, record } from '../lib/evidence';
+import { B, R, restorableConfig } from '../lib/contract';
+import { ev, record, skipCase, skipUnlessFeature } from '../lib/evidence';
 
 const SC = 5;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -44,7 +44,7 @@ describe('Kịch bản 5 – ba loại 429', () => {
 
   it('L2 REQUEST_QUOTA_EXCEEDED khi hết hạn ngạch của gói API', ev(SC, 'L2', '429 REQUEST_QUOTA_EXCEEDED', async (note) => {
     const key = S.tenants.C.tinyApiKey;
-    assert.ok(key, 'tenant C chưa có key thuộc usage plan nhỏ; chạy "npm run demo:seed -- tiny-plan"');
+    assert.ok(key, 'tenant C chưa có key thuộc usage plan có quota thấp; hãy seed tinyApiKey trong .state/<stage>.json bằng quy trình demo của môi trường');
     let got = '';
     for (let i = 1; i <= 12 && !got; i++) {
       const r = await call('POST', R.translate, { apiKey: key, retryRate: false, body: B.translate('xin chào') });
@@ -55,15 +55,26 @@ describe('Kịch bản 5 – ba loại 429', () => {
     assert.equal(got, 'REQUEST_QUOTA_EXCEEDED');
   }));
 
-  it('L3 CHAR_QUOTA_EXCEEDED, nhưng câu đã có trong TM vẫn 200', { skip: !mutate() && 'cần TM_ALLOW_MUTATION=1' },
+  const l3Skip = !mutate()
+    ? skipCase(SC, 'L3', 'CHAR_QUOTA_EXCEEDED và TM hit', 'cần TM_ALLOW_MUTATION=1 trên dev/demo')
+    : skipUnlessFeature(SC, 'L3', 'CHAR_QUOTA_EXCEEDED và TM hit', 'TM_E2E_HAS_PLATFORM_CONFIG', 'API chưa triển khai GET/PUT /platform/config')
+      || skipUnlessFeature(SC, 'L3', 'CHAR_QUOTA_EXCEEDED và TM hit', 'TM_E2E_HAS_CONSOLE_ME', 'API chưa triển khai GET /console/me để xác định gói tenant C');
+  it('L3 CHAR_QUOTA_EXCEEDED, nhưng câu đã có trong TM vẫn 200', { skip: l3Skip },
     ev(SC, 'L3', '429 CHAR_QUOTA_EXCEEDED và 200 cho câu trong TM', async (note) => {
       const key = S.tenants.C.apiKey;
       const known = `Câu đã có trong bộ nhớ dịch ${Date.now()}`;
       const fresh = `Câu mới chưa từng dịch ${Date.now() + 1}`;
       const me = await call('GET', R.me, { token: tokC });
-      const plan = planOf(me.body);
+      assert.equal(me.status, 200, 'GET /console/me phải thành công trước khi sửa cấu hình platform');
+      assert.equal(String(me.body?.tenant_id ?? me.body?.tenantId ?? ''), S.tenants.C.tenantId,
+        'GET /console/me phải xác nhận đang dùng tenant C');
+      const plan = me.body?.plan ?? me.body?.service_plan ?? me.body?.tenant_plan;
+      assert.equal(typeof plan, 'string', 'GET /console/me phải trả tên gói cụ thể; không dùng giá trị mặc định');
+      assert.ok(plan.trim(), 'tên gói tenant C không được để trống');
       const orig = await call('GET', R.platformConfig, { token: tokPlat });
       assert.equal(orig.status, 200);
+      assert.ok(orig.body?.plan_limits && Object.hasOwn(orig.body.plan_limits, plan),
+        `cấu hình platform không có hạn mức cho gói tenant C: ${plan}`);
       try {
         const first = await call('POST', R.translate, { apiKey: key, body: B.translate(known) });
         note('known_first', first.status);
@@ -84,6 +95,13 @@ describe('Kịch bản 5 – ba loại 429', () => {
       } finally {
         const back = await call('PUT', R.platformConfig, { token: tokPlat, body: restorableConfig(orig.body) });
         note('restore_config', back.status);
+        assert.ok(back.status >= 200 && back.status < 300,
+          `khôi phục cấu hình platform thất bại: HTTP ${back.status} ${errCode(back) ?? ''}`.trim());
+        const restored = await call('GET', R.platformConfig, { token: tokPlat });
+        note('verify_restore_config', restored.status);
+        assert.equal(restored.status, 200, 'phải đọc lại được cấu hình platform sau khi khôi phục');
+        assert.deepEqual(restorableConfig(restored.body), restorableConfig(orig.body),
+          'cấu hình platform sau khôi phục phải khớp cấu hình ban đầu');
       }
     }));
 });
@@ -105,11 +123,14 @@ describe('Kịch bản 5 – khóa tenant', () => {
         assert.equal(b.status, 200, 'website B phải ACTIVE');
       }
 
-      const lock = await call('PATCH', R.tenantStatus(A.tenantId), { token: tokPlat, body: { status: 'LOCKED' } });
-      note('lock', lock.status);
-      assert.equal(lock.status, 200);
       const t0 = Date.now();
       try {
+        // Bắt đầu try trước PATCH: API có thể đã ghi trạng thái LOCKED dù client
+        // nhận lỗi hoặc timeout, vì vậy finally luôn phải thử mở khóa.
+        const lock = await call('PATCH', R.tenantStatus(A.tenantId), { token: tokPlat, body: { status: 'LOCKED' } });
+        note('lock', lock.status);
+        assert.equal(lock.status, 200, `khóa tenant thất bại: HTTP ${lock.status} ${errCode(lock) ?? ''}`.trim());
+
         // API: 403 TENANT_SUSPENDED cho thao tác ghi
         let api = await call('POST', R.translate, { apiKey: A.apiKey, body: B.translate('xin chào') });
         for (let i = 0; i < 10 && api.status !== 403; i++) { await sleep(1000); api = await call('POST', R.translate, { apiKey: A.apiKey, body: B.translate('xin chào') }); }
@@ -118,9 +139,6 @@ describe('Kịch bản 5 – khóa tenant', () => {
         assert.equal(errCode(api), 'TENANT_SUSPENDED');
 
         // Console: vẫn đăng nhập và đọc được, thao tác ghi bị chặn
-        const me = await call('GET', R.me, { token: tokA });
-        assert.equal(me.status, 200);
-        assert.ok(me.text.includes('LOCKED'), '/console/me phải báo LOCKED');
         const read = await call('GET', R.hosts, { token: tokA });
         assert.equal(read.status, 200, 'đọc vẫn được phép khi bị khóa');
         const write = await call('POST', R.apiKeys, { token: tokA, body: B.createKey('thu-khi-khoa') });

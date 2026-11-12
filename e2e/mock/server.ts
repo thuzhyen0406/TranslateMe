@@ -5,14 +5,17 @@ import { createServer, IncomingMessage, Server, ServerResponse } from 'node:http
 import { createHash, randomBytes } from 'node:crypto';
 import { State, TenantState } from '../lib/state';
 
-type Leak = 'jobs' | 'file_key' | 'body_tenant' | 'perm_msg' | 'lock_cache' | 'lock_api' | 'platform_tm' | 'ssrf';
+type Leak = 'jobs' | 'host' | 'file_key' | 'body_tenant' | 'perm_msg' | 'lock_cache' | 'lock_api' | 'platform_tm' | 'ssrf';
 interface Opts { leaks?: Leak[]; lockDelayMs?: number; rate?: number }
 interface Tenant { id: string; plan: string; status: 'ACTIVE' | 'LOCKED'; lockedAt: number; charUsed: number }
 interface Key { value: string; keyId: string; tenantId: string; plan: 'basic' | 'tiny'; used: number; win: number[] }
 
 const NF = 'Không tìm thấy tài nguyên.';
 const hex = (n: number) => randomBytes(n).toString('hex');
-const hashSentence = (s: string) => createHash('sha256').update(s.normalize('NFC').trim(), 'utf8').digest('hex');
+const hashSentence = (s: string) => createHash('sha256').update(s.normalize('NFC').replace(/\s+/gu, ' ').trim(), 'utf8').digest('hex');
+
+interface MockHost { tenantId: string; origin: string; status: string }
+interface MockTranslation { sourceText: string; targetText: string }
 const stripScheme = (v: string | undefined) => (v ?? '').replace(/^Bearer\s+/i, '');
 
 export function startMock(opts: Opts = {}) {
@@ -22,10 +25,10 @@ export function startMock(opts: Opts = {}) {
   const tenants = new Map<string, Tenant>();
   const users = new Map<string, { password: string; kind: 'tenant' | 'platform'; tenantId?: string }>();
   const keys = new Map<string, Key>();
-  const hosts = new Map<string, { tenantId: string; origin: string; status: string }>();
+  const hosts = new Map<string, MockHost>();
   const jobs = new Map<string, { tenantId: string; fileKey: string }>();
   const files = new Set<string>();
-  const tm = new Map<string, Map<string, string>>();
+  const tm = new Map<string, Map<string, MockTranslation>>();
   let config: any = { plan_limits: { free: 200000, pro: 1000000, business: 5000000 }, unit_price_usd_per_million: 15 };
 
   const myTm = (id: string) => { if (!tm.has(id)) tm.set(id, new Map()); return tm.get(id)!; };
@@ -120,11 +123,11 @@ export function startMock(opts: Opts = {}) {
         if (!text || !body.target_lang) return fail(res, 400, 'INVALID_REQUEST', 'Thiếu trường.');
         const h = hashSentence(text);
         const mem = myTm(tenant.id);
-        if (mem.has(h)) return send(res, 200, { translated_text: mem.get(h), characters_machine_translated: 0, characters_from_memory: text.length });
+        if (mem.has(h)) return send(res, 200, { translated_text: mem.get(h)!.targetText, characters_machine_translated: 0, characters_from_memory: text.length });
         const limit = config.plan_limits?.[tenant.plan] ?? 200000;
         if (tenant.charUsed + text.length > limit) return fail(res, 429, 'CHAR_QUOTA_EXCEEDED', 'Hết hạn mức ký tự.');
         tenant.charUsed += text.length;
-        mem.set(h, `[en] ${text}`);
+        mem.set(h, { sourceText: text, targetText: `[en] ${text}` });
         return send(res, 200, { translated_text: `[en] ${text}`, characters_machine_translated: text.length, characters_from_memory: 0 });
       }
       if (path === '/translate/batch/upload-url' && method === 'POST') {
@@ -179,10 +182,7 @@ export function startMock(opts: Opts = {}) {
     // ---- /console/*
     if (path.startsWith('/console/')) {
       const t = consoleCtx(); if (!t) return;
-      const own = <T extends { tenantId: string }>(m: Map<string, T>, id: string): T | undefined => {
-        const x = m.get(id);
-        return x && x.tenantId === t.id ? x : undefined;
-      };
+      const own = (m: Map<string, { tenantId: string }>, id: string) => { const x = m.get(id); return x && x.tenantId === t.id ? x : undefined; };
       if (path === '/console/me') return send(res, 200, { tenant_id: t.id, role: 'tenant_admin', status: t.status, plan: t.plan });
       if (path === '/console/hosts' && method === 'GET')
         return send(res, 200, { items: [...hosts].filter(([, h]) => h.tenantId === t.id).map(([slug, h]) => ({ slug, status: h.status, origin_url: h.origin })) });
@@ -197,14 +197,21 @@ export function startMock(opts: Opts = {}) {
       }
       const hm = path.match(/^\/console\/hosts\/([^/]+)(\/verify)?$/);
       if (hm) {
-        const h = own(hosts, hm[1]);
-        if (!h) return hm[2] ? fail(res, 422, 'SITE_UNREACHABLE', 'Không thể xác minh website.') : denyOther(res);
+        const actualHost = hosts.get(hm[1]);
+        const h = actualHost?.tenantId === t.id ? actualHost : undefined;
+        if (!h) {
+          if (!hm[2] && method === 'GET' && actualHost && leaks.has('host')) {
+            return send(res, 200, { slug: hm[1], status: actualHost.status, home_url: actualHost.origin });
+          }
+          return denyOther(res);
+        }
         if (writeBlocked(t)) return;
         if (hm[2] && leaksSsrftarget(new URL(h.origin))) {
           h.status = 'ACTIVE';
           return send(res, 200, { slug: hm[1], status: 'ACTIVE' });
         }
         if (hm[2]) return fail(res, 400, 'VERIFICATION_FAILED', 'Không thể xác minh website.');
+        if (method === 'PATCH') return send(res, 200, { slug: hm[1], status: h.status });
         return send(res, 200, { slug: hm[1], status: (h as any).status });
       }
       const jm = path.match(/^\/console\/(jobs|batch)\/([^/]+)$/);
@@ -214,8 +221,16 @@ export function startMock(opts: Opts = {}) {
         return send(res, 200, { job_id: jm[2], status: 'QUEUED', type: 'FILE' });
       }
       if (path === '/console/jobs') return send(res, 200, { items: [...jobs].filter(([, j]) => j.tenantId === t.id).map(([id]) => ({ job_id: id })) });
+      if (path === '/console/translations' && method === 'GET') {
+        const search = (url.searchParams.get('search') ?? '').normalize('NFC').trim().toLowerCase();
+        const items = [...myTm(t.id)].flatMap(([hash, value]) => {
+          const found = !search || value.sourceText.normalize('NFC').toLowerCase().includes(search) || value.targetText.normalize('NFC').toLowerCase().includes(search);
+          return found ? [{ hash, sourceText: value.sourceText, tgt: value.targetText, label: 'MACHINE' }] : [];
+        });
+        return send(res, 200, { items });
+      }
       if (path === '/console/tm' && method === 'GET')
-        return send(res, 200, { items: [...myTm(t.id)].map(([hash, v]) => ({ hash, translation: v })) });
+        return send(res, 200, { items: [...myTm(t.id)].map(([hash, v]) => ({ hash, translation: v.targetText })) });
       const pm = path.match(/^\/console\/tm\/([^/]+)\/pages$/);
       if (pm) { if (!myTm(t.id).has(pm[1])) return denyOther(res); return send(res, 200, { items: [] }); }
       if (path === '/console/usage') return send(res, 200, { month: url.searchParams.get('month'), chars_machine_translated: t.charUsed });
@@ -246,7 +261,7 @@ export function startMock(opts: Opts = {}) {
     const fileKey = `tenants/${id}/uploads/${hex(8)}.txt`; files.add(fileKey);
     const jobId = `job_${hex(8)}`; jobs.set(jobId, { tenantId: id, fileKey });
     const tmText = `Câu của tenant ${label} ${hex(3)}`;
-    myTm(id).set(hashSentence(tmText), `[en] ${tmText}`);
+    myTm(id).set(hashSentence(tmText), { sourceText: tmText, targetText: `[en] ${tmText}` });
     const st: TenantState = { label, username, password, tenantId: id, slug, origin, apiKey: k.value, keyId: k.keyId, jobId, fileKey, tmText, tmHash: hashSentence(tmText) };
     if (label === 'C') {
       const tk: Key = { value: `tmk_${hex(12)}`, keyId: hex(5), tenantId: id, plan: 'tiny', used: 0, win: [] };

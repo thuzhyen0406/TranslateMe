@@ -4,7 +4,7 @@ import { cfg } from './config';
 
 const cache = new Map<string, { token: string; at: number }>();
 
-/** Đọc claim từ ID token Cognito vừa nhận qua TLS để seed có thể lưu tenant_id. */
+/** Đọc claim từ ID token Cognito để seed lưu tenant_id vào state demo. */
 export function idTokenClaims(token: string): Record<string, unknown> {
   const payload = token.split('.')[1];
   if (!payload) throw new Error('ID token Cognito không đúng định dạng JWT');

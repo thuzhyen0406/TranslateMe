@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { IS_DEMO_AUTH_MODE } from '../services/cognitoAuth.js';
+import { IS_DEMO_AUTH_MODE, ROLE_DISPLAY_LABEL } from '../services/cognitoAuth.js';
+import { canConsoleRequest } from '../services/tenantPolicy.js';
 import {
   DEMO_REVIEW_SITES,
   LANGUAGE_LABELS,
@@ -21,7 +22,8 @@ import {
   type ReviewApi,
   type ReviewSiteOption,
 } from '../services/reviewApi.js';
-import type { AuthenticatedSession } from '../types/auth.js';
+import { resolveConsoleError, type ConsoleOperationKind } from '../services/errorMapping.js';
+import type { AuthenticatedSession, TenantStatus } from '../types/auth.js';
 import type {
   CacheRefreshState,
   InvalidationOutcome,
@@ -29,8 +31,10 @@ import type {
   ReviewSentenceItem,
   ReviewTabCursors,
 } from '../types/review.js';
+import { EmptyState, ErrorAlert } from './ConsoleFeedback.js';
 
 interface ReviewPageProps {
+  onTenantStatusDetected?: (status: TenantStatus) => void;
   session: AuthenticatedSession;
   api?: ReviewApi;
   isDemoMode?: boolean;
@@ -89,6 +93,7 @@ interface ItemCacheRefreshStatus {
 }
 
 export const ReviewPage: React.FC<ReviewPageProps> = ({
+  onTenantStatusDetected,
   session,
   api: injectedApi,
   isDemoMode,
@@ -97,9 +102,17 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
   const demoMode = isDemoMode ?? IS_DEMO_AUTH_MODE;
   const { api, mock } = useMemo(
     () => reviewApiFor(session, demoMode, injectedApi),
-    [session, demoMode, injectedApi],
+    [session.idToken, demoMode, injectedApi],
   );
-  const canEdit = session.role === 'TENANT_ADMIN' || session.role === 'REVIEWER';
+  const hasReviewRole = session.role === 'TENANT_ADMIN' || session.role === 'REVIEWER';
+  const canWriteByTenant = canConsoleRequest({
+    method: 'PUT',
+    path: '/console/translations',
+    tenantStatus: session.tenantStatus,
+  });
+  const tenantLocked = session.tenantStatus === 'LOCKED';
+  const tenantStatusUnknown = session.tenantStatus === 'UNKNOWN';
+  const canEdit = hasReviewRole && canWriteByTenant;
 
   const [sites, setSites] = useState<ReviewSiteOption[]>(() =>
     demoMode ? [...DEMO_REVIEW_SITES] : [],
@@ -149,16 +162,21 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
   const [loading, setLoading] = useState<boolean>(true);
   const [loadingMore, setLoadingMore] = useState<boolean>(false);
   const [tabCursors, setTabCursors] = useState<ReviewTabCursors>({});
-  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<unknown | null>(null);
   const [selectedHash, setSelectedHash] = useState<string | null>(null);
   const hasMore = useMemo(() => hasMoreReviewPages(tabCursors), [tabCursors]);
   const loadSeqRef = React.useRef<number>(0);
   const selectedHashRef = React.useRef<string | null>(null);
   selectedHashRef.current = selectedHash;
+  const tenantStatusRef = React.useRef(session.tenantStatus);
+  tenantStatusRef.current = session.tenantStatus;
   const [draftText, setDraftText] = useState<string>('');
   const [submitting, setSubmitting] = useState<boolean>(false);
 
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [listError, setListError] = useState<unknown | null>(null);
+  const [actionError, setActionError] = useState<unknown | null>(null);
+  const [actionErrorOperation, setActionErrorOperation] = useState<ConsoleOperationKind>('write');
+  const [retryInvalidationTarget, setRetryInvalidationTarget] = useState<ReviewSentenceItem | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [conflictLatest, setConflictLatest] = useState<ReviewSentenceItem | null>(null);
   const [cacheStatusByHash, setCacheStatusByHash] = useState<Record<string, ItemCacheRefreshStatus>>({});
@@ -197,7 +215,10 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     setLoadingMore(false);
     setTabCursors({});
     setLoadMoreError(null);
-    setErrorMessage(null);
+    setListError(null);
+    setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     try {
       const res = await api.listTranslations({
         slug: demoMode ? currentSite?.slug || undefined : undefined,
@@ -209,6 +230,11 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
         ...(pageSize ? { limit: pageSize } : {}),
       });
       if (loadSeqRef.current !== seq) return;
+      if (res.tenantLocked === true) {
+        onTenantStatusDetected?.('LOCKED');
+      } else if (res.tenantLocked === false && tenantStatusRef.current === 'LOCKED') {
+        onTenantStatusDetected?.('ACTIVE');
+      }
       setItems(res.items);
       setTabCursors(extractResponseTabCursors(res, labelFilter));
       if (res.items.length > 0) {
@@ -230,7 +256,10 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       setItems([]);
       setSelectedHash(null);
       setDraftText('');
-      setErrorMessage(reviewErrorMessage(err));
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
+      setListError(err);
     } finally {
       if (loadSeqRef.current === seq) {
         setLoading(false);
@@ -258,6 +287,11 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
         ...(pageSize ? { limit: pageSize } : {}),
       });
       if (loadSeqRef.current !== seq) return;
+      if (res.tenantLocked === true) {
+        onTenantStatusDetected?.('LOCKED');
+      } else if (res.tenantLocked === false && tenantStatusRef.current === 'LOCKED') {
+        onTenantStatusDetected?.('ACTIVE');
+      }
       setItems((prev) => mergeReviewItems(prev, res.items));
       setTabCursors(extractResponseTabCursors(res, labelFilter));
       if (!selectedHashRef.current && res.items.length > 0) {
@@ -268,7 +302,10 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       }
     } catch (err) {
       if (loadSeqRef.current !== seq) return;
-      setLoadMoreError(reviewErrorMessage(err));
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
+      setLoadMoreError(err);
     } finally {
       if (loadSeqRef.current === seq) {
         setLoadingMore(false);
@@ -298,10 +335,22 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     [items, selectedHash],
   );
 
+  const hasActiveFilters = Boolean(
+    searchQuery.trim() || labelFilter !== 'ALL' || (demoMode && pageFilter),
+  );
+
+  const resetFilters = () => {
+    setLabelFilter('ALL');
+    setSearchQuery('');
+    if (demoMode) setPageFilter('');
+  };
+
   const handleSelectRow = (item: ReviewSentenceItem) => {
     setSelectedHash(item.hash);
     setDraftText(item.tgtText);
-    setErrorMessage(null);
+    setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     setSuccessMessage(null);
     setConflictLatest(null);
   };
@@ -441,7 +490,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
     const invIds = extractInvalidationIds(outcome);
     if (invIds.length === 0) return;
 
-    setErrorMessage(null);
+    setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     setCacheStatusByHash((prev) => ({
       ...prev,
       [item.hash]: { state: 'IN_PROGRESS', outcome },
@@ -495,7 +546,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
   const handleAcceptOriginal = async () => {
     if (!selectedItem || !canEdit) return;
     setSubmitting(true);
-    setErrorMessage(null);
+    setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     setSuccessMessage(null);
     try {
       const res = await api.acceptTranslation({
@@ -510,7 +563,10 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       if (err instanceof ReviewApiError && err.code === 'VERSION_CONFLICT' && err.latest) {
         setConflictLatest(err.latest);
       }
-      setErrorMessage(reviewErrorMessage(err));
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
+      setActionError(err);
     } finally {
       setSubmitting(false);
     }
@@ -519,7 +575,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
   const handleSaveAndPublish = async (overrideVersion?: number) => {
     if (!selectedItem || !canEdit) return;
     setSubmitting(true);
-    setErrorMessage(null);
+    setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     setSuccessMessage(null);
     try {
       const res = await api.saveAndPublishTranslation({
@@ -552,7 +610,10 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       if (err instanceof ReviewApiError && err.code === 'VERSION_CONFLICT' && err.latest) {
         setConflictLatest(err.latest);
       }
-      setErrorMessage(reviewErrorMessage(err));
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
+      setActionError(err);
     } finally {
       setSubmitting(false);
     }
@@ -561,7 +622,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
   const handleRestoreMachine = async () => {
     if (!selectedItem || !canEdit) return;
     setSubmitting(true);
-    setErrorMessage(null);
+    setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     setSuccessMessage(null);
     try {
       const res = await api.restoreMachineTranslation({
@@ -577,16 +640,24 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       if (err instanceof ReviewApiError && err.code === 'VERSION_CONFLICT' && err.latest) {
         setConflictLatest(err.latest);
       }
-      setErrorMessage(reviewErrorMessage(err));
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
+      setActionError(err);
     } finally {
       setSubmitting(false);
     }
   };
 
   const handleRetryInvalidation = async (item: ReviewSentenceItem) => {
+    if (!canEdit) return;
     setSubmitting(true);
-    setErrorMessage(null);
+    setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
     try {
+      setActionErrorOperation('idempotent');
+      setRetryInvalidationTarget(item);
       const outcome = await api.retryInvalidation({
         srcLang: item.srcLang,
         tgtLang: item.tgtLang,
@@ -595,16 +666,14 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       applyInvalidationResult(item.hash, outcome);
       if (outcome.status === 'SUBMITTED') {
         setSuccessMessage(`Đã gửi lại yêu cầu làm mới bộ nhớ đệm cho ${outcome.paths.length} trang.`);
-      } else if (outcome.status === 'PARTIAL') {
-        setErrorMessage(
-          `Làm mới bộ nhớ đệm chỉ thành công một phần (${outcome.failedPaths?.length ?? 0} đường dẫn lỗi): ` +
-            (outcome.error ?? 'Lỗi CloudFront'),
-        );
-      } else if (outcome.status === 'FAILED') {
-        setErrorMessage('Làm mới bộ nhớ đệm vẫn thất bại: ' + (outcome.error ?? 'Lỗi CloudFront'));
+      } else if (outcome.status === 'PARTIAL' || outcome.status === 'FAILED') {
+        setActionError(new ReviewApiError('CACHE_INVALIDATION_FAILED', outcome.error ?? ''));
       }
     } catch (err) {
-      setErrorMessage(reviewErrorMessage(err));
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+      }
+      setActionError(err);
     } finally {
       setSubmitting(false);
     }
@@ -649,16 +718,19 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       return (
         <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-800 border border-amber-300">
           Lỗi làm mới một phần{failCount > 0 ? ` (${failCount} đường dẫn)` : ''}
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              void handleRetryInvalidation(item);
-            }}
-            className="underline font-semibold hover:text-amber-950"
-          >
-            Thử lại
-          </button>
+          {canEdit && (
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleRetryInvalidation(item);
+              }}
+              className="underline font-semibold hover:text-amber-950 disabled:opacity-50"
+            >
+              Thử lại
+            </button>
+          )}
         </span>
       );
     }
@@ -669,11 +741,12 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
           <span className="text-amber-400">•</span>
           <button
             type="button"
+            disabled={submitting}
             onClick={(e) => {
               e.stopPropagation();
               void handleCheckInvalidationAgain(item, st.outcome);
             }}
-            className="underline font-semibold hover:text-amber-950"
+            className="underline font-semibold hover:text-amber-950 disabled:opacity-50"
           >
             Kiểm tra lại
           </button>
@@ -684,16 +757,19 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
       return (
         <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-red-50 text-red-700 border border-red-200">
           Lỗi làm mới
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              void handleRetryInvalidation(item);
-            }}
-            className="underline font-semibold hover:text-red-900"
-          >
-            Thử lại
-          </button>
+          {canEdit && (
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleRetryInvalidation(item);
+              }}
+              className="underline font-semibold hover:text-red-900 disabled:opacity-50"
+            >
+              Thử lại
+            </button>
+          )}
         </span>
       );
     }
@@ -701,38 +777,67 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
   };
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-5">
+    <div className="p-8 max-w-7xl mx-auto space-y-5">
       {/* Tiêu đề trang */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <h2 className="text-xl font-bold text-gray-900">Duyệt và chỉnh sửa bản dịch (Q4)</h2>
-          <p className="text-sm text-gray-600 mt-0.5">
-            Giao diện hai cột song ngữ: chấp nhận nguyên bản, chỉnh sửa xuất bản hoặc khôi phục bản máy dịch. Mỗi lần sửa chỉ xóa cache các trang chứa câu đó.
+          <h1 className="text-2xl font-bold text-gray-800">Duyệt và chỉnh sửa bản dịch</h1>
+          <p className="text-xs text-gray-500 mt-1">
+            Giao diện hai cột song ngữ: chấp nhận nguyên bản, chỉnh sửa xuất bản hoặc khôi phục bản máy dịch. Mỗi lần sửa chỉ làm mới bộ nhớ đệm các trang chứa câu đó.
           </p>
         </div>
-        <div className="flex items-center gap-2 text-xs text-gray-600 bg-white px-3 py-2 rounded-lg border border-gray-200">
-          <span>
-            {hasMore ? 'Đã tải' : 'Tổng câu khớp lọc'}:{' '}
-            <strong className="text-gray-900">{items.length}</strong>
-            {hasMore ? ' (còn thêm)' : ''}
-          </span>
-          <span>•</span>
-          <span>
-            Cần xem lại:{' '}
-            <strong className="text-amber-700">{items.filter((i) => i.needsReview).length}</strong>
-          </span>
+        <div className="flex flex-wrap items-center gap-2">
+          {!canEdit && (
+            <span
+              className={
+                tenantStatusUnknown && hasReviewRole && !tenantLocked
+                  ? 'px-3 py-1.5 rounded-lg bg-slate-100 border border-slate-300 text-slate-700 text-xs font-medium'
+                  : 'px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium'
+              }
+            >
+              {tenantLocked
+                ? 'Tổ chức đang bị tạm khóa – chỉ xem'
+                : tenantStatusUnknown && hasReviewRole
+                  ? 'Chưa xác minh trạng thái tổ chức – tạm khóa thao tác ghi'
+                  : `Chế độ chỉ xem (${ROLE_DISPLAY_LABEL[session.role]})`}
+            </span>
+          )}
+          <div className="flex items-center gap-2 text-xs text-gray-600 bg-white px-3 py-2 rounded-lg border border-gray-200">
+            <span>
+              {hasMore ? 'Đã tải' : 'Tổng câu khớp lọc'}:{' '}
+              <strong className="text-gray-900">{items.length}</strong>
+              {hasMore ? ' (còn thêm)' : ''}
+            </span>
+            <span>•</span>
+            <span>
+              Cần xem lại:{' '}
+              <strong className="text-amber-700">{items.filter((i) => i.needsReview).length}</strong>
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* Thông báo phân định chế độ Demo và chế độ API thật */}
+      {/* Thông báo giới hạn bộ lọc ở chế độ Cognito (SEG chưa kết nối) */}
       {!demoMode && (
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 p-3 bg-blue-50/80 border border-blue-200 rounded-xl text-xs text-blue-900">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 p-3 bg-[#e6f2ee]/60 border border-[#b8dcd0] rounded-xl text-xs text-[#0f5945]">
           <div className="flex items-center gap-2">
-            <span className="font-semibold px-2 py-0.5 rounded bg-blue-200 text-blue-950">Chế độ API thật (F5)</span>
-            <span>Duyệt và chỉnh sửa trực tiếp bộ nhớ dịch (TM) theo cặp ngôn ngữ.</span>
+            <span className="font-semibold px-2 py-0.5 rounded bg-[#d7eae3] text-[#146c54]">Kết nối API trực tiếp</span>
+            <span>Duyệt và chỉnh sửa trực tiếp bộ nhớ dịch theo cặp ngôn ngữ.</span>
           </div>
-          <span className="text-blue-700 italic">Bộ lọc website &amp; trang được giới hạn ở chế độ demo cho đến khi dịch vụ C6/SEG sẵn sàng.</span>
+          <span className="text-[#146c54]/80 italic">
+            Bộ lọc website &amp; trang hiện chỉ khả dụng ở chế độ demo cho đến khi hệ thống hoàn tất chỉ mục câu–trang (SEG).
+          </span>
         </div>
+      )}
+
+      {Boolean(listError) && items.length > 0 && (
+        <ErrorAlert
+          error={listError}
+          scope="review"
+          formatMessage={reviewErrorMessage}
+          operation="read"
+          onRetry={() => void loadItems()}
+        />
       )}
 
       {/* Thanh bộ lọc (Bước 1 & Bước 2 của Q4) */}
@@ -747,7 +852,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                   setSelectedSiteSlug(e.target.value);
                   setPageFilter('');
                 }}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-[#146c54] focus:outline-none focus:ring-2 focus:ring-[#146c54]/20"
               >
                 {sites.map((s) => (
                   <option key={s.slug} value={s.slug}>
@@ -760,9 +865,9 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                 value=""
                 disabled
                 className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600 cursor-not-allowed"
-                title="Ở chế độ API thật, bản dịch được duyệt từ bộ nhớ dịch (TM) của tenant. Bộ lọc website khả dụng ở chế độ demo."
+                title="Ở chế độ kết nối API trực tiếp, bản dịch được duyệt từ bộ nhớ dịch của tổ chức. Bộ lọc website khả dụng ở chế độ demo."
               >
-                <option value="">Toàn bộ website (Bộ nhớ dịch TM)</option>
+                <option value="">Toàn bộ website (Bộ nhớ dịch)</option>
               </select>
             )}
           </div>
@@ -775,7 +880,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                 setTargetLang(e.target.value);
                 setPageFilter('');
               }}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-[#146c54] focus:outline-none focus:ring-2 focus:ring-[#146c54]/20"
             >
               {targetLangOptions.map((lang) => (
                 <option key={lang} value={lang}>
@@ -792,7 +897,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
               <select
                 value={pageFilter}
                 onChange={(e) => setPageFilter(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-[#146c54] focus:outline-none focus:ring-2 focus:ring-[#146c54]/20"
               >
                 <option value="">Tất cả các trang</option>
                 {availablePages.map((p) => (
@@ -807,7 +912,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                 value=""
                 disabled
                 className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-500 cursor-not-allowed"
-                title="Bộ lọc trang khả dụng ở chế độ demo. Dữ liệu thật sẽ kích hoạt khi tích hợp dịch vụ chỉ mục câu–trang SEG."
+                title="Bộ lọc trang khả dụng ở chế độ demo. Dữ liệu thật sẽ kích hoạt khi tích hợp chỉ mục câu–trang SEG."
               >
                 <option value="">Chỉ khả dụng ở chế độ demo (Chờ SEG)</option>
               </select>
@@ -819,7 +924,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
             <select
               value={labelFilter}
               onChange={(e) => setLabelFilter(e.target.value as ReviewLabelFilter)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-[#146c54] focus:outline-none focus:ring-2 focus:ring-[#146c54]/20"
             >
               {(Object.keys(REVIEW_FILTER_LABELS) as ReviewLabelFilter[]).map((k) => (
                 <option key={k} value={k}>
@@ -836,7 +941,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Nhập từ trong câu gốc hoặc dịch..."
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-[#146c54] focus:outline-none focus:ring-2 focus:ring-[#146c54]/20"
             />
           </div>
         </div>
@@ -891,25 +996,44 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
           </div>
 
           {loading ? (
-            <div className="p-8 text-center text-sm text-gray-500">Đang tải danh sách câu dịch...</div>
+            <div className="p-10 text-center text-sm text-gray-500">Đang tải danh sách câu dịch...</div>
           ) : items.length === 0 ? (
-            errorMessage ? (
-              <div className="p-8 text-center space-y-3">
-                <div className="text-sm text-red-700">{errorMessage}</div>
-                <button
-                  type="button"
-                  onClick={() => void loadItems()}
-                  className="px-3.5 py-1.5 rounded-lg bg-white border border-gray-300 text-xs font-medium text-gray-800 hover:bg-gray-50"
-                >
-                  Thử lại
-                </button>
+            listError ? (
+              <div className="p-4 space-y-2">
+                <ErrorAlert
+                  error={listError}
+                  operation="read"
+                  scope="review"
+                  formatMessage={reviewErrorMessage}
+                  compact
+                />
+                <EmptyState
+                  variant="error"
+                  title="Chưa thể hiển thị danh sách bản dịch"
+                  description="Vui lòng kiểm tra thông báo lỗi ở trên rồi bấm Thử lại."
+                  actionLabel="Thử lại"
+                  onAction={() => void loadItems()}
+                />
               </div>
+            ) : hasMore ? (
+              <EmptyState
+                title="Chưa thấy câu khớp trong các trang đã tải"
+                description='Các trang vừa tải chưa có câu phù hợp bộ lọc. Bạn có thể bấm "Tải thêm" bên dưới để kiểm tra các trang cũ hơn.'
+                actionLabel={hasActiveFilters ? 'Xóa bộ lọc' : undefined}
+                onAction={hasActiveFilters ? resetFilters : undefined}
+              />
+            ) : hasActiveFilters ? (
+              <EmptyState
+                title="Không tìm thấy câu dịch phù hợp"
+                description="Không có câu dịch nào khớp với từ khóa hoặc bộ lọc hiện tại."
+                actionLabel="Xóa bộ lọc"
+                onAction={resetFilters}
+              />
             ) : (
-              <div className="p-8 text-center text-sm text-gray-500">
-                {hasMore
-                  ? 'Chưa tìm thấy câu dịch khớp bộ lọc trong các trang vừa tải. Bạn có thể bấm "Tải thêm" để kiểm tra các trang cũ hơn.'
-                  : 'Không có câu dịch nào khớp với bộ lọc hiện tại.'}
-              </div>
+              <EmptyState
+                title="Chưa có bản dịch nào"
+                description={`Chưa có câu dịch nào trong bộ nhớ dịch cho cặp ngôn ngữ ${LANGUAGE_LABELS[sourceLang] ?? sourceLang} → ${LANGUAGE_LABELS[targetLang] ?? targetLang}.`}
+              />
             )
           ) : (
             <div className="divide-y divide-gray-200 max-h-[600px] overflow-y-auto">
@@ -920,7 +1044,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                     key={item.hash}
                     onClick={() => handleSelectRow(item)}
                     className={`grid grid-cols-2 gap-4 p-4 cursor-pointer transition-colors ${
-                      isSelected ? 'bg-blue-50/70 ring-1 ring-inset ring-blue-300' : 'hover:bg-gray-50'
+                      isSelected ? 'bg-[#e6f2ee]/60 ring-1 ring-inset ring-[#146c54]/40' : 'hover:bg-gray-50'
                     }`}
                   >
                     {/* Cột 1: Câu gốc + trang xuất hiện */}
@@ -940,7 +1064,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                           ))
                         ) : item.hasPageMetadata === false ? (
                           <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600">
-                            TM ({item.srcLang} → {item.tgtLang})
+                            Bộ nhớ dịch ({item.srcLang} → {item.tgtLang})
                           </span>
                         ) : (
                           <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
@@ -984,33 +1108,38 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
           )}
 
           {!loading && (items.length > 0 || hasMore) && (
-            <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-600">
-              <div>
-                {hasMore ? (
-                  <span>
-                    Đã tải <strong className="text-gray-900">{items.length}</strong> câu. Vẫn còn bản dịch cũ hơn trên máy chủ.
-                  </span>
-                ) : (
-                  <span>
-                    Đã hiển thị toàn bộ <strong className="text-gray-900">{items.length}</strong> câu khớp bộ lọc.
-                  </span>
-                )}
-                {loadMoreError && (
-                  <div role="alert" className="text-red-600 mt-1">
-                    {loadMoreError}
-                  </div>
+            <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 space-y-2 text-xs text-gray-600">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  {hasMore ? (
+                    <span>
+                      Đã tải <strong className="text-gray-900">{items.length}</strong> câu. Vẫn còn bản dịch cũ hơn trên máy chủ.
+                    </span>
+                  ) : (
+                    <span>
+                      Đã hiển thị toàn bộ <strong className="text-gray-900">{items.length}</strong> câu khớp bộ lọc.
+                    </span>
+                  )}
+                </div>
+                {hasMore && (
+                  <button
+                    type="button"
+                    disabled={loadingMore}
+                    onClick={() => void loadMoreItems()}
+                    className="px-3.5 py-1.5 rounded-lg bg-white border border-gray-300 text-gray-800 font-medium hover:bg-gray-100 disabled:opacity-50"
+                  >
+                    {loadingMore ? 'Đang tải thêm...' : 'Tải thêm'}
+                  </button>
                 )}
               </div>
-              {hasMore && (
-                <button
-                  type="button"
-                  disabled={loadingMore}
-                  onClick={() => void loadMoreItems()}
-                  className="px-3.5 py-1.5 rounded-lg bg-white border border-gray-300 text-gray-800 font-medium hover:bg-gray-100 disabled:opacity-50"
-                >
-                  {loadingMore ? 'Đang tải thêm...' : 'Tải thêm'}
-                </button>
-              )}
+              <ErrorAlert
+                error={loadMoreError}
+                scope="review"
+                formatMessage={reviewErrorMessage}
+                operation="read"
+                onRetry={() => void loadMoreItems()}
+                compact
+              />
             </div>
           )}
         </div>
@@ -1018,9 +1147,14 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
         {/* Khung sửa chi tiết bên phải (5/12 cột) */}
         <div className="lg:col-span-5 bg-white rounded-xl border border-gray-200 p-5 shadow-sm space-y-4">
           {!selectedItem ? (
-            <div className="py-12 text-center text-sm text-gray-500">
-              Chọn một câu trong danh sách bên trái để xem chi tiết và hiệu đính.
-            </div>
+            <EmptyState
+              title={items.length === 0 ? 'Chưa có câu dịch để hiển thị' : 'Chưa chọn câu dịch'}
+              description={
+                items.length === 0
+                  ? 'Điều chỉnh cặp ngôn ngữ hoặc bộ lọc ở bên trên để xem danh sách câu dịch.'
+                  : 'Chọn một câu trong danh sách bên trái để xem chi tiết, kiểm tra ký hiệu định dạng và hiệu đính.'
+              }
+            />
           ) : (
             <>
               <div className="flex items-center justify-between border-b border-gray-100 pb-3">
@@ -1049,27 +1183,48 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
               </div>
 
               {/* Thông báo lỗi hoặc thành công */}
-              {errorMessage && (
-                <div
-                  role="alert"
-                  className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800 space-y-1"
-                >
-                  <div className="font-semibold">Không thể lưu bản dịch:</div>
-                  <div>{errorMessage}</div>
-                </div>
-              )}
+              <ErrorAlert
+                error={actionError}
+                operation={actionErrorOperation}
+                onRetry={
+                  actionErrorOperation === 'idempotent' && retryInvalidationTarget && canEdit
+                    ? () => void handleRetryInvalidation(retryInvalidationTarget)
+                    : undefined
+                }
+                onCheckStatus={() => void loadItems()}
+                checkStatusLabel="Tải lại danh sách bản dịch"
+                title="Không thể thực hiện thao tác"
+                scope="review"
+                formatMessage={reviewErrorMessage}
+                onDismiss={() => {
+                  setActionError(null);
+                  setActionErrorOperation('write');
+                  setRetryInvalidationTarget(null);
+                }}
+                compact
+              />
 
               {successMessage && (
-                <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
-                  {successMessage}
+                <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center justify-between gap-2">
+                  <span>{successMessage}</span>
+                  <button
+                    type="button"
+                    onClick={() => setSuccessMessage(null)}
+                    className="font-semibold underline shrink-0"
+                  >
+                    Đóng
+                  </button>
                 </div>
               )}
 
-              {/* Khung so sánh khi xảy ra xung đột 409 VERSION_CONFLICT (Mục 1.3.4) */}
+              {/* Khung so sánh khi xảy ra xung đột 409 VERSION_CONFLICT */}
               {conflictLatest && (
                 <div className="p-3.5 rounded-lg bg-amber-50 border border-amber-300 text-xs space-y-2.5">
-                  <div className="font-semibold text-amber-900">
-                    Cảnh báo xung đột phiên bản (409 VERSION_CONFLICT)
+                  <div className="font-semibold text-amber-900 flex items-center gap-2">
+                    <span>Cảnh báo xung đột phiên bản</span>
+                    <code className="px-1.5 py-0.5 rounded bg-amber-100 border border-amber-200 font-mono text-[11px]">
+                      VERSION_CONFLICT
+                    </code>
                   </div>
                   <p className="text-amber-800">
                     Người dùng <strong>{conflictLatest.reviewerId ?? 'khác'}</strong> vừa cập nhật câu này lên phiên bản{' '}
@@ -1088,20 +1243,25 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                       type="button"
                       onClick={() => {
                         updateItemInState(conflictLatest);
-                        setErrorMessage(null);
+                        setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
                         setSuccessMessage(`Đã nạp bản mới nhất (v${conflictLatest.version}).`);
                       }}
                       className="px-3 py-1.5 rounded-lg bg-white border border-gray-300 text-gray-800 font-medium hover:bg-gray-50"
                     >
                       Dùng bản mới nhất (v{conflictLatest.version})
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleSaveAndPublish(conflictLatest.version)}
-                      className="px-3 py-1.5 rounded-lg bg-amber-600 text-white font-medium hover:bg-amber-700"
-                    >
-                      Lưu đè bằng bản của tôi (lên v{conflictLatest.version + 1})
-                    </button>
+                    {canEdit && (
+                      <button
+                        type="button"
+                        disabled={submitting}
+                        onClick={() => void handleSaveAndPublish(conflictLatest.version)}
+                        className="px-3 py-1.5 rounded-lg bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50"
+                      >
+                        Lưu đè bằng bản của tôi (lên v{conflictLatest.version + 1})
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -1131,7 +1291,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                 </div>
               </div>
 
-              {/* Các trang chứa câu này (Mục 1.3.4 bước 3) */}
+              {/* Các trang chứa câu này */}
               <div className="space-y-1">
                 <label className="block text-xs font-semibold text-gray-700">
                   Xuất hiện trên các trang
@@ -1150,7 +1310,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                   </div>
                 ) : selectedItem.hasPageMetadata === false ? (
                   <div className="p-2.5 rounded-lg bg-gray-50 border border-gray-200 text-xs text-gray-600">
-                    Dịch vụ F5 tra cứu danh sách trang (bảng SEG) khi lưu và xuất bản hoặc khôi phục để xóa cache chọn lọc trên CloudFront.
+                    Hệ thống tra cứu danh sách trang chứa câu này khi lưu và xuất bản hoặc khôi phục để làm mới bộ nhớ đệm chọn lọc trên CloudFront.
                   </div>
                 ) : (
                   <div className="p-2.5 rounded-lg bg-gray-50 border border-gray-200 text-xs text-gray-600">
@@ -1178,12 +1338,14 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                   disabled={!canEdit || submitting}
                   onChange={(e) => {
                     setDraftText(e.target.value);
-                    setErrorMessage(null);
+                    setActionError(null);
+    setActionErrorOperation('write');
+    setRetryInvalidationTarget(null);
                   }}
-                  className={`w-full rounded-lg border p-3 text-sm leading-relaxed focus:outline-none ${
+                  className={`w-full rounded-lg border p-3 text-sm leading-relaxed focus:outline-none focus:ring-2 disabled:bg-gray-100 disabled:text-gray-600 ${
                     !placeholderCheck.ok
-                      ? 'border-red-400 bg-red-50/20 focus:border-red-500'
-                      : 'border-gray-300 focus:border-blue-500'
+                      ? 'border-red-400 bg-red-50/20 focus:border-red-500 focus:ring-red-200'
+                      : 'border-gray-300 focus:border-[#146c54] focus:ring-[#146c54]/20'
                   }`}
                 />
 
@@ -1199,7 +1361,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                         <span>Thừa: {placeholderCheck.extra.join(', ')}.</span>
                       )}
                     </div>
-                    {placeholderCheck.missing.length > 0 && (
+                    {canEdit && placeholderCheck.missing.length > 0 && (
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span>Chèn nhanh ký hiệu thiếu:</span>
                         {placeholderCheck.missing.map((tok, idx) => (
@@ -1224,13 +1386,13 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                 <HighlightedMarkersText text={selectedItem.machineText} />
               </div>
 
-              {/* Ba nút thao tác chuẩn của Q4 (Bước 4) */}
+              {/* Ba nút thao tác chuẩn khi duyệt bản dịch */}
               <div className="pt-2 flex flex-wrap items-center gap-2.5">
                 <button
                   type="button"
                   disabled={!canEdit || submitting}
                   onClick={() => void handleSaveAndPublish()}
-                  className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+                  className="px-4 py-2 rounded-lg bg-[#146c54] text-white text-sm font-medium hover:bg-[#0f5945] disabled:opacity-50"
                 >
                   Lưu và xuất bản
                 </button>
@@ -1243,7 +1405,7 @@ export const ReviewPage: React.FC<ReviewPageProps> = ({
                     (selectedItem.status === 'HUMAN' && !selectedItem.needsReview)
                   }
                   onClick={() => void handleAcceptOriginal()}
-                  className="px-3.5 py-2 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
+                  className="px-3.5 py-2 rounded-lg bg-[#e6f2ee] border border-[#b8dcd0] text-[#146c54] text-sm font-medium hover:bg-[#d7eae3] disabled:opacity-50"
                 >
                   Chấp nhận nguyên bản
                 </button>
