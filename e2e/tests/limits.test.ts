@@ -95,6 +95,13 @@ describe('Kịch bản 5 – ba loại 429', () => {
       } finally {
         const back = await call('PUT', R.platformConfig, { token: tokPlat, body: restorableConfig(orig.body) });
         note('restore_config', back.status);
+        assert.ok(back.status >= 200 && back.status < 300,
+          `khôi phục cấu hình platform thất bại: HTTP ${back.status} ${errCode(back) ?? ''}`.trim());
+        const restored = await call('GET', R.platformConfig, { token: tokPlat });
+        note('verify_restore_config', restored.status);
+        assert.equal(restored.status, 200, 'phải đọc lại được cấu hình platform sau khi khôi phục');
+        assert.deepEqual(restorableConfig(restored.body), restorableConfig(orig.body),
+          'cấu hình platform sau khôi phục phải khớp cấu hình ban đầu');
       }
     }));
 });
