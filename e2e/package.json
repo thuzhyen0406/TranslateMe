@@ -8,6 +8,7 @@
     "test:isolation": "node --require ts-node/register/transpile-only --test tests/isolation.test.ts",
     "test:limits": "node --require ts-node/register/transpile-only --test tests/limits.test.ts",
     "test:ssrf": "node --require ts-node/register/transpile-only --test tests/ssrf.test.ts",
+    "test:demo": "node --require ts-node/register/transpile-only --test tests/demo-seed.test.ts",
     "test:gate": "npm run test:isolation && npm run test:ssrf",
     "test:all": "node --require ts-node/register/transpile-only --test --test-concurrency=1 tests/isolation.test.ts tests/ssrf.test.ts tests/limits.test.ts",
     "selftest": "ts-node --transpile-only scripts/selftest.ts",

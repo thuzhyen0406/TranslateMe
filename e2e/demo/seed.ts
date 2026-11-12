@@ -3,16 +3,18 @@
 //   npm run demo:seed -- tenants      # tenant A, B, C: tài khoản, website, API key, TM, job
 //   npm run demo:seed -- tiny-plan    # usage plan rất nhỏ cho REQUEST_QUOTA_EXCEEDED (tenant C)
 //   npm run demo:seed -- all
-// Chạy lại được: bỏ qua phần đã có trong .state/<stage>.json (thêm --force để làm lại).
+// Chạy lại tiếp tục từng tài nguyên còn thiếu trong .state/<stage>.json (thêm --force để làm lại).
 // --dry-run chỉ in các lệnh AWS CLI, không gọi API. Tệp .state chứa mật khẩu và key: KHÔNG commit.
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { aws, argv, flag } from './aws';
+import { recoverBatchJob } from './batchRecovery';
+import { ensureUsagePlanKey } from './usagePlan';
 import { cfg } from '../lib/config';
 import { loadState, saveState, State, stateFile, TenantState } from '../lib/state';
 import { idTokenClaims, login } from '../lib/auth';
-import { call, Resp } from '../lib/http';
+import { call, errCode, Resp } from '../lib/http';
 import { B, R, hashSentence, jobIdOf, keyIdOf, keyValueOf, listOf } from '../lib/contract';
 
 const need = (k: string): string => { const v = process.env[k]; if (!v) throw new Error(`Thiếu biến môi trường ${k}`); return v; };
@@ -38,6 +40,22 @@ function loadOrNew(): State {
   };
 }
 
+async function uploadBatchFile(t: TenantState, st: State, contents: string): Promise<void> {
+  const up = must(await call('POST', R.uploadUrl, {
+    apiKey: t.apiKey, body: B.uploadUrl('e2e.txt', Buffer.byteLength(contents)),
+  }), 'POST /translate/batch/upload-url');
+  const fileKey = up.body?.file_key;
+  if (typeof fileKey !== 'string' || !fileKey) throw new Error('Upload URL response thiếu file_key');
+  t.fileKey = fileKey;
+  t.jobId = '';
+  t.batchSubmissionState = 'UPLOADING';
+  saveState(st);
+  const put = await fetch(up.body.upload_url, { method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: contents });
+  if (!put.ok) throw new Error(`Tải tệp lên thất bại: ${put.status}`);
+  t.batchSubmissionState = 'SUBMITTING';
+  saveState(st);
+}
+
 async function seedPlatform(st: State): Promise<void> {
   const pool = need('TM_PLATFORM_USER_POOL_ID');
   const group = process.env.TM_PLATFORM_GROUP ?? 'PlatformAdmins';
@@ -57,7 +75,8 @@ async function seedPlatform(st: State): Promise<void> {
 }
 
 async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
-  if (st.tenants[label]?.apiKey && !force) { console.log(`Tenant ${label}: đã có, bỏ qua (dùng --force để làm lại)`); return; }
+  // Không bỏ qua tenant chỉ dựa trên vài trường trong state: chạy tiếp các bước
+  // idempotent bên dưới để bổ sung tài nguyên còn thiếu sau khi seed bị ngắt.
   const c = cfg();
   const pool = need('TM_CONSOLE_USER_POOL_ID');
   const existing = st.tenants[label];
@@ -107,41 +126,74 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
     }
   }
   t.slug = slug;
+  t.websiteStatus = priorHost?.status === 'ACTIVE' ? 'ACTIVE' : 'PENDING';
   saveState(st);
   if (priorHost?.status !== 'ACTIVE') {
     const ver = await call('POST', R.hostVerify(slug), { token: tok, body: { method: 'META' } });
-    if (ver.status < 200 || ver.status >= 300) {
-      console.warn(`  ! Website ${slug} chưa xác minh được (${ver.status}). Test khóa tenant cần website ACTIVE; kiểm tra origin và mã META xác minh.`);
+    const verifiedStatus = ver.body?.host?.status ?? ver.body?.status;
+    if (ver.status < 200 || ver.status >= 300 || verifiedStatus !== 'ACTIVE') {
+      throw new Error(
+        `Tenant ${label}: website ${slug} chưa ACTIVE sau xác minh ` +
+        `(HTTP ${ver.status}, status=${verifiedStatus ?? 'không có'}). Seed dừng tại đây; ` +
+        `kiểm tra TM_DEMO_ORIGIN_${label}, cấu hình META và hoàn tất xác minh website, ` +
+        `sau đó chạy lại "npm run demo:seed -- tenants". State hiện tại chưa đủ điều kiện chạy bài test khóa tenant.`,
+      );
     }
+    t.websiteStatus = 'ACTIVE';
+    saveState(st);
   }
 
-  if (!t.apiKey || force) {
+  if (!t.apiKey || !t.keyId || force) {
     const k = must(await call('POST', R.apiKeys, { token: tok, body: B.createKey(`e2e-${label}`) }), 'POST /console/api-keys');
     t.apiKey = keyValueOf(k.body); t.keyId = keyIdOf(k.body);
     if (!t.apiKey || !t.keyId) throw new Error(`Tenant ${label}: response API key thiếu key_id hoặc api_key`);
     saveState(st);
   }
 
-  if (!t.tmText || force) { t.tmText = `Xin chào từ tenant ${label} ${hex(3)}`; t.tmHash = hashSentence(t.tmText); saveState(st); }
-  must(await call('POST', R.translate, { apiKey: t.apiKey, body: B.translate(t.tmText) }), 'POST /translate/realtime');
-
-  if (!t.jobId || force) {
-    const contents = 'Xin chào\n';
-    const contentType = 'text/plain';
-    const up = must(await call('POST', R.uploadUrl, {
-      apiKey: t.apiKey, body: B.uploadUrl('e2e.txt', Buffer.byteLength(contents)),
-    }), 'POST /translate/batch/upload-url');
-    const fileKey: string = up.body.file_key;
-    const put = await fetch(up.body.upload_url, { method: 'PUT', headers: { 'Content-Type': contentType }, body: contents });
-    if (!put.ok) throw new Error(`Tải tệp lên thất bại: ${put.status}`);
-    t.fileKey = fileKey;
-    const job = must(await call('POST', R.batch, { apiKey: t.apiKey, body: B.batch(fileKey) }), 'POST /translate/batch');
-    t.jobId = jobIdOf(job.body);
-    if (!t.jobId) throw new Error(`Tenant ${label}: response batch thiếu job_id`);
+  if (!t.tmText || !t.tmHash || force) {
+    if (!t.tmText || force) t.tmText = `Xin chào từ tenant ${label} ${hex(3)}`;
+    t.tmHash = hashSentence(t.tmText);
     saveState(st);
   }
+  must(await call('POST', R.translate, { apiKey: t.apiKey, body: B.translate(t.tmText) }), 'POST /translate/realtime');
 
-  if (label === 'C' && (!t.tinyApiKey || force)) {
+  if (!t.jobId || !t.fileKey || force || t.batchSubmissionState === 'SUBMITTING' || t.batchSubmissionState === 'UPLOADING') {
+    const contents = 'Xin chào\n';
+    if (t.batchSubmissionState === 'SUBMITTING' || t.batchSubmissionState === 'UPLOADING') t.jobId = '';
+    if (t.batchSubmissionState === 'SUBMITTING' && t.fileKey && !force) {
+      const recovered = await recoverBatchJob(t.tenantId, t.fileKey, region);
+      if (recovered) {
+        t.jobId = recovered;
+        t.batchSubmissionState = 'SUBMITTED';
+        saveState(st);
+        console.log(`  Đã tìm lại batch job ${recovered} theo fileKey sau lần seed bị gián đoạn.`);
+      }
+    }
+
+    if (!t.jobId || force || t.batchSubmissionState === 'UPLOADING') {
+      // URL upload cũ có thể đã hết hạn nếu tiến trình dừng trước khi gửi batch.
+      if (force || !t.fileKey || t.batchSubmissionState !== 'SUBMITTING') {
+        await uploadBatchFile(t, st, contents);
+      }
+
+      let job = await call('POST', R.batch, { apiKey: t.apiKey, body: B.batch(t.fileKey) });
+      if (job.status === 400 && errCode(job) === 'FILE_NOT_UPLOADED') {
+        await uploadBatchFile(t, st, contents);
+        job = await call('POST', R.batch, { apiKey: t.apiKey, body: B.batch(t.fileKey) });
+      }
+      must(job, 'POST /translate/batch');
+      t.jobId = jobIdOf(job.body);
+      if (!t.jobId) {
+        t.batchSubmissionState = 'SUBMITTING';
+        saveState(st);
+        throw new Error(`Tenant ${label}: response batch thiếu job_id; lần chạy lại sẽ dò job theo fileKey trước khi gửi lại.`);
+      }
+      t.batchSubmissionState = 'SUBMITTED';
+      saveState(st);
+    }
+  }
+
+  if (label === 'C' && (!t.tinyApiKey || !t.tinyKeyId || force)) {
     // Key thứ hai sẽ được chuyển sang usage plan nhỏ ở bước tiny-plan
     const k2 = must(await call('POST', R.apiKeys, { token: tok, body: B.createKey('e2e-C-tiny') }), 'POST /console/api-keys (tiny)');
     t.tinyApiKey = keyValueOf(k2.body); t.tinyKeyId = keyIdOf(k2.body);
@@ -152,7 +204,7 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
 
 function seedTinyPlan(st: State): void {
   const c = st.tenants.C;
-  if (!dry && !c?.tinyKeyId) throw new Error('Chạy "seed tenants" trước (cần tenant C có key tiny).');
+  if (!dry && (!c?.tinyKeyId || !c?.tinyApiKey)) throw new Error('Chạy "seed tenants" trước (cần tenant C có API key tiny và key ID).');
   const apiId = need('TM_API_ID'), apiStage = need('TM_API_STAGE');
   let planId = st.tinyPlanId;
   if (!planId || force) {
@@ -161,19 +213,24 @@ function seedTinyPlan(st: State): void {
       '--api-stages', `apiId=${apiId},stage=${apiStage}`, ...region]);
     planId = r.id ?? 'DRY-RUN';
   }
+  const selectedPlanId = planId ?? 'DRY-RUN';
   const keyId = c?.tinyKeyId ?? 'DRY-RUN-KEY';
-  if (!dry && st.tinyPlanId && st.tinyPlanId !== planId) {
-    aws(['apigateway', 'delete-usage-plan-key', '--usage-plan-id', st.tinyPlanId, '--key-id', keyId, ...region], { allowFail: true });
+  const basicPlanId = need('TM_PLAN_BASIC');
+  if (dry) {
+    // In ra hợp đồng lệnh sẽ chạy; dry-run không đọc hoặc sửa AWS.
+    aws(['apigateway', 'get-api-key', '--api-key', keyId, '--no-include-value', ...region]);
+    aws(['apigateway', 'get-usage-plan', '--usage-plan-id', selectedPlanId, ...region]);
+    aws(['apigateway', 'get-usage-plan-key', '--usage-plan-id', selectedPlanId, '--key-id', keyId, ...region]);
+    aws(['apigateway', 'get-usage-plan-key', '--usage-plan-id', basicPlanId, '--key-id', keyId, ...region]);
+    aws(['apigateway', 'delete-usage-plan-key', '--usage-plan-id', basicPlanId, '--key-id', keyId, ...region]);
+    aws(['apigateway', 'create-usage-plan-key', '--usage-plan-id', selectedPlanId, '--key-id', keyId, '--key-type', 'API_KEY', ...region]);
+    aws(['apigateway', 'get-usage-plan-key', '--usage-plan-id', selectedPlanId, '--key-id', keyId, ...region]);
+  } else {
+    ensureUsagePlanKey({ keyId, targetPlanId: selectedPlanId, basicPlanId, previousPlanId: st.tinyPlanId, region });
   }
-  // Một key chỉ ở một usage plan trên cùng một stage: gỡ khỏi plan Basic trước khi thêm vào plan nhỏ
-  aws(['apigateway', 'delete-usage-plan-key', '--usage-plan-id', need('TM_PLAN_BASIC'), '--key-id', keyId, ...region], { allowFail: true });
-  const attached = dry ? undefined : aws(['apigateway', 'get-usage-plan-keys', '--usage-plan-id', planId, '--key-id', keyId, ...region], { readonly: true });
-  if (dry || !attached?.items?.some((item: any) => item.id === keyId)) {
-    aws(['apigateway', 'create-usage-plan-key', '--usage-plan-id', planId, '--key-id', keyId, '--key-type', 'API_KEY', ...region]);
-  }
-  st.tinyPlanId = planId;
+  st.tinyPlanId = selectedPlanId;
   if (!dry) saveState(st);
-  console.log(`${dry ? '[dry-run] ' : ''}Usage plan nhỏ ${planId} (3 yêu cầu/ngày) gắn cho key ${keyId}`);
+  console.log(`${dry ? '[dry-run] ' : ''}Usage plan nhỏ ${selectedPlanId} (3 yêu cầu/ngày) gắn cho key ${keyId}`);
 }
 
 async function main() {
