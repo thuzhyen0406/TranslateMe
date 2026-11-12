@@ -68,7 +68,11 @@ async function seedPlatform(st: State): Promise<void> {
     '--permanent', ...region]);
   aws(['cognito-idp', 'admin-add-user-to-group', '--user-pool-id', pool, '--username', username, '--group-name', group, ...region],
     { allowFail: true });
-  if (dry) { console.log('[dry-run] sẽ PUT /platform/config với demo/platform-config.json'); return; }
+  if (dry) { console.log('[dry-run] sẽ PUT /platform/config với demo/platform-config.json nếu TM_E2E_HAS_PLATFORM_CONFIG=1'); return; }
+  if (process.env.TM_E2E_HAS_PLATFORM_CONFIG !== '1') {
+    console.log('Platform Admin đã sẵn sàng; bỏ qua PUT /platform/config vì route chưa được bật (đặt TM_E2E_HAS_PLATFORM_CONFIG=1 sau khi tích hợp).');
+    return;
+  }
   const tok = await login(cfg().platformClientId, username, password);
   must(await call('PUT', R.platformConfig, { token: tok, body }), 'PUT /platform/config');
   console.log(`Platform Admin: ${username}; PLATFORM CONFIG đã đặt`);
@@ -96,8 +100,8 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
   if (!dry) saveState(st); // Giữ credential ổn định nếu seed bị ngắt giữa chừng.
   aws(['cognito-idp', 'sign-up', '--client-id', c.consoleClientId, '--username', username, '--password', password,
     '--user-attributes', `Name=email,Value=${username}`, ...region], { allowFail: true });
-  aws(['cognito-idp', 'admin-set-user-password', '--user-pool-id', pool, '--username', username, '--password', password,
-    '--permanent', ...region]);
+  // SignUp đã đặt password. Confirm trực tiếp để PostConfirmation tạo tenant_id;
+  // AdminSetUserPassword permanent trước bước này sẽ bỏ qua trigger PostConfirmation.
   aws(['cognito-idp', 'admin-confirm-sign-up', '--user-pool-id', pool, '--username', username, ...region], { allowFail: true });
   if (dry) { console.log(`[dry-run] tenant ${label}: đăng nhập, tạo website, API key, TM, job`); return; }
 

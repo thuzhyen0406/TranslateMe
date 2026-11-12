@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   inviteTenantMember,
   IS_DEMO_AUTH_MODE,
@@ -6,31 +6,88 @@ import {
   mapCognitoErrorToVietnamese,
   ROLE_DISPLAY_LABEL,
 } from '../services/cognitoAuth.js';
+import { resolveConsoleError } from '../services/errorMapping.js';
+import { canConsoleRequest } from '../services/tenantPolicy.js';
 import type {
   AuthenticatedSession,
   InvitableConsoleRole,
+  MemberStatus,
   TenantMember,
+  TenantStatus,
 } from '../types/auth.js';
+import { EmptyState, ErrorAlert } from './ConsoleFeedback.js';
+
+const MEMBER_STATUS_LABEL: Readonly<Record<MemberStatus, string>> = {
+  ACTIVE: 'Hoạt động',
+  PENDING_FIRST_LOGIN: 'Chờ đăng nhập lần đầu',
+  DISABLED: 'Đã vô hiệu hóa',
+};
+
+const MEMBER_STATUS_STYLE: Readonly<Record<MemberStatus, string>> = {
+  ACTIVE: 'bg-[#e6f2ee] text-[#146c54]',
+  PENDING_FIRST_LOGIN: 'bg-amber-50 text-amber-700',
+  DISABLED: 'bg-gray-100 text-gray-600',
+};
 
 interface MembersPageProps {
   session: AuthenticatedSession;
+  onTenantStatusDetected?: (status: TenantStatus) => void;
 }
 
-export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
+export const MembersPage: React.FC<MembersPageProps> = ({ session, onTenantStatusDetected }) => {
+  const isTenantAdmin = session.role === 'TENANT_ADMIN';
+  const tenantStatus = session.tenantStatus;
+  const canWriteByTenant = canConsoleRequest({
+    method: 'POST',
+    path: '/console/members/invite',
+    tenantStatus,
+  });
+  const tenantLocked = tenantStatus === 'LOCKED';
+  const canInvite = isTenantAdmin && canWriteByTenant;
+
   const [members, setMembers] = useState<TenantMember[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<unknown | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<InvitableConsoleRole>('REVIEWER');
-  const [modalError, setModalError] = useState<string | null>(null);
+  const [modalError, setModalError] = useState<unknown | null>(null);
   const [successBanner, setSuccessBanner] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  const loadMembers = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const list = await listTenantMembers(session.tenantId);
+      setMembers(list);
+    } catch (err) {
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+        setIsModalOpen(false);
+        setLoadError(err);
+        return;
+      }
+      setLoadError(err);
+    } finally {
+      setLoading(false);
+    }
+  }, [session.tenantId, onTenantStatusDetected]);
+
   useEffect(() => {
-    void listTenantMembers(session.tenantId).then(setMembers);
-  }, [session.tenantId]);
+    void loadMembers();
+  }, [loadMembers]);
+
+  const openInviteModal = () => {
+    if (!canInvite) return;
+    setModalError(null);
+    setInviteEmail('');
+    setIsModalOpen(true);
+  };
 
   const handleInviteSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canInvite) return;
     setModalError(null);
     setSuccessBanner(null);
     setSubmitting(true);
@@ -53,7 +110,13 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
         `Đã gửi email mời tới ${res.member.email} với vai trò ${ROLE_DISPLAY_LABEL[res.member.role]}${demoPwdHint}.`,
       );
     } catch (err) {
-      setModalError(mapCognitoErrorToVietnamese(err));
+      if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
+        onTenantStatusDetected?.('LOCKED');
+        setIsModalOpen(false);
+        setLoadError(err);
+        return;
+      }
+      setModalError(err);
     } finally {
       setSubmitting(false);
     }
@@ -62,12 +125,36 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
   return (
     <div className="p-8 max-w-6xl">
       {/* Tiêu đề trang Thành viên */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-800">Thành viên</h1>
-        <p className="mt-1 text-xs text-gray-500">
-          Mời Developer hoặc Reviewer tham gia tổ chức {session.organizationName}
-        </p>
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-800">Thành viên</h1>
+          <p className="mt-1 text-xs text-gray-500">
+            Mời Developer hoặc Reviewer tham gia tổ chức {session.organizationName}
+          </p>
+        </div>
+        {isTenantAdmin && !canWriteByTenant && (
+          <span
+            className={`px-3 py-1.5 rounded-lg border text-xs font-medium ${
+              tenantLocked
+                ? 'bg-amber-50 border-amber-200 text-amber-800'
+                : 'bg-slate-100 border-slate-300 text-slate-700'
+            }`}
+          >
+            {tenantLocked
+              ? 'Tổ chức đang bị tạm khóa – chỉ xem'
+              : 'Chưa xác minh trạng thái tổ chức – tạm khóa thao tác ghi'}
+          </span>
+        )}
       </div>
+
+      <ErrorAlert
+        error={loadError}
+        scope="members"
+        operation="read"
+        formatMessage={mapCognitoErrorToVietnamese}
+        onRetry={() => void loadMembers()}
+        className="mb-5"
+      />
 
       {successBanner && (
         <div className="mb-5 rounded-lg bg-[#e6f2ee] border border-[#b8dcd0] px-4 py-3 text-xs text-[#146c54] flex items-center justify-between">
@@ -88,14 +175,10 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
           <span className="text-sm font-bold text-gray-800">
             {members.length} thành viên
           </span>
-          {session.role === 'TENANT_ADMIN' && (
+          {canInvite && (
             <button
               type="button"
-              onClick={() => {
-                setModalError(null);
-                setInviteEmail('');
-                setIsModalOpen(true);
-              }}
+              onClick={openInviteModal}
               className="px-4 py-2 rounded-lg bg-[#146c54] hover:bg-[#0f5945] text-white text-xs font-semibold transition-colors shadow-sm"
             >
               + Mời thành viên
@@ -103,36 +186,63 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
           )}
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="border-b border-gray-100 text-xs font-medium text-gray-400">
-                <th className="py-3.5 px-6">Email</th>
-                <th className="py-3.5 px-6">Vai trò</th>
-                <th className="py-3.5 px-6">Trạng thái</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100 text-sm">
-              {members.map((m) => (
-                <tr key={m.id} className="hover:bg-gray-50/70 transition-colors">
-                  <td className="py-4 px-6 font-medium text-gray-800">{m.email}</td>
-                  <td className="py-4 px-6">
-                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#e6f2ee] text-[#146c54]">
-                      {ROLE_DISPLAY_LABEL[m.role]}
-                    </span>
-                  </td>
-                  <td className="py-4 px-6 text-gray-600 text-xs font-medium">
-                    {m.status === 'ACTIVE' ? 'Hoạt động' : 'Chờ đăng nhập lần đầu'}
-                  </td>
+        {loading ? (
+          <div className="px-6 py-10 text-center text-sm text-gray-500">
+            Đang tải danh sách thành viên...
+          </div>
+        ) : loadError && members.length === 0 ? (
+          <EmptyState
+            variant="error"
+            title="Không thể tải danh sách thành viên"
+            description={mapCognitoErrorToVietnamese(loadError, { operation: 'read' })}
+            actionLabel="Thử lại"
+            onAction={() => void loadMembers()}
+          />
+        ) : members.length === 0 ? (
+          <EmptyState
+            title="Chưa có thành viên nào"
+            description="Tổ chức của bạn chưa có thành viên nào trong danh sách. Hãy mời Developer hoặc Reviewer để cùng quản lý và hiệu đính bản dịch."
+            actionLabel={canInvite ? '+ Mời thành viên đầu tiên' : undefined}
+            onAction={canInvite ? openInviteModal : undefined}
+          />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-gray-100 text-xs font-medium text-gray-400">
+                  <th className="py-3.5 px-6">Email</th>
+                  <th className="py-3.5 px-6">Vai trò</th>
+                  <th className="py-3.5 px-6">Trạng thái</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-gray-100 text-sm">
+                {members.map((m) => (
+                  <tr key={m.id} className="hover:bg-gray-50/70 transition-colors">
+                    <td className="py-4 px-6 font-medium text-gray-800">{m.email}</td>
+                    <td className="py-4 px-6">
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#e6f2ee] text-[#146c54]">
+                        {ROLE_DISPLAY_LABEL[m.role]}
+                      </span>
+                    </td>
+                    <td className="py-4 px-6">
+                      <span
+                        className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                          MEMBER_STATUS_STYLE[m.status] ?? 'bg-gray-100 text-gray-600'
+                        }`}
+                      >
+                        {MEMBER_STATUS_LABEL[m.status] ?? m.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Modal "Mời thành viên" */}
-      {isModalOpen && (
+      {isModalOpen && canInvite && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4"
           role="dialog"
@@ -147,11 +257,19 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session }) => {
               Mời thành viên
             </h2>
 
-            {modalError && (
-              <div className="mb-4 rounded-lg bg-red-50 border border-red-200 px-3.5 py-2.5 text-xs text-red-700">
-                {modalError}
-              </div>
-            )}
+            <ErrorAlert
+              error={modalError}
+              scope="members"
+              operation="write"
+              formatMessage={mapCognitoErrorToVietnamese}
+              onCheckStatus={() => {
+                setIsModalOpen(false);
+                void loadMembers();
+              }}
+              checkStatusLabel="Kiểm tra danh sách thành viên"
+              compact
+              className="mb-4"
+            />
 
             <form onSubmit={handleInviteSubmit} className="space-y-4" noValidate>
               <div>

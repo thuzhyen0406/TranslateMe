@@ -4,19 +4,6 @@ import { cfg } from './config';
 
 const cache = new Map<string, { token: string; at: number }>();
 
-/** Đọc claim từ ID token Cognito vừa nhận qua TLS để seed có thể lưu tenant_id. */
-export function idTokenClaims(token: string): Record<string, unknown> {
-  const payload = token.split('.')[1];
-  if (!payload) throw new Error('ID token Cognito không đúng định dạng JWT');
-  try {
-    const claims: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!claims || typeof claims !== 'object' || Array.isArray(claims)) throw new Error('payload không phải object');
-    return claims as Record<string, unknown>;
-  } catch (error) {
-    throw new Error(`Không đọc được claim từ ID token Cognito: ${(error as Error).message}`);
-  }
-}
-
 export async function login(clientId: string, username: string, password: string): Promise<string> {
   const k = `${clientId}:${username}`;
   const hit = cache.get(k);

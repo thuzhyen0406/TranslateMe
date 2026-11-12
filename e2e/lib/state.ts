@@ -9,7 +9,7 @@ export interface TenantState {
   tenantId: string;
   slug: string;
   origin: string;
-  /** Chỉ ACTIVE khi API đã xác nhận website sẵn sàng cho bộ test demo. */
+  /** Website được API xác nhận sẵn sàng cho các test demo. */
   websiteStatus?: string;
   apiKey: string;
   keyId: string;
@@ -18,7 +18,7 @@ export interface TenantState {
   tinyKeyId?: string;
   jobId: string;
   fileKey: string;
-  /** SUBMITTING được lưu trước POST để lần chạy lại dò job theo fileKey trước khi thử lại. */
+  /** Được lưu trước khi POST batch để lần chạy sau dò job theo fileKey. */
   batchSubmissionState?: 'UPLOADING' | 'SUBMITTING' | 'SUBMITTED';
   tmText: string;
   tmHash: string;
@@ -36,7 +36,7 @@ export const stateFile = (stage: string) => join(__dirname, '..', '.state', `${s
 
 export function loadState(stage: string): State {
   const f = stateFile(stage);
-  if (!existsSync(f)) throw new Error(`Chưa có ${f}. Chạy "npm run demo:seed" trước.`);
+  if (!existsSync(f)) throw new Error(`Chưa có ${f}. Hãy tạo state cho stage này theo quy trình seed của môi trường; xem e2e/README.md.`);
   return JSON.parse(readFileSync(f, 'utf8')) as State;
 }
 export function saveState(s: State): void {

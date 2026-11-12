@@ -8,6 +8,13 @@
  *    cả 3 thao tác duyệt, lỗi PLACEHOLDER_MISMATCH, xung đột 409 VERSION_CONFLICT kèm bản mới nhất,
  *    trạng thái làm mới cache CloudFront (Đang làm mới -> Đã làm mới / Lỗi làm mới một phần / Lỗi làm mới + Thử lại) và câu "Không còn sử dụng".
  */
+import {
+  extractApiErrorPayload,
+  formatPlaceholderMismatchMessage,
+  resolveConsoleError,
+  type ResolveConsoleErrorOptions,
+  type KnownConsoleErrorCode,
+} from './errorMapping.js';
 import type {
   GlossaryWarningItem,
   InvalidationOutcome,
@@ -59,6 +66,8 @@ export class ReviewApiError extends Error {
   public missing?: string[];
   public extra?: string[];
   public latest?: ReviewSentenceItem;
+  public requestId?: string;
+  public httpStatus?: number;
 
   constructor(
     public code: string,
@@ -67,6 +76,8 @@ export class ReviewApiError extends Error {
       missing?: string[];
       extra?: string[];
       latest?: ReviewSentenceItem;
+      requestId?: string;
+      httpStatus?: number;
     },
   ) {
     super(message);
@@ -74,6 +85,8 @@ export class ReviewApiError extends Error {
     if (opts?.missing) this.missing = opts.missing;
     if (opts?.extra) this.extra = opts.extra;
     if (opts?.latest) this.latest = opts.latest;
+    if (opts?.requestId) this.requestId = opts.requestId;
+    if (opts?.httpStatus !== undefined) this.httpStatus = opts.httpStatus;
   }
 }
 
@@ -148,38 +161,28 @@ export function validatePlaceholders(sourceText: string, editedText: string): Pl
 }
 
 export function formatPlaceholderError(missing: readonly string[], extra: readonly string[]): string {
-  const parts: string[] = [];
-  if (missing.length > 0) parts.push(`thiếu ký hiệu: ${missing.join(', ')}`);
-  if (extra.length > 0) parts.push(`thừa ký hiệu: ${extra.join(', ')}`);
-  const detail = parts.length > 0 ? ` (${parts.join('; ')})` : '';
-  return `Bản dịch sửa không khớp ký hiệu định dạng {n} so với câu gốc${detail}. Vui lòng giữ nguyên các ký hiệu định dạng.`;
+  return formatPlaceholderMismatchMessage(missing, extra);
 }
 
+const REVIEW_ERROR_OVERRIDES: Partial<Record<KnownConsoleErrorCode, string>> = Object.freeze({
+  VERSION_CONFLICT:
+    'Câu dịch này vừa được người khác cập nhật. Vui lòng xem bản mới nhất bên dưới trước khi quyết định lưu đè.',
+  PERMISSION_DENIED:
+    'Chỉ Tenant Admin hoặc Reviewer đang hoạt động mới có quyền duyệt và chỉnh sửa bản dịch.',
+  TENANT_SUSPENDED:
+    'Tổ chức đang bị tạm khóa (chế độ chỉ xem); không thể lưu hoặc duyệt bản dịch.',
+  UNAUTHORIZED: 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.',
+  NOT_FOUND: 'Không tìm thấy bản dịch trong bộ nhớ dịch của tổ chức.',
+  // NETWORK_ERROR và INTERNAL_ERROR được xử lý theo loại thao tác trong errorMapping.ts
+});
+
 /** Thông báo tiếng Việt cho các mã lỗi của nhóm F5 (Bảng 2.10) */
-export function reviewErrorMessage(err: unknown): string {
-  if (!(err instanceof ReviewApiError)) {
-    return 'Có lỗi tạm thời khi xử lý bản dịch, vui lòng thử lại.';
-  }
-  switch (err.code) {
-    case 'PLACEHOLDER_MISMATCH':
-      return formatPlaceholderError(err.missing ?? [], err.extra ?? []);
-    case 'VERSION_CONFLICT':
-      return 'Câu dịch này vừa được người khác cập nhật. Vui lòng xem bản mới nhất bên dưới trước khi quyết định lưu đè.';
-    case 'PERMISSION_DENIED':
-      return 'Chỉ Tenant Admin hoặc Reviewer đang hoạt động mới có quyền duyệt và chỉnh sửa bản dịch.';
-    case 'TENANT_SUSPENDED':
-      return 'Tổ chức đang bị tạm khóa (chế độ chỉ xem); không thể lưu hoặc duyệt bản dịch.';
-    case 'UNAUTHORIZED':
-      return 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.';
-    case 'NOT_FOUND':
-      return 'Không tìm thấy bản dịch trong bộ nhớ dịch của tổ chức.';
-    case 'INVALID_REQUEST':
-      return err.message || 'Dữ liệu gửi lên chưa hợp lệ.';
-    case 'NETWORK_ERROR':
-      return 'Không kết nối được tới máy chủ, vui lòng kiểm tra mạng và thử lại.';
-    default:
-      return err.message || 'Có lỗi tạm thời, vui lòng thử lại.';
-  }
+export function reviewErrorMessage(err: unknown, opts: ResolveConsoleErrorOptions = {}): string {
+  return resolveConsoleError(err, {
+    ...opts,
+    scope: 'review',
+    overrides: { ...REVIEW_ERROR_OVERRIDES, ...opts.overrides },
+  }).message;
 }
 
 // ============================================================================
@@ -544,11 +547,9 @@ export function createHttpReviewApi(opts: HttpReviewApiOptions): ReviewApi {
     }
 
     if (!res.ok) {
+      const extracted = extractApiErrorPayload(data, res.status);
       const errObj = (data.error ?? {}) as Json;
-      const details = (errObj.details ?? data.details ?? {}) as Json;
-      const code =
-        str(errObj.code) ||
-        (res.status === 401 ? 'UNAUTHORIZED' : res.status === 409 ? 'VERSION_CONFLICT' : 'INTERNAL_ERROR');
+      const details = (extracted.details ?? errObj.details ?? data.details ?? {}) as Json;
       const missing = strs(details.missing ?? errObj.missing);
       const extra = strs(details.extra ?? errObj.extra);
       const latestRaw = (details.currentEntry ??
@@ -557,10 +558,12 @@ export function createHttpReviewApi(opts: HttpReviewApiOptions): ReviewApi {
         errObj.currentEntry ??
         errObj.latest) as Json | undefined;
       const latest = latestRaw && typeof latestRaw === 'object' ? reviewItemFromJson(latestRaw) : undefined;
-      throw new ReviewApiError(code, str(errObj.message), {
+      throw new ReviewApiError(extracted.code, extracted.message, {
         ...(missing.length > 0 ? { missing } : {}),
         ...(extra.length > 0 ? { extra } : {}),
         ...(latest ? { latest } : {}),
+        ...(extracted.requestId ? { requestId: extracted.requestId } : {}),
+        httpStatus: extracted.httpStatus,
       });
     }
 
@@ -612,14 +615,22 @@ export function createHttpReviewApi(opts: HttpReviewApiOptions): ReviewApi {
           const itemsRaw = Array.isArray(data.items) ? (data.items as Json[]) : [];
           const mapped = itemsRaw.map(reviewItemFromJson).filter((it) => Boolean(it.hash));
           const nextCur = str(data.next_cursor ?? data.nextCursor).trim();
-          return { tab, mapped, nextCur };
+          const rawLocked = data.tenantLocked ?? data.tenant_locked;
+          const tenantLocked = typeof rawLocked === 'boolean' ? rawLocked : undefined;
+          return { tab, mapped, nextCur, tenantLocked };
         }),
       );
 
       const byHash = new Map<string, ReviewSentenceItem>();
       const nextTabCursors: ReviewTabCursors = {};
+      let detectedTenantLocked: boolean | undefined;
 
-      for (const { tab, mapped, nextCur } of pageResults) {
+      for (const { tab, mapped, nextCur, tenantLocked } of pageResults) {
+        if (tenantLocked === true) {
+          detectedTenantLocked = true;
+        } else if (tenantLocked === false && detectedTenantLocked === undefined) {
+          detectedTenantLocked = false;
+        }
         for (const item of mapped) {
           if (!byHash.has(item.hash)) {
             byHash.set(item.hash, item);
@@ -645,6 +656,7 @@ export function createHttpReviewApi(opts: HttpReviewApiOptions): ReviewApi {
       return {
         items,
         ...(singleNextCursor ? { nextCursor: singleNextCursor } : {}),
+        ...(detectedTenantLocked !== undefined ? { tenantLocked: detectedTenantLocked } : {}),
         nextTabCursors,
         hasMore,
       };

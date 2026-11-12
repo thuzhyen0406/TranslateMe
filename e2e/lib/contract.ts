@@ -11,8 +11,9 @@ export const R = {
   jobs: '/console/jobs',
   job: (id: string) => `/console/jobs/${id}`,
   glossary: '/console/glossary/terms',
-  tm: '/console/tm?src=vi&tgt=en',
-  tmPages: (hash: string) => `/console/tm/${hash}/pages?src=vi&tgt=en`,
+  tm: '/console/translations?tab=MACHINE&src=vi&tgt=en',
+  translationSearch: (text: string) => `/console/translations?tab=MACHINE&src=vi&tgt=en&search=${encodeURIComponent(text)}`,
+  tmPages: (hash: string) => `/console/tm/${hash}/pages?src=vi&tgt=en`, // endpoint chưa được tích hợp
   usage: (month: string) => `/console/usage?month=${month}`,
   apiKeys: '/console/api-keys',
   consoleBatch: (id: string) => `/console/batch/${id}`,
@@ -40,7 +41,7 @@ export const B = {
   // PATCH không đổi gì thật, để phép thử chéo không làm hỏng website của tenant B nếu có lỗ hổng
   noopHostPatch: () => ({ target_langs: ['en'] }),
   // [GIẢ ĐỊNH]
-  createKey: (name: string) => ({ name }),
+  createKey: (name: string) => ({ name, plan: 'Basic' }),
   glossaryTerm: (src: string, tgt: string) => ({ source_term: src, target_term: tgt, mode: 'TRANSLATE_AS' }),
   // [GIẢ ĐỊNH] cấu hình nền tảng: hạn mức ký tự theo gói. Dùng cho test CHAR_QUOTA_EXCEEDED.
   platformQuota: (plan: string, chars: number) => ({ plan_limits: { [plan]: chars } }),
@@ -53,7 +54,7 @@ export const B = {
 
 /** Hash câu: SHA-256 của câu đã chuẩn hóa NFC, hex chữ thường 64 ký tự (QC-4) */
 export const hashSentence = (s: string): string =>
-  createHash('sha256').update(s.normalize('NFC').trim(), 'utf8').digest('hex');
+  createHash('sha256').update(s.normalize('NFC').replace(/\s+/gu, ' ').trim(), 'utf8').digest('hex');
 
 // ---- Trích xuất tolerant từ phản hồi (đổi ở đây nếu tên trường khác)
 export function listOf(body: any): any[] {
@@ -64,8 +65,8 @@ export function listOf(body: any): any[] {
   }
   return [];
 }
-export const keyIdOf = (b: any): string => b?.key_id ?? b?.keyId ?? b?.id ?? '';
-export const keyValueOf = (b: any): string => b?.api_key ?? b?.value ?? b?.key ?? '';
+export const keyIdOf = (b: any): string => b?.api_key?.key_id ?? b?.key?.key_id ?? b?.key_id ?? b?.keyId ?? b?.id ?? '';
+export const keyValueOf = (b: any): string => b?.api_key?.value ?? b?.key?.value ?? b?.api_key ?? b?.value ?? b?.key ?? '';
 export const tenantIdOf = (b: any): string => b?.tenant_id ?? b?.tenantId ?? '';
 export const jobIdOf = (b: any): string => b?.job_id ?? b?.jobId ?? '';
 

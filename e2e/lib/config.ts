@@ -1,6 +1,4 @@
 // Đọc cấu hình từ biến môi trường. Gọi cfg() lúc chạy, không đọc lúc import.
-import './env';
-
 export interface Cfg {
   stage: string;
   region: string;
@@ -39,7 +37,7 @@ export function cfg(): Cfg {
     authScheme: opt('TM_AUTH_SCHEME'),
     lockDeadlineS: Number(opt('TM_LOCK_DEADLINE_S', '75')),
     pollMs: Number(opt('TM_POLL_MS', '2000')),
-    floodN: Number(opt('TM_FLOOD_N', '200')),
+    floodN: Number(opt('TM_FLOOD_N', '30')),
     allowMutation: opt('TM_ALLOW_MUTATION') === '1',
     platformKeyMonth: new Date().toISOString().slice(0, 7),
   };

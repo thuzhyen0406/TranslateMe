@@ -14,6 +14,16 @@
  *  - Gọi REST API `GET /console/me` và `GET/POST /console/members` qua `VITE_API_BASE_URL`.
  */
 
+import {
+  extractApiErrorPayload,
+  isKnownConsoleErrorCode,
+  isNetworkErrorMessage,
+  isSafeToRetryOperation,
+  parseKnownUpperErrorCode,
+  resolveConsoleError,
+  sanitizeClientSafeMessage,
+  type ResolveConsoleErrorOptions,
+} from './errorMapping.js';
 import type {
   AuthenticatedSession,
   ConfirmEmailInput,
@@ -25,6 +35,7 @@ import type {
   SignInOutcome,
   SignUpFormInput,
   TenantMember,
+  TenantStatus,
 } from '../types/auth.js';
 /**
  * Cờ bật các công cụ hỗ trợ demo (`VITE_AUTH_MODE === 'mock'`).
@@ -38,6 +49,13 @@ const envAuthMode =
   'mock';
 
 export const IS_DEMO_AUTH_MODE = envAuthMode === 'mock';
+
+const envApiBaseUrl =
+  (typeof import.meta !== 'undefined'
+    ? (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_API_BASE_URL
+    : undefined) ??
+  (typeof process !== 'undefined' ? process.env?.VITE_API_BASE_URL : undefined) ??
+  '';
 
 export const DEFAULT_DEMO_TENANT_ID = 't_01hxyz987654';
 
@@ -179,6 +197,8 @@ export class ConsoleAuthError extends Error {
   constructor(
     public code: string,
     message: string,
+    public requestId?: string,
+    public httpStatus?: number,
   ) {
     super(message);
     this.name = 'ConsoleAuthError';
@@ -186,13 +206,12 @@ export class ConsoleAuthError extends Error {
 }
 
 /**
- * Chuyển mã lỗi của Amazon Cognito / API sang thông báo tiếng Việt rõ ràng cho người dùng.
+ * Chuyển mã lỗi của Amazon Cognito / API (Bảng 2.10) sang thông báo tiếng Việt rõ ràng cho người dùng.
  */
-export function mapCognitoErrorToVietnamese(err: unknown): string {
-  if (err instanceof ConsoleAuthError) {
-    return err.message;
-  }
-
+export function mapCognitoErrorToVietnamese(
+  err: unknown,
+  opts: ResolveConsoleErrorOptions = {},
+): string {
   const rawCode =
     err && typeof err === 'object' && ('name' in err || '__type' in err || 'code' in err)
       ? String(
@@ -201,8 +220,19 @@ export function mapCognitoErrorToVietnamese(err: unknown): string {
             (err as Record<string, unknown>).name,
         )
       : '';
-  const code = rawCode.includes('#') ? rawCode.split('#').pop()! : rawCode;
+  const code = rawCode.includes('#')
+    ? rawCode.split('#').pop()!
+    : rawCode || (parseKnownUpperErrorCode(err) ?? '');
   const rawMessage = err instanceof Error ? err.message : String(err ?? '');
+
+  if (
+    err instanceof ConsoleAuthError &&
+    !isKnownConsoleErrorCode(err.code) &&
+    (err.code === 'ValidationError' || /[À-ỹ]/u.test(err.message))
+  ) {
+    const safe = sanitizeClientSafeMessage(err.message);
+    if (safe) return safe;
+  }
 
   switch (code) {
     case 'UsernameExistsException':
@@ -226,7 +256,27 @@ export function mapCognitoErrorToVietnamese(err: unknown): string {
     case 'UserNotConfirmedException':
       return 'Tài khoản chưa được xác nhận email. Vui lòng nhập mã xác nhận 6 chữ số.';
     default:
-      return rawMessage || 'Đã xảy ra lỗi trong quá trình xác thực. Vui lòng thử lại.';
+      if (isKnownConsoleErrorCode(code)) {
+        return resolveConsoleError(err, {
+          ...opts,
+          scope: opts.scope ?? 'auth',
+          overrides: {
+            PERMISSION_DENIED: 'Chỉ Tenant Admin mới có quyền quản lý và mời thành viên.',
+            TENANT_SUSPENDED: 'Tổ chức đang bị tạm khóa (chế độ chỉ xem); không thể thay đổi thành viên.',
+            ...opts.overrides,
+          },
+        }).message;
+      }
+      if (isNetworkErrorMessage(rawMessage)) {
+        return resolveConsoleError(err, { ...opts, scope: opts.scope ?? 'auth' }).message;
+      }
+      if (err && typeof err === 'object' && 'httpStatus' in err) {
+        return resolveConsoleError(err, { ...opts, scope: opts.scope ?? 'auth' }).message;
+      }
+      const safeFallback = isSafeToRetryOperation(opts.operation)
+        ? 'Đã xảy ra lỗi trong quá trình xác thực. Vui lòng thử lại.'
+        : 'Đã xảy ra lỗi khi gửi yêu cầu. Vui lòng kiểm tra trạng thái hiện tại trước khi gửi lại.';
+      return sanitizeClientSafeMessage(rawMessage) ?? safeFallback;
   }
 }
 
@@ -385,15 +435,209 @@ const simulatedUsers = new Map<string, SimulatedCognitoUser>(
 
 let simulatedMembers: TenantMember[] = initialMembers.map((m) => ({ ...m }));
 
+const simulatedTenantStatuses = new Map<string, 'ACTIVE' | 'LOCKED'>([
+  [DEFAULT_DEMO_TENANT_ID, 'ACTIVE'],
+]);
+
+export function getDemoTenantStatus(tenantId: string = DEFAULT_DEMO_TENANT_ID): 'ACTIVE' | 'LOCKED' {
+  return simulatedTenantStatuses.get(tenantId) ?? 'ACTIVE';
+}
+
+export function setDemoTenantStatus(tenantId: string, status: 'ACTIVE' | 'LOCKED'): void {
+  simulatedTenantStatuses.set(tenantId || DEFAULT_DEMO_TENANT_ID, status);
+}
+
+export interface FetchConsoleTenantProfileOptions {
+  demoMode?: boolean;
+  baseUrl?: string;
+  fetchFn?: typeof fetch;
+}
+
+export interface ConsoleTenantProfile {
+  tenantId: string;
+  role: ConsoleRole;
+  tenantStatus: 'ACTIVE' | 'LOCKED';
+  tenantLocked: boolean;
+  organizationName?: string;
+  plan?: AuthenticatedSession['plan'];
+}
+
+function parseTenantStatusFromProfilePayload(
+  data: Record<string, unknown>,
+): 'ACTIVE' | 'LOCKED' | null {
+  const rawStatus =
+    typeof (data.tenant_status ?? data.tenantStatus ?? data.status) === 'string'
+      ? String(data.tenant_status ?? data.tenantStatus ?? data.status)
+          .trim()
+          .toUpperCase()
+      : '';
+  if (rawStatus === 'LOCKED' || rawStatus === 'SUSPENDED') return 'LOCKED';
+  if (rawStatus === 'ACTIVE') return 'ACTIVE';
+
+  const rawLocked = data.tenant_locked ?? data.tenantLocked;
+  if (rawLocked === true) return 'LOCKED';
+  if (rawLocked === false) return 'ACTIVE';
+  return null;
+}
+
+function normalizeConsolePlan(raw: unknown): AuthenticatedSession['plan'] | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const upper = raw.trim().toUpperCase();
+  if (upper === 'PRO' || upper === 'BUSINESS' || upper === 'FREE') return upper;
+  return undefined;
+}
+
+/**
+ * Truy vấn `GET /console/me` (hoặc kho demo khi `demoMode = true`) để xác minh trạng thái `ACTIVE` / `LOCKED`
+ * của tổ chức trước khi bật thao tác ghi trên Web Console.
+ */
+export async function fetchConsoleTenantProfile(
+  session: Pick<AuthenticatedSession, 'tenantId' | 'role' | 'idToken' | 'organizationName' | 'plan'>,
+  opts: FetchConsoleTenantProfileOptions = {},
+): Promise<ConsoleTenantProfile> {
+  const demoMode = opts.demoMode ?? IS_DEMO_AUTH_MODE;
+  if (demoMode) {
+    const status = getDemoTenantStatus(session.tenantId);
+    return {
+      tenantId: session.tenantId,
+      role: session.role,
+      tenantStatus: status,
+      tenantLocked: status === 'LOCKED',
+      organizationName: session.organizationName,
+      plan: session.plan,
+    };
+  }
+
+  const base = (opts.baseUrl ?? envApiBaseUrl).replace(/\/+$/, '');
+  const doFetch = opts.fetchFn ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
+  if (!base && !opts.fetchFn) {
+    throw new ConsoleAuthError(
+      'NETWORK_ERROR',
+      'Chưa cấu hình địa chỉ API (VITE_API_BASE_URL) để kiểm tra trạng thái tổ chức.',
+    );
+  }
+
+  let res: Response;
+  try {
+    res = await doFetch(`${base}/console/me`, {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${session.idToken}`,
+      },
+    });
+  } catch {
+    throw new ConsoleAuthError('NETWORK_ERROR', 'Không kết nối được tới máy chủ.');
+  }
+
+  let data: Record<string, unknown> = {};
+  try {
+    const parsed = (await res.json()) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      data = parsed as Record<string, unknown>;
+    }
+  } catch {
+    data = {};
+  }
+
+  if (!res.ok) {
+    const extracted = extractApiErrorPayload(data, res.status);
+    throw new ConsoleAuthError(
+      extracted.code,
+      extracted.message,
+      extracted.requestId,
+      extracted.httpStatus,
+    );
+  }
+
+  const tenantStatus = parseTenantStatusFromProfilePayload(data);
+  if (!tenantStatus) {
+    throw new ConsoleAuthError(
+      'INTERNAL_ERROR',
+      'Phản hồi trạng thái tổ chức không hợp lệ.',
+      undefined,
+      500,
+    );
+  }
+
+  const resolvedRole = normalizeRole(
+    typeof data.role === 'string' ? data.role : undefined,
+  );
+  const role: ConsoleRole =
+    resolvedRole ??
+    (data.role === 'TENANT_ADMIN' ||
+    data.role === 'DEVELOPER' ||
+    data.role === 'REVIEWER' ||
+    data.role === 'PLATFORM_ADMIN'
+      ? (data.role as ConsoleRole)
+      : session.role);
+
+  const orgNameRaw = data.organization_name ?? data.organizationName;
+  const organizationName =
+    typeof orgNameRaw === 'string' && orgNameRaw.trim()
+      ? orgNameRaw.trim()
+      : undefined;
+  const plan = normalizeConsolePlan(data.plan);
+
+  return {
+    tenantId:
+      typeof (data.tenant_id ?? data.tenantId) === 'string' &&
+      String(data.tenant_id ?? data.tenantId).trim()
+        ? String(data.tenant_id ?? data.tenantId).trim()
+        : session.tenantId,
+    role,
+    tenantStatus,
+    tenantLocked: tenantStatus === 'LOCKED',
+    ...(organizationName ? { organizationName } : {}),
+    ...(plan ? { plan } : {}),
+  };
+}
+
+/**
+ * Nạp trạng thái tenant (`ACTIVE` | `LOCKED` | `UNKNOWN`) vào phiên làm việc ngay sau khi đăng nhập / làm mới token.
+ * Lỗi `TENANT_SUSPENDED` ánh xạ sang `'LOCKED'`; lỗi khác giữ `'UNKNOWN'` để giao diện khóa ghi fail-closed.
+ */
+export async function hydrateSessionTenantStatus(
+  session: AuthenticatedSession,
+  opts: FetchConsoleTenantProfileOptions = {},
+): Promise<AuthenticatedSession> {
+  try {
+    const profile = await fetchConsoleTenantProfile(session, opts);
+    return {
+      ...session,
+      tenantId: profile.tenantId || session.tenantId,
+      role: profile.role,
+      tenantStatus: profile.tenantStatus,
+      ...(profile.organizationName ? { organizationName: profile.organizationName } : {}),
+      ...(profile.plan ? { plan: profile.plan } : {}),
+    };
+  } catch (err) {
+    if (err instanceof ConsoleAuthError && err.code === 'TENANT_SUSPENDED') {
+      return {
+        ...session,
+        tenantStatus: 'LOCKED',
+      };
+    }
+    return {
+      ...session,
+      tenantStatus: 'UNKNOWN',
+    };
+  }
+}
+
 export function resetSimulatedAuthStore(): void {
   simulatedUsers.clear();
   for (const u of initialUsers) {
     simulatedUsers.set(u.email.toLowerCase(), { ...u });
   }
   simulatedMembers = initialMembers.map((m) => ({ ...m }));
+  simulatedTenantStatuses.clear();
+  simulatedTenantStatuses.set(DEFAULT_DEMO_TENANT_ID, 'ACTIVE');
 }
 
-function buildSessionFromUser(user: SimulatedCognitoUser): AuthenticatedSession {
+function buildSessionFromUser(
+  user: SimulatedCognitoUser,
+  tenantStatus?: TenantStatus,
+): AuthenticatedSession {
   const idToken = createMockJwt({
     sub: user.sub,
     email: user.email,
@@ -410,6 +654,7 @@ function buildSessionFromUser(user: SimulatedCognitoUser): AuthenticatedSession 
     organizationName: user.organizationName,
     plan: 'FREE',
     role: user.role,
+    tenantStatus: tenantStatus ?? (IS_DEMO_AUTH_MODE ? getDemoTenantStatus(user.tenantId) : 'UNKNOWN'),
     idToken,
     accessToken: `at_mock_${user.sub}_${Date.now()}`,
     refreshToken: `rt_${user.sub}_${Date.now()}`,
@@ -491,6 +736,7 @@ export async function registerAccount(input: SignUpFormInput): Promise<{
  */
 export async function confirmEmailAndRefreshSession(
   input: ConfirmEmailInput,
+  opts?: FetchConsoleTenantProfileOptions,
 ): Promise<AuthenticatedSession> {
   const email = input.email.trim().toLowerCase();
   const code = input.code.trim();
@@ -553,6 +799,9 @@ export async function confirmEmailAndRefreshSession(
     user.tenantId = `t_${Math.random().toString(36).slice(2, 12)}`;
   }
   user.role = 'TENANT_ADMIN';
+  if (!simulatedTenantStatuses.has(user.tenantId)) {
+    simulatedTenantStatuses.set(user.tenantId, 'ACTIVE');
+  }
 
   // Đảm bảo người dùng có mặt trong danh sách MEMBER của đúng tenantId vừa tạo
   if (
@@ -569,7 +818,7 @@ export async function confirmEmailAndRefreshSession(
     });
   }
 
-  const refreshedSession = await refreshTokenForTenantClaims(buildSessionFromUser(user));
+  const refreshedSession = await refreshTokenForTenantClaims(buildSessionFromUser(user), opts);
   return refreshedSession;
 }
 
@@ -578,6 +827,7 @@ export async function confirmEmailAndRefreshSession(
  */
 export async function refreshTokenForTenantClaims(
   session: AuthenticatedSession,
+  opts: FetchConsoleTenantProfileOptions = {},
 ): Promise<AuthenticatedSession> {
   const claims = decodeJwtClaims(session.idToken);
   const tenantId = claims?.['custom:tenant_id'] || session.tenantId || DEFAULT_DEMO_TENANT_ID;
@@ -599,14 +849,16 @@ export async function refreshTokenForTenantClaims(
     'custom:role': claimForConsoleRole(role),
   });
 
-  return {
+  const updatedSession: AuthenticatedSession = {
     ...session,
     tenantId,
     role,
     idToken: refreshedJwt,
     accessToken: `at_mock_${session.sub}_${Date.now()}`,
     tokenRefreshedAt: new Date().toISOString(),
+    tenantStatus: session.tenantStatus ?? 'UNKNOWN',
   };
+  return hydrateSessionTenantStatus(updatedSession, opts);
 }
 
 /**
@@ -705,7 +957,10 @@ export async function confirmForgotPasswordReset(
 /**
  * Đăng nhập vào Web Console (Hình 1.4 / `log-in.jpg`).
  */
-export async function signInWithEmail(input: SignInFormInput): Promise<SignInOutcome> {
+export async function signInWithEmail(
+  input: SignInFormInput,
+  opts?: FetchConsoleTenantProfileOptions,
+): Promise<SignInOutcome> {
   const email = input.email.trim().toLowerCase();
   const password = input.password;
 
@@ -762,7 +1017,7 @@ export async function signInWithEmail(input: SignInFormInput): Promise<SignInOut
     };
   }
 
-  const session = await refreshTokenForTenantClaims(buildSessionFromUser(user));
+  const session = await refreshTokenForTenantClaims(buildSessionFromUser(user), opts);
   return {
     status: 'AUTHENTICATED',
     session,
@@ -774,6 +1029,7 @@ export async function signInWithEmail(input: SignInFormInput): Promise<SignInOut
  */
 export async function completeInvitedMemberPassword(
   input: ForceChangePasswordInput,
+  opts?: FetchConsoleTenantProfileOptions,
 ): Promise<AuthenticatedSession> {
   const email = input.email.trim().toLowerCase();
   if (!input.temporaryPassword) {
@@ -834,7 +1090,7 @@ export async function completeInvitedMemberPassword(
     });
   }
 
-  return refreshTokenForTenantClaims(buildSessionFromUser(user));
+  return refreshTokenForTenantClaims(buildSessionFromUser(user), opts);
 }
 
 // ============================================================================
@@ -865,6 +1121,12 @@ export async function inviteTenantMember(
 ): Promise<{ member: TenantMember; temporaryPassword: string }> {
   if (actorRole !== 'TENANT_ADMIN') {
     throw new ConsoleAuthError('PERMISSION_DENIED', 'Chỉ Tenant Admin mới có quyền mời thành viên.');
+  }
+  if (getDemoTenantStatus(tenantId) === 'LOCKED') {
+    throw new ConsoleAuthError(
+      'TENANT_SUSPENDED',
+      'Tổ chức đang bị tạm khóa (chế độ chỉ xem); không thể thay đổi thành viên.',
+    );
   }
 
   const email = emailInput.trim().toLowerCase();

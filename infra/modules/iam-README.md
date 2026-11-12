@@ -16,7 +16,7 @@ invocation permissions remain in `api-gateway.yaml`.
 | `ProxyExecutionRoleArn` | Website proxy Lambda | Tenant data/TM/usage, `GSI2`, proxy payload prefix, async worker invoke, Translate |
 | `WorkerExecutionRoleArn` | Async translation worker Lambda | Tenant data/TM/usage, `GSI2`, worker payload prefix, Translate, KMS |
 | `ConsoleApiExecutionRoleArn` | Console API Lambda | Tenant data, `GSI2`/`GSI3`, invite members, API-key operations, import glossary terminology, cache invalidation |
-| `WebsiteFunctionRoleArn` | Dedicated website management Lambda | Tenant HOST/CONFIG through assumed tenant-data role; tenant-scoped slug reservation transactions |
+| `WebsiteFunctionRoleArn` | Dedicated website management Lambda | Tenant HOST/CONFIG through assumed tenant-data role; tenant-scoped slug reservation transactions; CloudFront cache invalidation |
 | `TenantPayloadAccessRoleArn` | Assumed by Proxy and Worker | S3 payload objects under one `tenant/<tenantId>/worker/` prefix per session |
 | `TranslateApiExecutionRoleArn` | API-key translation Lambda | Tenant data/TM/usage, `GSI2`, Translate and Comprehend |
 | `PlatformApiExecutionRoleArn` | Platform Admin Lambda | Read site rows, update tenant CONFIG, cache invalidation |
