@@ -123,11 +123,14 @@ describe('Kịch bản 5 – khóa tenant', () => {
         assert.equal(b.status, 200, 'website B phải ACTIVE');
       }
 
-      const lock = await call('PATCH', R.tenantStatus(A.tenantId), { token: tokPlat, body: { status: 'LOCKED' } });
-      note('lock', lock.status);
-      assert.equal(lock.status, 200);
       const t0 = Date.now();
       try {
+        // Bắt đầu try trước PATCH: API có thể đã ghi trạng thái LOCKED dù client
+        // nhận lỗi hoặc timeout, vì vậy finally luôn phải thử mở khóa.
+        const lock = await call('PATCH', R.tenantStatus(A.tenantId), { token: tokPlat, body: { status: 'LOCKED' } });
+        note('lock', lock.status);
+        assert.equal(lock.status, 200, `khóa tenant thất bại: HTTP ${lock.status} ${errCode(lock) ?? ''}`.trim());
+
         // API: 403 TENANT_SUSPENDED cho thao tác ghi
         let api = await call('POST', R.translate, { apiKey: A.apiKey, body: B.translate('xin chào') });
         for (let i = 0; i < 10 && api.status !== 403; i++) { await sleep(1000); api = await call('POST', R.translate, { apiKey: A.apiKey, body: B.translate('xin chào') }); }
