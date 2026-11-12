@@ -55,6 +55,8 @@ export interface AuthenticatedSession {
   accessToken: string;
   refreshToken: string;
   tokenRefreshedAt: string;
+  /** Trạng thái tenant nếu đã biết (GET /console/me); LOCKED -> giao diện chỉ xem */
+  tenantStatus?: 'ACTIVE' | 'LOCKED';
 }
 
 export interface SignUpFormInput {

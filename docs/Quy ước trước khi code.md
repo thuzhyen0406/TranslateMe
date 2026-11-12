@@ -168,10 +168,11 @@ Các route dưới đây dùng role code ở phần 4.1 (không dùng nhãn hi�
 | `/console/members/invite` | `POST` | `TENANT_ADMIN` |
 | `/console/members/{userSub}` | `PATCH` | `TENANT_ADMIN` |
 | `/console/members/{userSub}` | `DELETE` | Không dùng; dùng API revoke/remove do backend quy định |
-| `/console/websites` | `GET`, `POST` | `TENANT_ADMIN` |
-| `/console/websites/{slug}` | `GET`, `PATCH` | `TENANT_ADMIN` |
-| `/console/websites/{slug}/pause` | `PATCH` | `TENANT_ADMIN` |
-| `/console/websites/{slug}/resume` | `PATCH` | `TENANT_ADMIN` |
+| `/console/hosts` | `GET`, `POST` | `TENANT_ADMIN` |
+| `/console/hosts/{slug}` | `GET` | `TENANT_ADMIN` |
+| `/console/hosts/{slug}/verify` | `POST` | `TENANT_ADMIN` |
+| `/console/hosts/{slug}/pause` | `POST` | `TENANT_ADMIN` |
+| `/console/hosts/{slug}/resume` | `POST` | `TENANT_ADMIN` |
 | `/console/glossary` hoặc `/console/glossary/terms` | `GET` | `TENANT_ADMIN`, `DEVELOPER`, `REVIEWER` |
 | `/console/glossary/terms/{term}` | `PUT`, `DELETE` | `TENANT_ADMIN`; các role khác bị chặn ghi/xóa |
 | `/console/glossary/import/preview` hoặc `POST /console/glossary/import` | `POST` | Preview glossary cho mọi role được phép đọc glossary; commit chỉ `TENANT_ADMIN` |
@@ -188,7 +189,7 @@ Các route dưới đây dùng role code ở phần 4.1 (không dùng nhãn hi�
 | `/console/platform/pricing` | `GET`, `POST`, `PATCH` | `PlatformAdmins` |
 | `/console/tm/*` | `GET` | Theo quyền đọc của tenant; không có `DELETE` |
 
-Website chỉ dùng `PATCH` cho pause/resume. API key chỉ dùng thao tác `revoke`; không thêm endpoint `DELETE` cho website, Translation Memory (TM) hoặc API key.
+Danh sách website trả `{ hosts }`; create, verify và detail trả `{ host }` chứa bản ghi HOST đầy đủ. Website pause/resume dùng `POST`. API key chỉ dùng thao tác `revoke`; không thêm endpoint `DELETE` cho website, Translation Memory (TM) hoặc API key.
 
 #### Token type và thứ tự xử lý lỗi
 - Mọi API dưới `/console/*` dùng **Cognito ID token**, không dùng access token, vì API phải đọc `custom:tenant_id` và `custom:role` (Platform Admin đọc `cognito:groups`).
@@ -248,11 +249,10 @@ import { inviteMember } from './auth/inviteMember.js';
 const invited = await inviteMember(tenantId, email, role);
 // invited trả về: { username, userSub, userStatus: 'FORCE_CHANGE_PASSWORD', tenantId, email, role }
 
-// 2. TRÁCH NHIỆM CỦA TẦNG API (TV3):
-// Dùng `invited.userSub` để ghi bản ghi MEMBER vào DynamoDB với:
+// 2. inviteMember đã ghi bản ghi MEMBER vào DynamoDB bằng invited.userSub:
 //   PK = `TENANT#${tenantId}`
 //   SK = `MEMBER#${invited.userSub}`
-//   status = "PENDING_FIRST_LOGIN" (chờ đăng nhập lần đầu)
+//   status = "ACTIVE"; Cognito vẫn yêu cầu đổi mật khẩu tạm trước khi cấp token.
 ```
 
 ### 4.4. Quy ước cho Module Nhận diện ngôn ngữ, Glossary & Hậu kiểm `F4` (từ Nhiệm vụ 1.12)

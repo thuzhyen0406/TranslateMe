@@ -10,6 +10,7 @@
  * Mọi thao tác đi qua lớp data (`db` của libs/common/db.ts, hoặc bản giả cùng chữ ký khi kiểm thử) – QC-3.
  */
 import type { Ctx } from './types.js';
+import type { UsageReservation } from './usage/usage.js';
 
 export type JobType = 'FILE' | 'PREWARM';
 export type JobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
@@ -96,7 +97,22 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
   const iso = () => new Date(now()).toISOString();
 
   /** Tạo JOB ở trạng thái QUEUED (C6, trước StartExecution). */
-  async function create(ctx: Ctx, input: { jobId: string; type: JobType; slug?: string; targetLangs: string[]; executionName?: string }): Promise<void> {
+  async function create(ctx: Ctx, input: {
+    jobId: string;
+    type: JobType;
+    slug?: string;
+    targetLangs: string[];
+    executionName?: string;
+    file?: {
+      fileKey: string;
+      fileName: string;
+      format: string;
+      sourceLang?: string;
+      sendEmail: boolean;
+      estimatedCharacters: number;
+      usageReservation: UsageReservation;
+    };
+  }): Promise<void> {
     const at = iso();
     await db.put(
       ctx,
@@ -109,6 +125,16 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
         tenantId: ctx.tenantId,
         ...(input.slug ? { slug: input.slug } : {}),
         targetLangs: input.targetLangs,
+        ...(input.file ? {
+          fileKey: input.file.fileKey,
+          fileName: input.file.fileName,
+          format: input.file.format,
+          ...(input.file.sourceLang ? { sourceLang: input.file.sourceLang } : {}),
+          sendEmail: input.file.sendEmail,
+          estimatedCharacters: input.file.estimatedCharacters,
+          actualCharacters: 0,
+          usageReservation: input.file.usageReservation,
+        } : {}),
         total: 0,
         done: 0,
         failed: 0,

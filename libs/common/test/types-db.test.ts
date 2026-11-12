@@ -273,6 +273,7 @@ describe('db.ts', () => {
       Put: {
         TableName: 'translate-data',
         Item: { PK: 'TENANT#PLATFORM#SLUG#demo', SK: 'META', tenantId: ctx.tenantId },
+        ConditionExpression: 'attribute_not_exists(PK)',
       },
     }], { platformSlugReservation: true });
     assert.equal(requests[1].target.endsWith('.TransactWriteItems'), true);

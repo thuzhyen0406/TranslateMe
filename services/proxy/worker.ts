@@ -4,7 +4,7 @@
  * Proxy hết ngân sách 20 giây thì gửi các câu chưa dịch kịp sang đây (InvocationType = Event).
  * Worker:
  *  1. Kiểm tra lại sự kiện và tenant (B.1.1): slug tồn tại, thuộc đúng tenantId, website ACTIVE, tenant không LOCKED.
- *     Câu đọc từ S3 chỉ được nằm dưới worker/<tenantId>/.
+ *     Câu đọc từ S3 chỉ được nằm dưới tenant/<tenantId>/worker/.
  *  2. Tra lại TM (lượt truy cập khác có thể đã dịch), gắn cờ "Cần xem lại" cho bản HUMAN lỗi thời nếu có, chỉ dịch câu còn trượt.
  *  3. Tự đặt trước hạn mức cho phần mình dịch (proxy đã hoàn lại phần chưa dịch ở bước 8). Hết hạn mức thì dừng,
  *     câu còn lại giữ ngôn ngữ gốc.
@@ -120,7 +120,7 @@ export function createWorkerHandler(deps: WorkerDeps) {
           return reject('S3_KEY_OUTSIDE_TENANT');
         }
         if (!deps.store) return reject('NO_PAYLOAD_STORE');
-        sentences = JSON.parse(await deps.store.get(event.sentencesS3Key));
+        sentences = JSON.parse(await deps.store.get(event.sentencesS3Key, site.tenantId));
       }
       if (!validSentences(sentences)) return reject('INVALID_SENTENCES');
       res.received = sentences.length;
