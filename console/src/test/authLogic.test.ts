@@ -16,6 +16,10 @@ import {
   requestPasswordResetCode,
   resetSimulatedAuthStore,
   signInWithEmail,
+  fetchConsoleTenantProfile,
+  getDemoTenantStatus,
+  hydrateSessionTenantStatus,
+  setDemoTenantStatus,
   validatePasswordPolicy,
 } from '../services/cognitoAuth.js';
 
@@ -59,6 +63,7 @@ describe('Task 2.9 – Web Console: Khung, Đăng nhập & Màn Q1', () => {
     });
 
     assert.equal(session.role, 'TENANT_ADMIN');
+    assert.equal(session.tenantStatus, 'ACTIVE');
     assert.ok(session.tenantId.startsWith('t_'));
 
     const claims = decodeJwtClaims(session.idToken);
@@ -169,6 +174,7 @@ describe('Task 2.9 – Web Console: Khung, Đăng nhập & Màn Q1', () => {
       confirmNewPassword: 'NewSecurePassword123',
     });
     assert.equal(newSession.role, 'REVIEWER');
+    assert.equal(newSession.tenantStatus, 'ACTIVE');
     assert.equal(newSession.tenantId, DEFAULT_DEMO_TENANT_ID);
 
     const members = await listTenantMembers(DEFAULT_DEMO_TENANT_ID);
@@ -193,6 +199,133 @@ describe('Task 2.9 – Web Console: Khung, Đăng nhập & Màn Q1', () => {
       password: 'BrandNewPassword9',
     });
     assert.equal(outcome.status, 'AUTHENTICATED');
+    if (outcome.status === 'AUTHENTICATED') {
+      assert.equal(outcome.session.tenantStatus, 'ACTIVE');
+    }
+  });
+
+  it('quản lý tenantStatus từ chế độ demo (setDemoTenantStatus) và qua GET /console/me (ACTIVE / LOCKED / fail-closed UNKNOWN)', async () => {
+    assert.equal(getDemoTenantStatus(DEFAULT_DEMO_TENANT_ID), 'ACTIVE');
+
+    setDemoTenantStatus(DEFAULT_DEMO_TENANT_ID, 'LOCKED');
+    assert.equal(getDemoTenantStatus(DEFAULT_DEMO_TENANT_ID), 'LOCKED');
+
+    const lockedSignIn = await signInWithEmail({
+      email: 'lan@homestay-abc.example',
+      password: 'Password123',
+    });
+    assert.equal(lockedSignIn.status, 'AUTHENTICATED');
+    if (lockedSignIn.status === 'AUTHENTICATED') {
+      assert.equal(lockedSignIn.session.tenantStatus, 'LOCKED');
+    }
+
+    await assert.rejects(
+      inviteTenantMember(
+        'TENANT_ADMIN',
+        'blocked@homestay-abc.example',
+        'DEVELOPER',
+        'Homestay ABC Hội An',
+        DEFAULT_DEMO_TENANT_ID,
+      ),
+      (err: unknown) => err instanceof ConsoleAuthError && err.code === 'TENANT_SUSPENDED',
+    );
+
+    resetSimulatedAuthStore();
+    assert.equal(getDemoTenantStatus(DEFAULT_DEMO_TENANT_ID), 'ACTIVE');
+
+    const baseSession = {
+      email: 'lan@homestay-abc.example',
+      fullName: 'Nguyễn Thị Lan',
+      sub: 'sub-lan-admin-01',
+      tenantId: 't_live_1',
+      organizationName: 'Old Org',
+      plan: 'FREE' as const,
+      role: 'TENANT_ADMIN' as const,
+      tenantStatus: 'UNKNOWN' as const,
+      idToken: 'jwt-live',
+      accessToken: 'at-live',
+      refreshToken: 'rt-live',
+      tokenRefreshedAt: '2026-11-10T00:00:00.000Z',
+    };
+
+    const lockedProfile = await hydrateSessionTenantStatus(baseSession, {
+      demoMode: false,
+      baseUrl: 'https://api.translateme.example/',
+      fetchFn: async (url, init) => {
+        assert.equal(String(url), 'https://api.translateme.example/console/me');
+        assert.equal((init?.headers as Record<string, string>)?.authorization, 'Bearer jwt-live');
+        return new Response(
+          JSON.stringify({
+            tenant_id: 't_live_1',
+            role: 'reviewer',
+            tenant_status: 'LOCKED',
+            tenant_locked: true,
+            organization_name: 'New Resort',
+            plan: 'PRO',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    });
+    assert.equal(lockedProfile.tenantStatus, 'LOCKED');
+    assert.equal(lockedProfile.role, 'REVIEWER');
+    assert.equal(lockedProfile.organizationName, 'New Resort');
+    assert.equal(lockedProfile.plan, 'PRO');
+
+    const activeProfile = await fetchConsoleTenantProfile(baseSession, {
+      demoMode: false,
+      baseUrl: 'https://api.translateme.example',
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            tenantId: 't_live_1',
+            role: 'TENANT_ADMIN',
+            tenantStatus: 'ACTIVE',
+            tenantLocked: false,
+          }),
+          { status: 200 },
+        ),
+    });
+    assert.equal(activeProfile.tenantStatus, 'ACTIVE');
+    assert.equal(activeProfile.tenantLocked, false);
+
+    // 403 TENANT_SUSPENDED -> hydrate thành LOCKED
+    const suspendedSession = await hydrateSessionTenantStatus(baseSession, {
+      demoMode: false,
+      baseUrl: 'https://api.translateme.example',
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            request_id: 'req-susp',
+            error: { code: 'TENANT_SUSPENDED', message: 'Locked' },
+          }),
+          { status: 403 },
+        ),
+    });
+    assert.equal(suspendedSession.tenantStatus, 'LOCKED');
+
+    // Lỗi 500, phản hồi thiếu trạng thái hoặc lỗi mạng -> giữ UNKNOWN (fail-closed)
+    for (const fetchFn of [
+      async () =>
+        new Response(
+          JSON.stringify({ error: { code: 'INTERNAL_ERROR', message: 'Boom' } }),
+          { status: 500 },
+        ),
+      async () => new Response(JSON.stringify({ tenant_id: 't_live_1' }), { status: 200 }),
+      async () => {
+        throw new TypeError('Failed to fetch');
+      },
+    ]) {
+      const unknownSession = await hydrateSessionTenantStatus(
+        { ...baseSession, tenantStatus: 'ACTIVE' },
+        {
+          demoMode: false,
+          baseUrl: 'https://api.translateme.example',
+          fetchFn,
+        },
+      );
+      assert.equal(unknownSession.tenantStatus, 'UNKNOWN');
+    }
   });
 
   it('hiển thị rõ các lỗi: email đã dùng, mật khẩu yếu, mã xác nhận sai/hết hạn, đăng nhập sai nhiều lần', async () => {

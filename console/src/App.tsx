@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { AuthScreens } from './components/AuthScreens.js';
 import { ConsoleLayout } from './components/ConsoleLayout.js';
 import { Header } from './components/Header.js';
+import { setDemoTenantStatus } from './services/cognitoAuth.js';
 import type { AuthenticatedSession, AuthScreenMode, ConsoleRole } from './types/auth.js';
 
 export const App: React.FC = () => {
@@ -13,6 +14,15 @@ export const App: React.FC = () => {
     setSession({
       ...session,
       role,
+    });
+  };
+
+  const handleSwitchTenantStatusDemo = (tenantStatus: 'ACTIVE' | 'LOCKED') => {
+    if (!session) return;
+    setDemoTenantStatus(session.tenantId, tenantStatus);
+    setSession({
+      ...session,
+      tenantStatus,
     });
   };
 
@@ -30,6 +40,7 @@ export const App: React.FC = () => {
           setAuthMode('SIGN_IN');
         }}
         onSwitchRoleDemo={handleSwitchRoleDemo}
+        onSwitchTenantStatusDemo={handleSwitchTenantStatusDemo}
       />
 
       {!session ? (
@@ -39,7 +50,7 @@ export const App: React.FC = () => {
           onAuthenticated={(newSession) => setSession(newSession)}
         />
       ) : (
-        <ConsoleLayout session={session} />
+        <ConsoleLayout session={session} onUpdateSession={setSession} />
       )}
     </div>
   );

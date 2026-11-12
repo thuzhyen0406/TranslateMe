@@ -13,6 +13,13 @@
  *  - createHttpWebsiteApi: gọi API thật kèm JWT (Authorization: Bearer <idToken>), dùng khi VITE_AUTH_MODE=cognito;
  *  - createMockWebsiteApi: giả lập trong trình duyệt cho chế độ demo (VITE_AUTH_MODE=mock), giống cognitoAuth.
  */
+import {
+  VERIFICATION_FAILURE_MESSAGES,
+  extractApiErrorPayload,
+  resolveConsoleError,
+  type ResolveConsoleErrorOptions,
+  type KnownConsoleErrorCode,
+} from './errorMapping.js';
 import type {
   CreateWebsiteInput,
   LanguageOption,
@@ -53,6 +60,8 @@ export class WebsiteApiError extends Error {
     public code: string,
     message: string,
     public reason?: string,
+    public requestId?: string,
+    public httpStatus?: number,
   ) {
     super(message);
     this.name = 'WebsiteApiError';
@@ -129,48 +138,26 @@ export function verificationFileUrl(homeUrl: string): string {
   }
 }
 
-const VERIFICATION_REASON_MESSAGE: Readonly<Record<VerificationFailureReason, string>> = Object.freeze({
-  UNREACHABLE: 'Không truy cập được website. Kiểm tra website đang mở công khai rồi thử lại.',
-  TAG_OR_FILE_NOT_FOUND: 'Không tìm thấy thẻ meta hoặc tệp xác minh. Kiểm tra đã lưu và xuất bản thay đổi chưa.',
-  CODE_MISMATCH: 'Mã xác minh không khớp. Hãy sao chép lại đúng mã ở trên.',
-  TOO_MANY_REDIRECTS: 'Website chuyển hướng quá số lần cho phép. Hãy dùng đúng địa chỉ trang chủ cuối cùng.',
+const WEBSITE_ERROR_OVERRIDES: Partial<Record<KnownConsoleErrorCode, string>> = Object.freeze({
+  UNSUPPORTED_LANGUAGE: 'Có ngôn ngữ chưa được hỗ trợ.',
+  FORBIDDEN: 'Địa chỉ không được phép (IP nội bộ hoặc không công khai).',
+  PERMISSION_DENIED: 'Chỉ Tenant Admin mới quản lý được website.',
+  TENANT_SUSPENDED: 'Tổ chức đang bị tạm khóa; bạn chỉ có thể xem.',
+  UNAUTHORIZED: 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.',
+  NOT_FOUND: 'Không tìm thấy website.',
+  // INTERNAL_ERROR và NETWORK_ERROR được xử lý theo loại thao tác trong errorMapping.ts
 });
 
+export const VERIFICATION_REASON_LABEL: Readonly<Record<VerificationFailureReason, string>> =
+  VERIFICATION_FAILURE_MESSAGES;
+
 /** Thông báo tiếng Việt cho lỗi của nhóm /console/hosts (Bảng 2.10), kể cả mã của siteManager hiện tại. */
-export function websiteErrorMessage(err: unknown): string {
-  if (!(err instanceof WebsiteApiError)) return 'Có lỗi tạm thời, vui lòng thử lại.';
-  if (err.code === 'VERIFICATION_FAILED' && err.reason && err.reason in VERIFICATION_REASON_MESSAGE) {
-    return VERIFICATION_REASON_MESSAGE[err.reason as VerificationFailureReason];
-  }
-  switch (err.code) {
-    case 'VERIFICATION_FAILED':
-    case 'VERIFICATION_CODE_MISMATCH':
-      return VERIFICATION_REASON_MESSAGE.CODE_MISMATCH;
-    case 'VERIFICATION_NOT_FOUND':
-      return VERIFICATION_REASON_MESSAGE.TAG_OR_FILE_NOT_FOUND;
-    case 'SITE_UNREACHABLE':
-      return VERIFICATION_REASON_MESSAGE.UNREACHABLE;
-    case 'TOO_MANY_REDIRECTS':
-      return VERIFICATION_REASON_MESSAGE.TOO_MANY_REDIRECTS;
-    case 'DUPLICATE_SLUG':
-      return 'Website này đã được thêm vào TranslateMe.';
-    case 'INVALID_REQUEST':
-      return err.message || 'Thông tin chưa hợp lệ, vui lòng kiểm tra lại.';
-    case 'UNSUPPORTED_LANGUAGE':
-      return 'Có ngôn ngữ chưa được hỗ trợ.';
-    case 'FORBIDDEN':
-      return 'Địa chỉ không được phép (IP nội bộ hoặc không công khai).';
-    case 'PERMISSION_DENIED':
-      return 'Chỉ Tenant Admin mới quản lý được website.';
-    case 'TENANT_SUSPENDED':
-      return 'Tổ chức đang bị tạm khóa; bạn chỉ có thể xem.';
-    case 'UNAUTHORIZED':
-      return 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.';
-    case 'NOT_FOUND':
-      return 'Không tìm thấy website.';
-    default:
-      return 'Có lỗi tạm thời, vui lòng thử lại.';
-  }
+export function websiteErrorMessage(err: unknown, opts: ResolveConsoleErrorOptions = {}): string {
+  return resolveConsoleError(err, {
+    ...opts,
+    scope: 'website',
+    overrides: { ...WEBSITE_ERROR_OVERRIDES, ...opts.overrides },
+  }).message;
 }
 
 export const PREWARM_WARNING_LABEL: Readonly<Record<string, string>> = Object.freeze({
@@ -290,8 +277,14 @@ export function createHttpWebsiteApi(opts: HttpWebsiteApiOptions): WebsiteApi {
       data = {};
     }
     if (!res.ok) {
-      const e = (data.error ?? {}) as Json;
-      throw new WebsiteApiError(str(e.code) || (res.status === 401 ? 'UNAUTHORIZED' : 'INTERNAL_ERROR'), str(e.message), str(e.reason) || undefined);
+      const extracted = extractApiErrorPayload(data, res.status);
+      throw new WebsiteApiError(
+        extracted.code,
+        extracted.message,
+        extracted.reason,
+        extracted.requestId,
+        extracted.httpStatus,
+      );
     }
     return data;
   }

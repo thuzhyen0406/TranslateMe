@@ -101,6 +101,8 @@ export interface ListReviewResponse {
   nextTabCursors?: ReviewTabCursors;
   /** Còn ít nhất một tab chưa tải hết trang kết quả */
   hasMore?: boolean;
+  /** Trạng thái khóa tổ chức trả kèm từ GET /console/translations của F5 */
+  tenantLocked?: boolean;
 }
 
 export interface PlaceholderCheckResult {
