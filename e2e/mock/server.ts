@@ -179,7 +179,10 @@ export function startMock(opts: Opts = {}) {
     // ---- /console/*
     if (path.startsWith('/console/')) {
       const t = consoleCtx(); if (!t) return;
-      const own = (m: Map<string, { tenantId: string }>, id: string) => { const x = m.get(id); return x && x.tenantId === t.id ? x : undefined; };
+      const own = <T extends { tenantId: string }>(m: Map<string, T>, id: string): T | undefined => {
+        const x = m.get(id);
+        return x && x.tenantId === t.id ? x : undefined;
+      };
       if (path === '/console/me') return send(res, 200, { tenant_id: t.id, role: 'tenant_admin', status: t.status, plan: t.plan });
       if (path === '/console/hosts' && method === 'GET')
         return send(res, 200, { items: [...hosts].filter(([, h]) => h.tenantId === t.id).map(([slug, h]) => ({ slug, status: h.status, origin_url: h.origin })) });
@@ -194,7 +197,7 @@ export function startMock(opts: Opts = {}) {
       }
       const hm = path.match(/^\/console\/hosts\/([^/]+)(\/verify)?$/);
       if (hm) {
-        const h = own(hosts as any, hm[1]);
+        const h = own(hosts, hm[1]);
         if (!h) return hm[2] ? fail(res, 422, 'SITE_UNREACHABLE', 'Không thể xác minh website.') : denyOther(res);
         if (writeBlocked(t)) return;
         if (hm[2] && leaksSsrftarget(new URL(h.origin))) {
