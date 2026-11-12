@@ -1,14 +1,21 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  DEFAULT_GLOSSARY_TARGET_LANGS,
   GlossaryApiError,
   analyzeGlossaryCsv,
   buildSampleGlossaryCsv,
+  buildUpsertGlossaryInput,
   createHttpGlossaryApi,
   createMockGlossaryApi,
   decodeCsvUtf8Bytes,
+  getEditableGlossaryTargetLangs,
+  getGlossaryTableLangs,
   glossaryErrorMessage,
+  isTerminalCacheInvalidationStatusError,
+  mergeGlossaryCacheInvalidations,
   glossaryTermFromJson,
+  initGlossaryFormTranslations,
   validateUpsertTermInput,
 } from '../services/glossaryApi.js';
 
@@ -125,6 +132,30 @@ describe('Q3 – kiểm tra đầu vào thuật ngữ và giải mã CSV UTF-8 (
 });
 
 describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)', () => {
+  it('phân biệt lỗi trạng thái kết thúc với lỗi có thể thử lại', () => {
+    assert.equal(isTerminalCacheInvalidationStatusError(new GlossaryApiError('NOT_FOUND', 'missing')), true);
+    assert.equal(isTerminalCacheInvalidationStatusError(new GlossaryApiError('PERMISSION_DENIED', 'forbidden')), true);
+    assert.equal(isTerminalCacheInvalidationStatusError(new GlossaryApiError('NETWORK_ERROR', 'offline')), false);
+    assert.equal(isTerminalCacheInvalidationStatusError(new GlossaryApiError('INTERNAL_ERROR', 'server error')), false);
+  });
+
+  it('giữ và gộp các invalidation ID cũ khi thử lại', () => {
+    const merged = mergeGlossaryCacheInvalidations(
+      {
+        status: 'PARTIAL', mode: 'WILDCARD', paths: ['/site-a/*', '/site-b/*'],
+        invalidationIds: ['inv-first'], failedPaths: ['/site-b/*'],
+      },
+      {
+        status: 'SUBMITTED', mode: 'WILDCARD', paths: ['/site-b/*'],
+        invalidationIds: ['inv-second'], failedPaths: [],
+      },
+    );
+
+    assert.deepEqual(merged.invalidationIds, ['inv-first', 'inv-second']);
+    assert.deepEqual(merged.paths, ['/site-a/*', '/site-b/*']);
+    assert.deepEqual(merged.failedPaths, []);
+  });
+
   it('gửi đúng JWT Bearer token cho GET/PUT/DELETE/POST import và ánh xạ lỗi tiếng Việt', async () => {
     const calls: Array<{ url: string; method: string; auth: string | null; body?: unknown }> = [];
 
@@ -160,9 +191,22 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
           JSON.stringify({
             version: 4,
             terminologySynced: true,
+            cacheInvalidation: {
+              status: 'SUBMITTED', mode: 'WILDCARD', paths: ['/site-a/*'], invalidationIds: ['inv-123'],
+            },
           }),
           { status: 200 },
         );
+      }
+
+      if (url.endsWith('/console/glossary/cache-invalidation/retry') && method === 'POST') {
+        assert.deepEqual(body, { failedPaths: ['/site-b/*'] });
+        return new Response(JSON.stringify({
+          status: 'SUBMITTED', mode: 'WILDCARD', paths: ['/site-a/*'], invalidationIds: ['inv-retry'],
+        }), { status: 200 });
+      }
+      if (url.endsWith('/console/glossary/cache-invalidation/inv-123') && method === 'GET') {
+        return new Response(JSON.stringify({ id: 'inv-123', status: 'COMPLETED', paths: ['/site-a/*'] }), { status: 200 });
       }
 
       if (url.endsWith('/console/glossary/import/preview') && method === 'POST') {
@@ -211,6 +255,8 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
     });
     assert.equal(upserted.version, 4);
     assert.equal(upserted.terminologySynced, true);
+    assert.equal(upserted.cacheInvalidation?.status, 'SUBMITTED');
+    assert.deepEqual(upserted.cacheInvalidation?.invalidationIds, ['inv-123']);
     // F4 không trả term -> console dựng lại từ dữ liệu đã gửi
     assert.equal(upserted.term.sourceTerm, 'cao lầu');
     assert.equal(upserted.term.type, 'FIXED');
@@ -221,10 +267,18 @@ describe('createHttpGlossaryApi – kết nối với dịch vụ F4 (Task 2.8)'
     assert.equal('source_lang' in putBody, false);
     assert.equal('target_langs' in putBody, false);
 
+    const retried = await api.retryCacheInvalidation(['/site-b/*']);
+    assert.equal(retried.status, 'SUBMITTED');
+    assert.deepEqual(retried.invalidationIds, ['inv-retry']);
+    assert.equal(calls[2].url, 'https://api.translateme.example/console/glossary/cache-invalidation/retry');
+    const invalidationStatus = await api.getCacheInvalidationStatus('inv-123');
+    assert.equal(invalidationStatus.status, 'COMPLETED');
+    assert.deepEqual(invalidationStatus.paths, ['/site-a/*']);
+
     const preview = await api.previewImportCsv(buildSampleGlossaryCsv(), 'OVERWRITE');
     assert.equal(preview.validRows, 4);
     assert.equal(preview.overwrittenCount, 1);
-    const previewBody = calls[2].body as Record<string, unknown>;
+    const previewBody = calls[4].body as Record<string, unknown>;
     assert.equal(previewBody.onDuplicate, 'OVERWRITE');
     assert.equal('on_duplicate' in previewBody, false);
 
@@ -284,5 +338,189 @@ describe('createMockGlossaryApi – toàn bộ luồng Q3 trong chế độ demo
     const finalState = await api.listGlossary();
     assert.equal(finalState.version, 5);
     assert.equal(finalState.terms.length, 5);
+  });
+
+  it('cho phép nhập đủ en/ko/ja/zh/fr, đồng bộ cột bảng và giữ nguyên zh/fr/ngôn ngữ khác khi sửa thuật ngữ', async () => {
+    // 1. Hợp đồng mặc định phải đủ 5 ngôn ngữ đích en, ko, ja, zh, fr
+    for (const lang of ['en', 'ko', 'ja', 'zh', 'fr']) {
+      assert.ok(
+        DEFAULT_GLOSSARY_TARGET_LANGS.includes(lang),
+        `DEFAULT_GLOSSARY_TARGET_LANGS phải gồm ${lang}`,
+      );
+    }
+
+    // 2. Term có sẵn en/ko/ja/zh/fr (và cả de mở rộng) -> khi mở form Sửa phải nạp & giữ đủ mọi ngôn ngữ
+    const existingTerm = glossaryTermFromJson({
+      sourceTerm: 'bún chả',
+      sourceLang: 'vi',
+      type: 'FIXED',
+      translations: {
+        en: 'bun cha',
+        ko: '분짜',
+        ja: 'ブンチャー',
+        zh: '烤肉米线',
+        fr: 'bun cha grillé',
+        de: 'Bun-Cha-Nudeln',
+      },
+      sinceVersion: 2,
+    });
+
+    const editableLangs = getEditableGlossaryTargetLangs(
+      existingTerm.sourceLang,
+      existingTerm.translations,
+    );
+    assert.deepEqual(editableLangs, ['en', 'ko', 'ja', 'zh', 'fr', 'de']);
+
+    const tableCols = getGlossaryTableLangs([existingTerm]);
+    assert.deepEqual(tableCols, ['en', 'ko', 'ja', 'zh', 'fr', 'de']);
+
+    const formInit = initGlossaryFormTranslations(existingTerm);
+    assert.equal(formInit.zh, '烤肉米线');
+    assert.equal(formInit.fr, 'bun cha grillé');
+    assert.equal(formInit.de, 'Bun-Cha-Nudeln');
+
+    // Người dùng chỉ sửa cột tiếng Anh -> payload phải giữ nguyên zh, fr, de
+    const editedForm = { ...formInit, en: 'grilled pork with rice noodles' };
+    const payload = buildUpsertGlossaryInput({
+      sourceTerm: existingTerm.sourceTerm,
+      sourceLang: existingTerm.sourceLang,
+      type: existingTerm.type,
+      formTranslations: editedForm,
+      targetLangs: editableLangs,
+    });
+    assert.equal(payload.translations.en, 'grilled pork with rice noodles');
+    assert.equal(payload.translations.zh, '烤肉米线');
+    assert.equal(payload.translations.fr, 'bun cha grillé');
+    assert.equal(payload.translations.de, 'Bun-Cha-Nudeln');
+
+    // 3. Kiểm tra qua createHttpGlossaryApi: PUT gửi đủ zh/fr và GET/kết quả trả về còn nguyên zh/fr
+    const sentBodies: Array<Record<string, unknown>> = [];
+    const serverStore = new Map<string, Record<string, unknown>>([
+      [
+        'bún chả',
+        {
+          normalized: 'bún chả',
+          sourceTerm: 'bún chả',
+          sourceLang: 'vi',
+          type: 'FIXED',
+          translations: { ...existingTerm.translations },
+          sinceVersion: 2,
+        },
+      ],
+    ]);
+
+    const httpApi = createHttpGlossaryApi({
+      baseUrl: 'https://api.translateme.example',
+      getToken: () => 'jwt-admin-token',
+      fetchFn: async (input, init) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/console/glossary/terms') && method === 'GET') {
+          return new Response(
+            JSON.stringify({
+              version: 3,
+              terms: [...serverStore.values()],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes('/console/glossary/terms/') && method === 'PUT') {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          sentBodies.push(body);
+          serverStore.set('bún chả', {
+            normalized: 'bún chả',
+            sourceTerm: body.sourceTerm,
+            sourceLang: body.sourceLang,
+            type: body.type,
+            translations: body.translations,
+            sinceVersion: 3,
+          });
+          return new Response(JSON.stringify({ version: 3, terminologySynced: true }), { status: 200 });
+        }
+        return new Response(JSON.stringify({}), { status: 404 });
+      },
+    });
+
+    const savedHttp = await httpApi.upsertTerm(payload);
+    assert.equal(savedHttp.term.translations.zh, '烤肉米线');
+    assert.equal(savedHttp.term.translations.fr, 'bun cha grillé');
+    assert.equal(savedHttp.term.translations.de, 'Bun-Cha-Nudeln');
+    const httpSentTranslations = sentBodies[0].translations as Record<string, string>;
+    assert.equal(httpSentTranslations.zh, '烤肉米线');
+    assert.equal(httpSentTranslations.fr, 'bun cha grillé');
+    assert.equal(httpSentTranslations.de, 'Bun-Cha-Nudeln');
+
+    const reloadedHttp = await httpApi.listGlossary();
+    assert.equal(reloadedHttp.terms[0].translations.en, 'grilled pork with rice noodles');
+    assert.equal(reloadedHttp.terms[0].translations.zh, '烤肉米线');
+    assert.equal(reloadedHttp.terms[0].translations.fr, 'bun cha grillé');
+    assert.equal(reloadedHttp.terms[0].translations.de, 'Bun-Cha-Nudeln');
+
+    // 4. Kiểm tra qua createMockGlossaryApi: sửa term có sẵn zh/fr sau upsert vẫn giữ nguyên zh/fr
+    const mockApi = createMockGlossaryApi();
+    await mockApi.upsertTerm(payload);
+    const mockList = await mockApi.listGlossary();
+    const savedMock = mockList.terms.find((t) => t.normalizedTerm === 'bún chả');
+    assert.ok(savedMock);
+    assert.equal(savedMock.translations.zh, '烤肉米线');
+    assert.equal(savedMock.translations.fr, 'bun cha grillé');
+    assert.equal(savedMock.translations.de, 'Bun-Cha-Nudeln');
+
+    // Sửa lại một term demo mặc định (phố cổ Hội An đã có sẵn zh/fr) chỉ thay en -> zh/fr vẫn còn
+    const hoiAn = mockList.terms.find((t) => t.normalizedTerm === 'phố cổ hội an');
+    assert.ok(hoiAn && hoiAn.translations.zh && hoiAn.translations.fr);
+    const hoiAnForm = initGlossaryFormTranslations(hoiAn);
+    const hoiAnPayload = buildUpsertGlossaryInput({
+      sourceTerm: hoiAn.sourceTerm,
+      sourceLang: hoiAn.sourceLang,
+      type: hoiAn.type,
+      formTranslations: { ...hoiAnForm, en: 'Hoi An Historic Town' },
+      targetLangs: getEditableGlossaryTargetLangs(hoiAn.sourceLang, hoiAn.translations),
+    });
+    const hoiAnSaved = await mockApi.upsertTerm(hoiAnPayload);
+    assert.equal(hoiAnSaved.term.translations.en, 'Hoi An Historic Town');
+    assert.equal(hoiAnSaved.term.translations.zh, hoiAn.translations.zh);
+    assert.equal(hoiAnSaved.term.translations.fr, hoiAn.translations.fr);
+
+    // 5. Loại FIXED chỉ điền một số ngôn ngữ (ví dụ en, zh) -> bỏ các ô trống để F4 không báo lỗi 400
+    const partialFixedPayload = buildUpsertGlossaryInput({
+      sourceTerm: 'bánh xèo',
+      sourceLang: 'vi',
+      type: 'FIXED',
+      formTranslations: { en: 'crispy pancake', ko: '  ', ja: '', zh: '越南煎饼', fr: '' },
+      targetLangs: ['en', 'ko', 'ja', 'zh', 'fr'],
+    });
+    assert.deepEqual(partialFixedPayload.translations, {
+      en: 'crispy pancake',
+      zh: '越南煎饼',
+    });
+
+    // 6. Sửa term KEEP có sẵn zh/fr/de -> vẫn giữ đủ mọi ngôn ngữ đích cho KEEP
+    const existingKeep = glossaryTermFromJson({
+      sourceTerm: 'Thu Bồn Riverside',
+      sourceLang: 'vi',
+      type: 'KEEP',
+      translations: {
+        en: 'Thu Bồn Riverside',
+        ko: 'Thu Bồn Riverside',
+        ja: 'Thu Bồn Riverside',
+        zh: 'Thu Bồn Riverside',
+        fr: 'Thu Bồn Riverside',
+        de: 'Thu Bồn Riverside',
+      },
+      sinceVersion: 2,
+    });
+    const keepTargets = getEditableGlossaryTargetLangs(existingKeep.sourceLang, existingKeep.translations);
+    const keepPayload = buildUpsertGlossaryInput({
+      sourceTerm: existingKeep.sourceTerm,
+      sourceLang: existingKeep.sourceLang,
+      type: 'KEEP',
+      formTranslations: initGlossaryFormTranslations(existingKeep),
+      targetLangs: keepTargets,
+    });
+    assert.deepEqual(keepPayload.targetLangs, ['en', 'ko', 'ja', 'zh', 'fr', 'de']);
+    assert.equal(keepPayload.translations.zh, 'Thu Bồn Riverside');
+    assert.equal(keepPayload.translations.fr, 'Thu Bồn Riverside');
+    assert.equal(keepPayload.translations.de, 'Thu Bồn Riverside');
   });
 });

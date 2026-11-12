@@ -11,6 +11,7 @@ import {
 import {
   CorruptFile,
   UnsupportedFormat,
+  countChars,
   formatFromFileName,
   parse,
   rebuild,
@@ -547,6 +548,12 @@ describe('DOCX (4.9) – bảo mật chống XXE và tệp nén độc hại (ZI
 });
 
 describe('parse / rebuild – giao diện chung', () => {
+  it('countChars bỏ marker, chuẩn hóa NFC/khoảng trắng và đếm Unicode code point', () => {
+    assert.equal(countChars('Xem {1}ba\u0309ng  gia\u0301{/1} nhé.'), Array.from('Xem bảng giá nhé.').length);
+    assert.equal(countChars('  e\u0301   😀  '), 3);
+    assert.equal(countChars('   '), 0);
+  });
+
   it('định dạng lạ -> UnsupportedFormat; DOCX hỏng -> CorruptFile INVALID_DOCX', () => {
     assert.throws(() => parse('DOCX', enc('x')), (e: unknown) => e instanceof CorruptFile && e.reason === 'INVALID_DOCX');
     assert.throws(() => parse('PDF', enc('x')), (e: unknown) => e instanceof UnsupportedFormat && e.format === 'PDF');

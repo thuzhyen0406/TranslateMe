@@ -9,6 +9,12 @@ export type TranslationStatus = 'MACHINE' | 'HUMAN';
 /** Bộ lọc theo nhãn trên giao diện Q4 (Mục 1.3.4 bước 2) */
 export type ReviewLabelFilter = 'ALL' | 'MACHINE' | 'HUMAN' | 'NEEDS_REVIEW';
 
+/** 3 tab trên GSI3 mà dịch vụ F5 (/console/translations) truy vấn độc lập */
+export type ReviewApiTab = 'REVIEW' | 'MACHINE' | 'HUMAN';
+
+/** Con trỏ phân trang riêng cho từng tab khi liệt kê bản dịch từ F5 */
+export type ReviewTabCursors = Partial<Record<ReviewApiTab, string>>;
+
 /** Trạng thái làm mới bộ nhớ đệm CloudFront sau khi sửa bản dịch (Mục 1.3.4 bước 6) */
 export type CacheRefreshState =
   | 'IDLE'
@@ -83,12 +89,18 @@ export interface ListReviewFilter {
   labelFilter?: ReviewLabelFilter;
   search?: string;
   cursor?: string;
+  /** Con trỏ phân trang riêng cho từng tab F5 (ưu tiên dùng khi tải trang tiếp, đặc biệt ở chế độ ALL) */
+  tabCursors?: ReviewTabCursors;
   limit?: number;
 }
 
 export interface ListReviewResponse {
   items: ReviewSentenceItem[];
   nextCursor?: string;
+  /** Con trỏ trang tiếp theo riêng cho từng tab trả về từ F5 */
+  nextTabCursors?: ReviewTabCursors;
+  /** Còn ít nhất một tab chưa tải hết trang kết quả */
+  hasMore?: boolean;
 }
 
 export interface PlaceholderCheckResult {

@@ -75,13 +75,13 @@ describe('buildWorkerEvents', () => {
     assert.deepEqual(events.flatMap((e) => e.sentences ?? []), s);
   });
 
-  it('quá nhiều sự kiện và có kho S3 -> ghi câu ra S3 dưới worker/<tenantId>/', async () => {
+  it('quá nhiều sự kiện và có kho S3 -> ghi câu ra S3 dưới tenant/<tenantId>/worker/', async () => {
     const s = withHash(Array.from({ length: 50 }, (_, i) => `Câu số ${i} khá dài để chia sự kiện.`));
     const store = memoryStore();
     const { events } = await buildWorkerEvents(BASE, s, { maxBytes: 2_000, maxInlineEvents: 2, store, uniqueId: () => 'u1' });
     assert.equal(events.length, 1);
     assert.equal(events[0].sentences, undefined);
-    assert.equal(events[0].sentencesS3Key, `worker/${SITE.tenantId}/u1-0.json`);
+    assert.equal(events[0].sentencesS3Key, `tenant/${SITE.tenantId}/worker/u1-0.json`);
     assert.deepEqual(JSON.parse(store.files.get(events[0].sentencesS3Key!)!), s);
   });
 
@@ -100,7 +100,7 @@ describe('buildWorkerEvents', () => {
     assert.deepEqual(dropped, []);
     assert.equal(events.length, 1);
     assert.equal(events[0].sentences, undefined);
-    assert.equal(events[0].sentencesS3Key, `worker/${SITE.tenantId}/u2-0.json`);
+    assert.equal(events[0].sentencesS3Key, `tenant/${SITE.tenantId}/worker/u2-0.json`);
     assert.deepEqual(JSON.parse(store.files.get(events[0].sentencesS3Key!)!), big);
     for (const e of events) assert.ok(Buffer.byteLength(JSON.stringify(e), 'utf8') <= 2_000);
   });
@@ -249,8 +249,8 @@ describe('worker C13 – FINISH_PAGE', () => {
       [{ ...BASE, sentences: withHash(['Một']) }, 'TENANT_LOCKED', [{ ...SITE, tenantStatus: 'LOCKED' }]],
       [{ ...BASE, sentences: withHash(['Một']) }, 'SITE_NOT_ACTIVE', [{ ...SITE, status: 'PAUSED' }]],
       [{ ...BASE, tgt: 'ja', sentences: withHash(['Một']) }, 'LANG_NOT_ENABLED'],
-      [{ ...BASE, sentencesS3Key: 'worker/t_other/a.json' }, 'S3_KEY_OUTSIDE_TENANT'],
-      [{ ...BASE, sentencesS3Key: `worker/${SITE.tenantId}/../t_other/a.json` }, 'S3_KEY_OUTSIDE_TENANT'],
+      [{ ...BASE, sentencesS3Key: 'tenant/t_other/worker/a.json' }, 'S3_KEY_OUTSIDE_TENANT'],
+      [{ ...BASE, sentencesS3Key: `tenant/${SITE.tenantId}/worker/../t_other/a.json` }, 'S3_KEY_OUTSIDE_TENANT'],
       [{ ...BASE, sentences: [{ id: 0, text: 'Một', hash: 'abc' }] }, 'INVALID_SENTENCES'],
     ];
     for (const [event, reason, sites] of cases) {
@@ -305,11 +305,13 @@ describe('worker – kết nối AWS', () => {
       routedTenants.push(tenantId);
       return s3 as never;
     });
-    await store.put('worker/t_1/a.json', '[1]');
-    assert.equal(objects.get('payload-bucket/worker/t_1/a.json'), '[1]');
-    assert.equal(await store.get('worker/t_1/a.json'), '[1]');
+    await store.put('tenant/t_1/worker/a.json', '[1]', 't_1');
+    assert.equal(objects.get('payload-bucket/tenant/t_1/worker/a.json'), '[1]');
+    assert.equal(await store.get('tenant/t_1/worker/a.json', 't_1'), '[1]');
     assert.deepEqual(routedTenants, ['t_1']);
-    await assert.rejects(store.get('worker/t_2/../secret.json'), /outside a tenant prefix/);
+    await assert.rejects(store.get('tenant/t_2/worker/../secret.json'), /outside a tenant prefix/);
+    await assert.rejects(store.get('tenant/t_2/worker/a.json', 't_1'), /does not belong to tenant/);
+    await assert.rejects(store.put('tenant/t_2/worker/a.json', '[2]', 't_1'), /does not belong to tenant/);
   });
 
   it('workerDepsFromEnv cần TABLE_NAME; đọc WORKER_BUDGET_MS', () => {

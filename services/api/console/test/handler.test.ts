@@ -150,6 +150,7 @@ describe('Console Lambda router (/console/{proxy+})', () => {
       userPoolId: 'us-east-1_mock',
       db: {
         query: async () => [{ PK: 'TENANT#t_a', SK: 'MEMBER#u_1', role: 'TENANT_ADMIN' }],
+        put: async () => {},
       },
     };
     const memberListRes = await handleMembersApiGatewayRoute(

@@ -55,6 +55,13 @@ Tài liệu này dành cho **TV1 (IaC Terraform/CDK)** và **TV3 (REST API / Aut
 
 ### 1. IAM Policy cho Lambda Trigger `PostConfirmation`
 
+Trong triển khai hiện tại, `PostConfirmation` dùng execution role riêng và
+assume `TenantDataAccessRole` với session policy giới hạn partition của tenant
+đang khởi tạo. Quyền Cognito chỉ gồm `AdminUpdateUserAttributes` trên User Pool
+được cấu hình. Ví dụ policy bên dưới mô tả quyền tối thiểu tương đương khi triển
+khai không dùng role session; không gắn đồng thời quyền ghi DynamoDB trực tiếp
+vào execution role nếu đã dùng role session.
+
 Lambda Trigger chỉ được phép:
 - Ghi giao dịch (`dynamodb:TransactWriteItems`, `dynamodb:PutItem`) trên **đúng ARN của bảng DynamoDB**.
 - Sử dụng khóa KMS (`kms:Decrypt`, `kms:GenerateDataKey`) của bảng đó (nếu bảng dùng Customer Managed CMK).
@@ -170,4 +177,5 @@ Sau khi TV1 deploy hạ tầng lên AWS, chạy lần lượt 6 kịch bản dư
 - [ ] **6. Mời thành viên -> Đăng nhập mật khẩu tạm -> Buộc đổi mật khẩu:**
   - Gọi hàm `inviteMember(tenantId, "reviewer1@example.com", "REVIEWER")`.
   - Kiểm tra hộp thư `reviewer1@example.com` nhận được email chứa mật khẩu tạm; trạng thái user trên Cognito là `FORCE_CHANGE_PASSWORD`, có sẵn `custom:tenant_id` và `custom:role = "reviewer"`.
+  - Xác nhận DynamoDB có bản ghi `MEMBER` với `PK = TENANT#<tenantId>`, `SK = MEMBER#<sub>`, `userSub = <sub>`, role `REVIEWER` và trạng thái `ACTIVE`.
   - Dùng mật khẩu tạm đăng nhập trên Web Console -> Cognito trả về challenge `NEW_PASSWORD_REQUIRED` buộc người dùng đặt mật khẩu mới trước khi cấp token.

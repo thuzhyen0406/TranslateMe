@@ -1,14 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { IS_DEMO_AUTH_MODE } from '../services/cognitoAuth.js';
 import {
-  DEFAULT_GLOSSARY_TARGET_LANGS,
   SUPPORTED_GLOSSARY_LANGS,
   TERM_TYPE_LABELS,
   buildSampleGlossaryCsv,
+  buildUpsertGlossaryInput,
   createHttpGlossaryApi,
   createMockGlossaryApi,
   decodeCsvUtf8Bytes,
+  getEditableGlossaryTargetLangs,
+  getGlossaryTableLangs,
   glossaryErrorMessage,
+  glossaryLangLabel,
+  initGlossaryFormTranslations,
+  isTerminalCacheInvalidationStatusError,
+  mergeGlossaryCacheInvalidations,
   validateUpsertTermInput,
   type GlossaryApi,
 } from '../services/glossaryApi.js';
@@ -17,6 +23,8 @@ import type { AuthenticatedSession } from '../types/auth.js';
 import type {
   CsvImportPreviewOrCommitResult,
   DuplicateHandlingMode,
+  GlossaryCacheInvalidation,
+  GlossaryCacheInvalidationProgress,
   GlossaryTermEntry,
   GlossaryTermType,
 } from '../types/glossary.js';
@@ -26,6 +34,9 @@ interface GlossaryPageProps {
 }
 
 const sharedMockGlossaryApi = createMockGlossaryApi();
+const MAX_INVALIDATION_STATUS_POLL_FAILURES = 5;
+const INVALIDATION_STATUS_POLL_INTERVAL_MS = 4000;
+type InvalidationPollState = GlossaryCacheInvalidationProgress['status'] | 'CHECK_FAILED';
 
 function glossaryApiFor(session: AuthenticatedSession): GlossaryApi {
   if (IS_DEMO_AUTH_MODE) {
@@ -69,19 +80,86 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [cacheInvalidation, setCacheInvalidation] = useState<GlossaryCacheInvalidation | null>(null);
+  const [retryingCacheInvalidation, setRetryingCacheInvalidation] = useState(false);
+  const [invalidationProgress, setInvalidationProgress] = useState<Record<string, InvalidationPollState>>({});
+  const [invalidationStatusErrors, setInvalidationStatusErrors] = useState<Record<string, string>>({});
+  const [statusPollGeneration, setStatusPollGeneration] = useState(0);
+  const invalidationIdKey = cacheInvalidation?.invalidationIds.join(',') ?? '';
+
+  useEffect(() => {
+    const ids = invalidationIdKey ? invalidationIdKey.split(',').filter(Boolean) : [];
+    if (ids.length === 0) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const progress: Record<string, InvalidationPollState> = Object.fromEntries(ids.map((id) => [id, 'IN_PROGRESS']));
+    const errors: Record<string, string> = {};
+    const failuresById: Record<string, number> = {};
+    setInvalidationProgress(progress);
+    setInvalidationStatusErrors({});
+    const poll = async () => {
+      const pendingIds = ids.filter((id) => progress[id] !== 'COMPLETED' && progress[id] !== 'CHECK_FAILED');
+      const results = await Promise.all(pendingIds.map(async (id) => {
+        try {
+          return { id, status: await api.getCacheInvalidationStatus(id) };
+        } catch (error) {
+          return { id, error };
+        }
+      }));
+      if (!active) return;
+      for (const result of results) {
+        if ('error' in result) {
+          failuresById[result.id] = (failuresById[result.id] ?? 0) + 1;
+          if (isTerminalCacheInvalidationStatusError(result.error) ||
+              failuresById[result.id] >= MAX_INVALIDATION_STATUS_POLL_FAILURES) {
+            progress[result.id] = 'CHECK_FAILED';
+            errors[result.id] = glossaryErrorMessage(result.error);
+          }
+        } else {
+          progress[result.id] = result.status.status;
+          delete errors[result.id];
+        }
+      }
+      setInvalidationProgress({ ...progress });
+      setInvalidationStatusErrors({ ...errors });
+      if (ids.some((id) => progress[id] !== 'COMPLETED' && progress[id] !== 'CHECK_FAILED')) {
+        timer = setTimeout(() => void poll(), INVALIDATION_STATUS_POLL_INTERVAL_MS);
+      }
+    };
+    void poll();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [api, invalidationIdKey, statusPollGeneration]);
 
   // Trạng thái khung Thêm / Sửa thuật ngữ
   const [showTermForm, setShowTermForm] = useState<boolean>(false);
   const [editingNormalizedTerm, setEditingNormalizedTerm] = useState<string | null>(null);
+  const [editingBaseTranslations, setEditingBaseTranslations] = useState<Record<string, string>>({});
+  const [extraFormLangs, setExtraFormLangs] = useState<string[]>([]);
   const [formSourceTerm, setFormSourceTerm] = useState<string>('');
   const [formSourceLang, setFormSourceLang] = useState<string>('vi');
   const [formType, setFormType] = useState<GlossaryTermType>('FIXED');
-  const [formTranslations, setFormTranslations] = useState<Record<string, string>>({
-    en: '',
-    ko: '',
-    ja: '',
-  });
+  const [formTranslations, setFormTranslations] = useState<Record<string, string>>(() =>
+    initGlossaryFormTranslations(null, 'vi'),
+  );
   const [savingTerm, setSavingTerm] = useState<boolean>(false);
+
+  const editableTargetLangs = useMemo(
+    () => getEditableGlossaryTargetLangs(formSourceLang, editingBaseTranslations, extraFormLangs),
+    [formSourceLang, editingBaseTranslations, extraFormLangs],
+  );
+
+  const remainingAddableLangs = useMemo(
+    () =>
+      SUPPORTED_GLOSSARY_LANGS.filter(
+        (l) => l.code !== formSourceLang && !editableTargetLangs.includes(l.code),
+      ),
+    [formSourceLang, editableTargetLangs],
+  );
+
+  const tableTargetLangs = useMemo(() => getGlossaryTableLangs(terms), [terms]);
 
   // Trạng thái khung Nhập CSV (Bước 3 & 4 của Q3)
   const [showCsvModal, setShowCsvModal] = useState<boolean>(false);
@@ -126,10 +204,12 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
 
   const handleOpenAddForm = () => {
     setEditingNormalizedTerm(null);
+    setEditingBaseTranslations({});
+    setExtraFormLangs([]);
     setFormSourceTerm('');
     setFormSourceLang('vi');
     setFormType('FIXED');
-    setFormTranslations({ en: '', ko: '', ja: '' });
+    setFormTranslations(initGlossaryFormTranslations(null, 'vi'));
     setErrorMessage(null);
     setSuccessMessage(null);
     setShowTermForm(true);
@@ -137,14 +217,12 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
 
   const handleOpenEditForm = (entry: GlossaryTermEntry) => {
     setEditingNormalizedTerm(entry.normalizedTerm);
+    setEditingBaseTranslations({ ...entry.translations });
+    setExtraFormLangs([]);
     setFormSourceTerm(entry.sourceTerm);
     setFormSourceLang(entry.sourceLang);
     setFormType(entry.type);
-    setFormTranslations({
-      en: entry.translations.en ?? (entry.type === 'KEEP' ? entry.sourceTerm : ''),
-      ko: entry.translations.ko ?? (entry.type === 'KEEP' ? entry.sourceTerm : ''),
-      ja: entry.translations.ja ?? (entry.type === 'KEEP' ? entry.sourceTerm : ''),
-    });
+    setFormTranslations(initGlossaryFormTranslations(entry));
     setErrorMessage(null);
     setSuccessMessage(null);
     setShowTermForm(true);
@@ -156,18 +234,15 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     setErrorMessage(null);
     setSuccessMessage(null);
 
-    const effectiveTranslations: Record<string, string> =
-      formType === 'KEEP'
-        ? Object.fromEntries(DEFAULT_GLOSSARY_TARGET_LANGS.map((l) => [l, formSourceTerm.trim()]))
-        : formTranslations;
-
-    const clientErr = validateUpsertTermInput({
+    const payload = buildUpsertGlossaryInput({
       sourceTerm: formSourceTerm,
       sourceLang: formSourceLang,
       type: formType,
-      translations: effectiveTranslations,
-      targetLangs: [...DEFAULT_GLOSSARY_TARGET_LANGS],
+      formTranslations,
+      targetLangs: editableTargetLangs,
     });
+
+    const clientErr = validateUpsertTermInput(payload);
     if (clientErr) {
       setErrorMessage(clientErr);
       return;
@@ -175,13 +250,8 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
 
     setSavingTerm(true);
     try {
-      const res = await api.upsertTerm({
-        sourceTerm: formSourceTerm,
-        sourceLang: formSourceLang,
-        type: formType,
-        translations: effectiveTranslations,
-        targetLangs: [...DEFAULT_GLOSSARY_TARGET_LANGS],
-      });
+      const res = await api.upsertTerm(payload);
+      setCacheInvalidation(res.cacheInvalidation ?? null);
       await loadGlossary();
       setShowTermForm(false);
       setSuccessMessage(
@@ -200,6 +270,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     setSuccessMessage(null);
     try {
       const res = await api.deleteTerm(entry.sourceTerm);
+      setCacheInvalidation(res.cacheInvalidation ?? null);
       await loadGlossary();
       setSuccessMessage(
         `Đã xóa thuật ngữ "${entry.sourceTerm}". Phiên bản bảng thuật ngữ hiện tại: v${res.version}.`,
@@ -256,6 +327,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
     setErrorMessage(null);
     try {
       const res = await api.commitImportCsv(csvText, onDuplicate);
+      setCacheInvalidation(res.cacheInvalidation ?? null);
       await loadGlossary();
       setShowCsvModal(false);
       setCsvPreview(null);
@@ -268,6 +340,40 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
       setCsvBusy(false);
     }
   };
+
+  const handleRetryCacheInvalidation = async () => {
+    const previous = cacheInvalidation;
+    setRetryingCacheInvalidation(true);
+    try {
+      const latest = await api.retryCacheInvalidation(previous?.failedPaths ?? []);
+      setCacheInvalidation((current) => current
+        ? mergeGlossaryCacheInvalidations(current, latest)
+        : latest);
+    } catch (err) {
+      const failedRetry: GlossaryCacheInvalidation = {
+        status: 'FAILED', mode: 'WILDCARD', paths: [], invalidationIds: [],
+        failedPaths: previous?.failedPaths ?? [], error: glossaryErrorMessage(err),
+      };
+      setCacheInvalidation((current) => current
+        ? mergeGlossaryCacheInvalidations(current, failedRetry)
+        : failedRetry);
+    } finally {
+      setRetryingCacheInvalidation(false);
+    }
+  };
+
+  const allInvalidationsCompleted = Boolean(cacheInvalidation?.invalidationIds.length) &&
+    cacheInvalidation!.invalidationIds.every((id) => invalidationProgress[id] === 'COMPLETED');
+  const hasInvalidationStatusCheckError = Object.keys(invalidationStatusErrors).length > 0;
+  const cacheInvalidationMessage = cacheInvalidation?.status === 'SUBMITTED'
+    ? (hasInvalidationStatusCheckError
+      ? 'Không thể xác minh trạng thái làm mới cache.'
+      : allInvalidationsCompleted ? 'Đã làm mới cache.' : 'Đang làm mới cache.')
+    : cacheInvalidation?.status === 'NOT_CONFIGURED'
+      ? 'Chưa cấu hình làm mới cache.'
+      : cacheInvalidation?.status === 'PARTIAL'
+        ? 'Chỉ một phần cache được gửi làm mới.'
+        : 'Làm mới cache thất bại.';
 
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-5">
@@ -346,6 +452,47 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
         </div>
       )}
 
+      {cacheInvalidation && cacheInvalidation.status !== 'NOTHING_TO_DO' && (
+        <div
+          role={cacheInvalidation.status === 'FAILED' || cacheInvalidation.status === 'PARTIAL' || hasInvalidationStatusCheckError ? 'alert' : 'status'}
+          className={`p-3.5 rounded-xl border text-xs ${
+            cacheInvalidation.status === 'FAILED' || cacheInvalidation.status === 'PARTIAL' || hasInvalidationStatusCheckError
+              ? 'bg-red-50 border-red-200 text-red-800'
+              : cacheInvalidation.status === 'NOT_CONFIGURED'
+                ? 'bg-amber-50 border-amber-200 text-amber-800'
+                : 'bg-blue-50 border-blue-200 text-blue-800'
+          }`}
+        >
+          <strong>{cacheInvalidationMessage}</strong>
+          {cacheInvalidation.invalidationIds.length > 0 && (
+            <span> Mã theo dõi: {cacheInvalidation.invalidationIds.join(', ')}.</span>
+          )}
+          {cacheInvalidation.error && <span> {cacheInvalidation.error}</span>}
+          {hasInvalidationStatusCheckError && (
+            <span> Kiểm tra trạng thái đã dừng: {Object.values(invalidationStatusErrors).join('; ')}. Có thể thử kiểm tra lại.</span>
+          )}
+          {hasInvalidationStatusCheckError && isTenantAdmin && (
+            <button
+              type="button"
+              onClick={() => setStatusPollGeneration((generation) => generation + 1)}
+              className="ml-2 underline font-semibold"
+            >
+              Kiểm tra lại trạng thái
+            </button>
+          )}
+          {(cacheInvalidation.status === 'FAILED' || cacheInvalidation.status === 'PARTIAL') && canWrite && (
+            <button
+              type="button"
+              disabled={retryingCacheInvalidation}
+              onClick={() => void handleRetryCacheInvalidation()}
+              className="ml-2 underline font-semibold disabled:opacity-50"
+            >
+              {retryingCacheInvalidation ? 'Đang thử lại...' : 'Thử làm mới lại'}
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Khung Thêm / Sửa thuật ngữ đơn lẻ (Bước 2 của Q3) */}
       {showTermForm && canWrite && (
         <form
@@ -412,20 +559,42 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
           </div>
 
           <div className="space-y-2">
-            <div className="text-xs font-semibold text-gray-700">
-              Bản dịch theo ngôn ngữ đích{' '}
-              {formType === 'KEEP' && (
-                <span className="font-normal text-[#146c54]">
-                  (Loại "Giữ nguyên" tự động lấy nguyên vẹn từ nguồn cho mọi ngôn ngữ đích)
-                </span>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs font-semibold text-gray-700">
+                Bản dịch theo ngôn ngữ đích{' '}
+                {formType === 'KEEP' && (
+                  <span className="font-normal text-[#146c54]">
+                    (Loại "Giữ nguyên" tự động lấy nguyên vẹn từ nguồn cho mọi ngôn ngữ đích)
+                  </span>
+                )}
+              </div>
+              {remainingAddableLangs.length > 0 && (
+                <select
+                  aria-label="Thêm ngôn ngữ đích"
+                  value=""
+                  onChange={(e) => {
+                    const code = e.target.value;
+                    if (!code) return;
+                    setExtraFormLangs((prev) => (prev.includes(code) ? prev : [...prev, code]));
+                    setFormTranslations((prev) => ({ ...prev, [code]: prev[code] ?? '' }));
+                  }}
+                  className="rounded-lg border border-gray-300 px-2.5 py-1 text-xs text-gray-700 bg-white"
+                >
+                  <option value="">+ Thêm ngôn ngữ khác...</option>
+                  {remainingAddableLangs.map((l) => (
+                    <option key={l.code} value={l.code}>
+                      {l.label}
+                    </option>
+                  ))}
+                </select>
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {DEFAULT_GLOSSARY_TARGET_LANGS.map((lang) => (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {editableTargetLangs.map((lang) => (
                 <div key={lang}>
                   <label className="block text-xs text-gray-600 mb-1">
-                    Đích: <strong>{lang.toUpperCase()}</strong>
+                    Đích: <strong>{glossaryLangLabel(lang)}</strong>
                   </label>
                   <input
                     type="text"
@@ -685,9 +854,11 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
                 <tr className="bg-gray-50 border-b border-gray-200 text-xs font-semibold text-gray-600 uppercase tracking-wider">
                   <th className="py-3 px-4">Từ nguồn</th>
                   <th className="py-3 px-4">Loại</th>
-                  <th className="py-3 px-4">Tiếng Anh (en)</th>
-                  <th className="py-3 px-4">Tiếng Hàn (ko)</th>
-                  <th className="py-3 px-4">Tiếng Nhật (ja)</th>
+                  {tableTargetLangs.map((lang) => (
+                    <th key={lang} className="py-3 px-4">
+                      {glossaryLangLabel(lang)}
+                    </th>
+                  ))}
                   <th className="py-3 px-4">Phiên bản</th>
                   {canWrite && <th className="py-3 px-4 text-right">Thao tác</th>}
                 </tr>
@@ -712,9 +883,11 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session }) => {
                         </span>
                       )}
                     </td>
-                    <td className="py-3 px-4 text-gray-700">{entry.translations.en ?? '—'}</td>
-                    <td className="py-3 px-4 text-gray-700">{entry.translations.ko ?? '—'}</td>
-                    <td className="py-3 px-4 text-gray-700">{entry.translations.ja ?? '—'}</td>
+                    {tableTargetLangs.map((lang) => (
+                      <td key={lang} className="py-3 px-4 text-gray-700">
+                        {entry.translations[lang] ?? '—'}
+                      </td>
+                    ))}
                     <td className="py-3 px-4 text-xs font-mono text-gray-500">
                       v{entry.updatedInVersion}
                     </td>

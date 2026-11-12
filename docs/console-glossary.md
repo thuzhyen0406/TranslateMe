@@ -66,3 +66,5 @@ Body gửi lên dùng **camelCase** đúng như `handleGlossaryRoute` đọc (kh
 ## 5. Tenant bị khóa (LOCKED)
 
 Khi phiên có `tenantStatus = 'LOCKED'`, `GlossaryPage` dùng `canConsoleRequest` (`console/src/services/tenantPolicy.ts`) để ẩn **Thêm / Sửa / Xóa / Nhập CSV** và hiện nhãn "Tài khoản đang bị tạm khóa – chỉ xem"; danh sách và CSV mẫu vẫn xem được. Nếu phiên chưa có trạng thái tenant, máy chủ vẫn chặn bằng `TENANT_SUSPENDED`.
+
+Sau khi thêm/sửa/xóa/nhập thuật ngữ, F4 chỉ gửi CloudFront invalidation và trả `invalidationIds` cùng trạng thái submit; Console theo dõi các ID qua `GET /console/glossary/cache-invalidation/{id}` và cho Tenant Admin gửi lại khi submit thất bại. Việc lưu bản dịch HUMAN trong F5 hiện vẫn chưa kích hoạt invalidation và chưa thuộc phạm vi PR này.
