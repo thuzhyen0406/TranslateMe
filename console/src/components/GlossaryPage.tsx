@@ -13,6 +13,8 @@ import {
   glossaryErrorMessage,
   glossaryLangLabel,
   initGlossaryFormTranslations,
+  isTerminalCacheInvalidationStatusError,
+  mergeGlossaryCacheInvalidations,
   validateUpsertTermInput,
   type GlossaryApi,
 } from '../services/glossaryApi.js';
@@ -22,6 +24,8 @@ import type { AuthenticatedSession, TenantStatus } from '../types/auth.js';
 import type {
   CsvImportPreviewOrCommitResult,
   DuplicateHandlingMode,
+  GlossaryCacheInvalidation,
+  GlossaryCacheInvalidationProgress,
   GlossaryTermEntry,
   GlossaryTermType,
 } from '../types/glossary.js';
@@ -33,6 +37,9 @@ interface GlossaryPageProps {
 }
 
 const sharedMockGlossaryApi = createMockGlossaryApi();
+const MAX_INVALIDATION_STATUS_POLL_FAILURES = 5;
+const INVALIDATION_STATUS_POLL_INTERVAL_MS = 4000;
+type InvalidationPollState = GlossaryCacheInvalidationProgress['status'] | 'CHECK_FAILED';
 
 function glossaryApiFor(session: AuthenticatedSession): GlossaryApi {
   if (IS_DEMO_AUTH_MODE) {
@@ -80,6 +87,58 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session, onTenantSta
   const [actionError, setActionError] = useState<unknown | null>(null);
   const [actionErrorOperation, setActionErrorOperation] = useState<ConsoleOperationKind>('write');
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [cacheInvalidation, setCacheInvalidation] = useState<GlossaryCacheInvalidation | null>(null);
+  const [retryingCacheInvalidation, setRetryingCacheInvalidation] = useState(false);
+  const [invalidationProgress, setInvalidationProgress] = useState<Record<string, InvalidationPollState>>({});
+  const [invalidationStatusErrors, setInvalidationStatusErrors] = useState<Record<string, string>>({});
+  const [statusPollGeneration, setStatusPollGeneration] = useState(0);
+  const invalidationIdKey = cacheInvalidation?.invalidationIds.join(',') ?? '';
+
+  useEffect(() => {
+    const ids = invalidationIdKey ? invalidationIdKey.split(',').filter(Boolean) : [];
+    if (ids.length === 0) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const progress: Record<string, InvalidationPollState> = Object.fromEntries(ids.map((id) => [id, 'IN_PROGRESS']));
+    const errors: Record<string, string> = {};
+    const failuresById: Record<string, number> = {};
+    setInvalidationProgress(progress);
+    setInvalidationStatusErrors({});
+    const poll = async () => {
+      const pendingIds = ids.filter((id) => progress[id] !== 'COMPLETED' && progress[id] !== 'CHECK_FAILED');
+      const results = await Promise.all(pendingIds.map(async (id) => {
+        try {
+          return { id, status: await api.getCacheInvalidationStatus(id) };
+        } catch (error) {
+          return { id, error };
+        }
+      }));
+      if (!active) return;
+      for (const result of results) {
+        if ('error' in result) {
+          failuresById[result.id] = (failuresById[result.id] ?? 0) + 1;
+          if (isTerminalCacheInvalidationStatusError(result.error) ||
+              failuresById[result.id] >= MAX_INVALIDATION_STATUS_POLL_FAILURES) {
+            progress[result.id] = 'CHECK_FAILED';
+            errors[result.id] = glossaryErrorMessage(result.error);
+          }
+        } else {
+          progress[result.id] = result.status.status;
+          delete errors[result.id];
+        }
+      }
+      setInvalidationProgress({ ...progress });
+      setInvalidationStatusErrors({ ...errors });
+      if (ids.some((id) => progress[id] !== 'COMPLETED' && progress[id] !== 'CHECK_FAILED')) {
+        timer = setTimeout(() => void poll(), INVALIDATION_STATUS_POLL_INTERVAL_MS);
+      }
+    };
+    void poll();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [api, invalidationIdKey, statusPollGeneration]);
 
   // Trạng thái khung Thêm / Sửa thuật ngữ
   const [showTermForm, setShowTermForm] = useState<boolean>(false);
@@ -234,6 +293,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session, onTenantSta
     setSavingTerm(true);
     try {
       const res = await api.upsertTerm(payload);
+      setCacheInvalidation(res.cacheInvalidation ?? null);
       await loadGlossary();
       setShowTermForm(false);
       setSuccessMessage(
@@ -256,6 +316,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session, onTenantSta
     setSuccessMessage(null);
     try {
       const res = await api.deleteTerm(entry.sourceTerm);
+      setCacheInvalidation(res.cacheInvalidation ?? null);
       await loadGlossary();
       setSuccessMessage(
         `Đã xóa thuật ngữ "${entry.sourceTerm}". Phiên bản bảng thuật ngữ hiện tại: v${res.version}.`,
@@ -325,6 +386,7 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session, onTenantSta
     setActionErrorOperation('write');
     try {
       const res = await api.commitImportCsv(csvText, onDuplicate);
+      setCacheInvalidation(res.cacheInvalidation ?? null);
       await loadGlossary();
       setShowCsvModal(false);
       setCsvPreview(null);
@@ -340,6 +402,40 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session, onTenantSta
       setCsvBusy(false);
     }
   };
+
+  const handleRetryCacheInvalidation = async () => {
+    const previous = cacheInvalidation;
+    setRetryingCacheInvalidation(true);
+    try {
+      const latest = await api.retryCacheInvalidation(previous?.failedPaths ?? []);
+      setCacheInvalidation((current) => current
+        ? mergeGlossaryCacheInvalidations(current, latest)
+        : latest);
+    } catch (err) {
+      const failedRetry: GlossaryCacheInvalidation = {
+        status: 'FAILED', mode: 'WILDCARD', paths: [], invalidationIds: [],
+        failedPaths: previous?.failedPaths ?? [], error: glossaryErrorMessage(err),
+      };
+      setCacheInvalidation((current) => current
+        ? mergeGlossaryCacheInvalidations(current, failedRetry)
+        : failedRetry);
+    } finally {
+      setRetryingCacheInvalidation(false);
+    }
+  };
+
+  const allInvalidationsCompleted = Boolean(cacheInvalidation?.invalidationIds.length) &&
+    cacheInvalidation!.invalidationIds.every((id) => invalidationProgress[id] === 'COMPLETED');
+  const hasInvalidationStatusCheckError = Object.keys(invalidationStatusErrors).length > 0;
+  const cacheInvalidationMessage = cacheInvalidation?.status === 'SUBMITTED'
+    ? (hasInvalidationStatusCheckError
+      ? 'Không thể xác minh trạng thái làm mới cache.'
+      : allInvalidationsCompleted ? 'Đã làm mới cache.' : 'Đang làm mới cache.')
+    : cacheInvalidation?.status === 'NOT_CONFIGURED'
+      ? 'Chưa cấu hình làm mới cache.'
+      : cacheInvalidation?.status === 'PARTIAL'
+        ? 'Chỉ một phần cache được gửi làm mới.'
+        : 'Làm mới cache thất bại.';
 
   return (
     <div className="p-8 max-w-6xl space-y-5">
@@ -440,6 +536,47 @@ export const GlossaryPage: React.FC<GlossaryPageProps> = ({ session, onTenantSta
           >
             Đóng
           </button>
+        </div>
+      )}
+
+      {cacheInvalidation && cacheInvalidation.status !== 'NOTHING_TO_DO' && (
+        <div
+          role={cacheInvalidation.status === 'FAILED' || cacheInvalidation.status === 'PARTIAL' || hasInvalidationStatusCheckError ? 'alert' : 'status'}
+          className={`p-3.5 rounded-xl border text-xs ${
+            cacheInvalidation.status === 'FAILED' || cacheInvalidation.status === 'PARTIAL' || hasInvalidationStatusCheckError
+              ? 'bg-red-50 border-red-200 text-red-800'
+              : cacheInvalidation.status === 'NOT_CONFIGURED'
+                ? 'bg-amber-50 border-amber-200 text-amber-800'
+                : 'bg-blue-50 border-blue-200 text-blue-800'
+          }`}
+        >
+          <strong>{cacheInvalidationMessage}</strong>
+          {cacheInvalidation.invalidationIds.length > 0 && (
+            <span> Mã theo dõi: {cacheInvalidation.invalidationIds.join(', ')}.</span>
+          )}
+          {cacheInvalidation.error && <span> {cacheInvalidation.error}</span>}
+          {hasInvalidationStatusCheckError && (
+            <span> Kiểm tra trạng thái đã dừng: {Object.values(invalidationStatusErrors).join('; ')}. Có thể thử kiểm tra lại.</span>
+          )}
+          {hasInvalidationStatusCheckError && isTenantAdmin && (
+            <button
+              type="button"
+              onClick={() => setStatusPollGeneration((generation) => generation + 1)}
+              className="ml-2 underline font-semibold"
+            >
+              Kiểm tra lại trạng thái
+            </button>
+          )}
+          {(cacheInvalidation.status === 'FAILED' || cacheInvalidation.status === 'PARTIAL') && canWrite && (
+            <button
+              type="button"
+              disabled={retryingCacheInvalidation}
+              onClick={() => void handleRetryCacheInvalidation()}
+              className="ml-2 underline font-semibold disabled:opacity-50"
+            >
+              {retryingCacheInvalidation ? 'Đang thử lại...' : 'Thử làm mới lại'}
+            </button>
+          )}
         </div>
       )}
 

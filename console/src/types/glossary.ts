@@ -30,6 +30,22 @@ export interface GlossaryStateResponse {
   terms: GlossaryTermEntry[];
 }
 
+export interface GlossaryCacheInvalidation {
+  status: 'SUBMITTED' | 'PARTIAL' | 'FAILED' | 'NOTHING_TO_DO' | 'NOT_CONFIGURED';
+  paths: string[];
+  mode: 'WILDCARD';
+  invalidationIds: string[];
+  failedPaths?: string[];
+  error?: string;
+}
+
+export interface GlossaryCacheInvalidationProgress {
+  id: string;
+  status: 'IN_PROGRESS' | 'COMPLETED';
+  paths: string[];
+  createdAt?: string;
+}
+
 export interface UpsertGlossaryTermInput {
   sourceTerm: string;
   sourceLang: string;
@@ -42,12 +58,14 @@ export interface UpsertGlossaryTermResponse {
   term: GlossaryTermEntry;
   version: number;
   terminologySynced?: boolean;
+  cacheInvalidation?: GlossaryCacheInvalidation;
 }
 
 export interface DeleteGlossaryTermResponse {
   deleted: boolean;
   version: number;
   terminologySynced?: boolean;
+  cacheInvalidation?: GlossaryCacheInvalidation;
 }
 
 export interface CsvImportRowError {
@@ -64,4 +82,5 @@ export interface CsvImportPreviewOrCommitResult {
   skippedCount: number;
   version: number;
   terminologySynced?: boolean;
+  cacheInvalidation?: GlossaryCacheInvalidation;
 }

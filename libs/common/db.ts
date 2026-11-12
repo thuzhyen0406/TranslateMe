@@ -16,6 +16,12 @@ const client = new DynamoDBClient({});
 const docClient = createTenantDocumentClientRouter(DynamoDBDocumentClient.from(client), {
   roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN,
   sessionName: 'common-db',
+  allowPlatformSlugReservations: process.env.ALLOW_PLATFORM_SLUG_RESERVATION === 'true',
+});
+const websiteSlugReservationClient = createTenantDocumentClientRouter(DynamoDBDocumentClient.from(client), {
+  roleArn: process.env.TENANT_WEBSITE_DATA_ACCESS_ROLE_ARN,
+  sessionName: 'website-slug-reservation',
+  allowPlatformSlugReservations: true,
 });
 const TABLE_NAME = process.env.TABLE_NAME || 'translate-data';
 
@@ -218,6 +224,8 @@ export const db = {
         assertTenantAccess(ctx, { PK: item.PK });
       } else if (isPlatformSlug) {
         if (
+          !op.Put ||
+          op.Put.ConditionExpression !== 'attribute_not_exists(PK)' ||
           !ctx.tenantId ||
           ctx.tenantId === 'PLATFORM' ||
           item.tenantId !== ctx.tenantId
@@ -226,7 +234,10 @@ export const db = {
         }
       }
     }
-    await docClient.send(new TransactWriteCommand({ TransactItems: ops }));
+    const transactionClient = options?.platformSlugReservation
+      ? websiteSlugReservationClient
+      : docClient;
+    await transactionClient.send(new TransactWriteCommand({ TransactItems: ops }));
   },
 
   /**
