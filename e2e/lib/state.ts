@@ -18,6 +18,8 @@ export interface TenantState {
   tinyKeyId?: string;
   jobId: string;
   fileKey: string;
+  /** SUBMITTING được lưu trước POST để lần chạy lại dò job theo fileKey trước khi thử lại. */
+  batchSubmissionState?: 'UPLOADING' | 'SUBMITTING' | 'SUBMITTED';
   tmText: string;
   tmHash: string;
 }

@@ -22,7 +22,11 @@ export function aws(args: string[], o: AwsOpts = {}): any {
     console.log(`[dry-run] ${bin} ${shown.join(' ')}`);
     return {};
   }
-  const r = spawnSync(bin, full, { encoding: 'utf8' });
+  // Cho phép dùng shim JavaScript portable trong test offline, kể cả Windows.
+  const isJsShim = /\.(?:mjs|js)$/iu.test(bin);
+  const command = isJsShim ? process.execPath : bin;
+  const commandArgs = isJsShim ? [bin, ...full] : full;
+  const r = spawnSync(command, commandArgs, { encoding: 'utf8' });
   if (r.status !== 0) {
     if (o.allowFail) return { __error: (r.stderr || r.stdout || '').trim() };
     throw new Error(`aws ${args.slice(0, 3).join(' ')} lỗi: ${(r.stderr || r.stdout || '').trim().slice(0, 400)}`);
