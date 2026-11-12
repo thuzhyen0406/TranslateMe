@@ -721,10 +721,10 @@ components:
       properties:
         file_name:
           type: string
-          description: Tên tệp đơn kèm phần mở rộng (dài 1–255 ký tự, không chứa `/` hoặc `\`). Chỉ chấp nhận các định dạng `.txt`, `.html`, `.docx`.
+          description: Tên tệp đơn kèm phần mở rộng (dài 1–255 ký tự, không chứa `/` hoặc `\`). Chỉ chấp nhận các định dạng `.txt`, `.html`, `.docx` (không phân biệt hoa/thường).
           minLength: 1
           maxLength: 255
-          pattern: '^[^\\/]+\.(txt|html|docx|TXT|HTML|DOCX)$'
+          pattern: '^[^\\/]+\.([tT][xX][tT]|[hH][tT][mM][lL]|[dD][oO][cC][xX])$'
           example: "gioi-thieu-homestay.docx"
         size_bytes:
           type: integer
