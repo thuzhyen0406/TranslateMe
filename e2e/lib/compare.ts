@@ -10,15 +10,16 @@ export const shape = (r: Resp) => ({
 
 /** Tạo id không tồn tại nhưng cùng định dạng với id thật (cùng độ dài, cùng loại ký tự) */
 export function lookalike(id: string): string {
-  const hex = '0123456789abcdef';
-  const up = 'ABCDEFGHJKMNPQRSTVWXYZ';
-  const lo = 'abcdefghijklmnopqrstuvwxyz';
-  return [...id].map((ch) => {
-    if (/[0-9a-f]/.test(ch)) return hex[randomInt(16)];
-    if (/[A-Z]/.test(ch)) return up[randomInt(up.length)];
-    if (/[a-z]/.test(ch)) return lo[randomInt(lo.length)];
+  const changed = [...id].map((ch) => {
+    const pool = /[0-9]/.test(ch) ? '0123456789' : /[A-Z]/.test(ch) ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' : /[a-z]/.test(ch) ? 'abcdefghijklmnopqrstuvwxyz' : '';
+    if (pool) {
+      const alternatives = pool.replace(ch, '');
+      return alternatives[randomInt(alternatives.length)];
+    }
     return ch;
   }).join('');
+  if (changed === id && id.length > 0) throw new Error('ID không có ký tự chữ/số để tạo lookalike cùng định dạng');
+  return changed;
 }
 
 /**

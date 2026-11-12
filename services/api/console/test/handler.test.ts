@@ -382,6 +382,14 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     );
     assert.equal(detail404Res?.statusCode, 404);
 
+    const verifyMissingRes = await handleSitesApiGatewayRoute(
+      event('/console/hosts/unknown-slug/verify', claims, 'POST', { method: 'META' }),
+      adminCtx,
+      siteDeps as any,
+    );
+    assert.equal(verifyMissingRes?.statusCode, 404);
+    assert.equal(JSON.parse(verifyMissingRes!.body).error?.code, 'NOT_FOUND');
+
     const detail200Res = await handleSitesApiGatewayRoute(
       event('/console/hosts/site-example-com'),
       adminCtx,

@@ -14,12 +14,13 @@ Selftest chạy mock local, không gọi AWS. Các mode lỗi cố ý kiểm tra
 
 ## Chạy trên môi trường đã seed dữ liệu
 
-Tạo file `.env.<stage>` từ `.env.example`, nạp biến môi trường rồi chạy các lệnh trong thư mục `e2e/`:
+Tạo file `.env.<stage>` từ `.env.example`; test tự nạp file stage. Chạy các lệnh trong thư mục `e2e/`:
 
 ```sh
 npm run test:isolation
 npm run test:ssrf
 TM_ALLOW_MUTATION=1 npm run test:limits
+npm run typecheck
 ```
 
 Test cần `.state/<stage>.json` có tài khoản tenant A/B/C, Platform Admin, API keys, job và file_key. File state chứa mật khẩu và key, không được commit. Phần tạo dữ liệu demo thuộc nhánh triển khai demo; không có seed AWS trong package của nhánh này.
@@ -33,7 +34,11 @@ Test cần `.state/<stage>.json` có tài khoản tenant A/B/C, Platform Admin, 
 - Platform Admin thuộc Cognito group `PlatformAdmins`.
 - Body/các endpoint nghiệp vụ vẫn được gom ở `lib/contract.ts` để dễ cập nhật.
 
-Project hiện tại chưa đăng ký một số route mà bộ nghiệm thu tuần 5 cần, gồm `/console/me`, `/console/tm`, `/console/usage`, `/console/batch/{id}` và các route quản trị danh sách/chi tiết tenant cùng cấu hình platform. Bộ test giữ các ca đó như tiêu chí đầu-cuối; các ca tương ứng chỉ có thể đạt sau khi các route được tích hợp vào sản phẩm và API Gateway. `GET /console/jobs/{id}` và các route website/batch đang có được gọi theo hợp đồng hiện tại.
+Project hiện tại chưa đăng ký một số route mà bộ nghiệm thu tuần 5 cần, gồm `/console/me`, `/console/usage`, `/console/batch/{id}` và các route quản trị danh sách/chi tiết tenant cùng cấu hình platform. Các ca không có route tương đương được ghi `SKIP` kèm lý do; chúng không được tính là đạt. Khi route được tích hợp, bật capability tương ứng trong `.env.<stage>` (`TM_E2E_HAS_CONSOLE_ME`, `TM_E2E_HAS_CONSOLE_USAGE`, `TM_E2E_HAS_CONSOLE_BATCH_RESULT`, `TM_E2E_HAS_PLATFORM_TENANT_DETAIL`, `TM_E2E_HAS_PLATFORM_TENANT_LIST`, `TM_E2E_HAS_PLATFORM_CONFIG`) để suite chạy assertion thay vì bỏ qua.
+
+Các phép thử TM dùng route hiện có `GET /console/translations?tab=MACHINE` và bộ lọc `search`. `/console/tm/{hash}/pages` không được giả lập bằng fallback 404. `GET /console/jobs/{id}` chỉ trả metadata job; không thay cho endpoint tải kết quả batch.
+
+`TM_FLOOD_N` mặc định là 30 để kiểm tra throttling mà không tạo burst quá lớn trên Lambda. Có thể giảm theo quota của môi trường; không tăng nếu chưa xác nhận concurrency limit.
 
 ## Cấu trúc
 

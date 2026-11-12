@@ -198,7 +198,8 @@ export async function verifySite(
   const host = await deps.db.get(ctx, hostKey);
 
   if (!host) {
-    throw new AppError('SITE_UNREACHABLE', 'Không tìm thấy thông tin website');
+    // Không phân biệt website của tenant khác với slug không tồn tại (QC-17).
+    throw new AppError('NOT_FOUND', 'Không tìm thấy website');
   }
 
   const verificationCode = host.verificationCode;

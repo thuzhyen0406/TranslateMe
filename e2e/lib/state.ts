@@ -32,7 +32,7 @@ export const stateFile = (stage: string) => join(__dirname, '..', '.state', `${s
 
 export function loadState(stage: string): State {
   const f = stateFile(stage);
-  if (!existsSync(f)) throw new Error(`Chưa có ${f}. Chạy "npm run demo:seed" trước.`);
+  if (!existsSync(f)) throw new Error(`Chưa có ${f}. Hãy tạo state cho stage này theo quy trình seed của môi trường; xem e2e/README.md.`);
   return JSON.parse(readFileSync(f, 'utf8')) as State;
 }
 export function saveState(s: State): void {
