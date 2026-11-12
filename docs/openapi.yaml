@@ -239,7 +239,7 @@ paths:
                       message: "Hết hạn ngạch số yêu cầu của gói API trong kỳ."
         '500':
           description: |
-            Lỗi máy chủ nội bộ tạm thời (`INTERNAL_ERROR`). Xảy ra khi DynamoDB, Amazon Comprehend hoặc Amazon Translate gặp sự cố (bao gồm lỗi kết nối, giới hạn tốc độ từ dịch vụ phía sau hoặc dịch chưa hoàn tất); phần hạn mức ký tự đã đặt trước (`usage.reserve`) được tự động hoàn lại (`usage.refund`) trước khi trả mã lỗi này. Client có thể áp dụng Exponential Backoff khi gửi lại.
+            Lỗi máy chủ nội bộ tạm thời (`INTERNAL_ERROR`). Xảy ra khi DynamoDB, Amazon Comprehend hoặc Amazon Translate gặp sự cố (bao gồm lỗi kết nối, giới hạn tốc độ từ dịch vụ phía sau hoặc dịch chưa hoàn tất). Phần hạn mức ký tự đã đặt trước (`usage.reserve`) chỉ được tự động hoàn lại (`usage.refund`) khi bước dịch máy (`Amazon Translate`) thất bại; các lỗi trước bước đặt trước không giữ hạn mức, còn lỗi phát sinh tại bước hạch toán (`usage.settle`) sẽ đi thẳng về `500 INTERNAL_ERROR` mà không gọi `refund` và có thể cần đối soát. Client có thể áp dụng Exponential Backoff khi gửi lại.
           content:
             application/json:
               schema:
