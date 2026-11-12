@@ -18,10 +18,12 @@ function check(name: string, fn: () => [Status, string]) {
 }
 
 check('Tài khoản AWS', () => {
-  const id = aws(['sts', 'get-caller-identity'], { readonly: true });
   const want = process.env.TM_ACCOUNT;
-  if (want && id.Account !== want) return ['FAIL', `đang dùng tài khoản ${id.Account}, mong đợi ${want}`];
-  return ['PASS', `tài khoản ${id.Account}`];
+  if (!want) return ['FAIL', 'chưa đặt TM_ACCOUNT; cần AWS account ID đích gồm 12 chữ số'];
+  if (!/^\d{12}$/.test(want)) return ['FAIL', `TM_ACCOUNT không hợp lệ: ${want}; cần đúng 12 chữ số`];
+  const id = aws(['sts', 'get-caller-identity'], { readonly: true });
+  if (id.Account !== want) return ['FAIL', `đang dùng tài khoản ${id.Account ?? '(không xác định)'}, mong đợi ${want}`];
+  return ['PASS', `tài khoản ${id.Account} khớp TM_ACCOUNT`];
 });
 
 check('Region thống nhất', () => {
