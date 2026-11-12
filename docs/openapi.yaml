@@ -17,14 +17,14 @@ info:
 
     ### Nguyên tắc thiết kế & Quy chuẩn an toàn (QC-2, QC-3, QC-9, QC-17)
     - **Xác thực API Key**: Mọi yêu cầu bắt buộc phải truyền header `x-api-key`. Hệ thống phân giải `tenantId` độc quyền qua cấu hình IAM/DynamoDB Keymap (QC-3), không nhận `tenantId` từ client.
-    - **Mã lỗi tập trung (QC-2 & Bảng 2.10)**: Mã lỗi kỹ thuật dạng chuỗi UPPERCASE giữ nguyên không dịch; phần `message` giải thích rõ ràng bằng tiếng Việt thân thiện, không bao giờ để lộ dữ liệu người dùng khác. Bên cạnh danh mục cơ sở QC-2, handler `services/api/translate/realtime.ts` bổ sung mã `TRANSLATE_THROTTLED` (HTTP `503`) để phân biệt tình huống dịch vụ hạ tầng Amazon Translate giới hạn tốc độ (`ThrottlingException` / `TooManyRequestsException`) với lỗi vượt tốc độ gói cước API của tenant (`429 RATE_LIMITED`).
+    - **Mã lỗi tập trung (QC-2 & Bảng 2.10)**: Mã lỗi kỹ thuật dạng chuỗi UPPERCASE giữ nguyên không dịch; phần `message` giải thích rõ ràng bằng tiếng Việt thân thiện, không bao giờ để lộ dữ liệu người dùng khác.
     - **Cô lập dữ liệu Tenant (QC-17)**: Truy vấn tài nguyên (công việc batch, tệp...) thuộc tenant khác trả về `404 NOT_FOUND` giống hệt tài nguyên không tồn tại, tuyệt đối không trả `403` nhằm chống quét ID.
     - **Bảo mật nhật ký (QC-9)**: Không bao giờ in nội dung văn bản, bản dịch hoặc giá trị API key thật vào log hệ thống.
-    - **Phạm vi khả dụng và định tuyến handler**:
+    - **Phạm vi các endpoint được công bố trong tài liệu này**:
       - `POST /translate/realtime`: **Đang hoạt động** (`services/api/translate/realtime.ts`).
       - `POST /translate/batch/upload-url`: **Đang hoạt động** (định tuyến từ `services/api/translate/realtime.ts` sang `services/api/batch/batchIngress.ts`).
       - `POST /translate/batch`: **Đang hoạt động** cho bước kiểm duyệt tệp S3 (`HeadObject`/`GetObject`), kiểm tra định dạng/kích thước/hạn mức và tạo bản ghi `JOB` trạng thái `QUEUED` tại `services/api/batch/batchIngress.ts` (khởi chạy Step Functions workflow được nối ở Hạng mục 4.7/5.7).
-      - `GET /translate/batch/{job_id}`: Đặc tả theo hợp đồng Bảng 2.8 (được hoàn thiện trong `services/api/batch/batchIngress.ts` ở Hạng mục 4.7/5.7).
+      - *Lưu ý về tra cứu job (`GET /translate/batch/{job_id}`)*: Chưa được triển khai trên `batchIngress.ts` hiện tại nên **không công bố trong `paths`** của OpenAPI để tránh sinh SDK cho route chưa tồn tại; hợp đồng thiết kế dự kiến cho Hạng mục 4.7/5.7 xem tại `docs/batch-job-polling-design.md`.
   contact:
     name: TranslateMe Engineering Team (Nhóm 03 - INT3319_1)
     email: support@translateme.example.com
@@ -239,7 +239,7 @@ paths:
                       message: "Hết hạn ngạch số yêu cầu của gói API trong kỳ."
         '500':
           description: |
-            Lỗi máy chủ nội bộ tạm thời (`INTERNAL_ERROR`). Xảy ra khi dịch vụ DynamoDB, Translate hoặc Lambda gặp sự cố kết nối. Client nên thực hiện cơ chế gửi lại có thời gian chờ tăng dần (Exponential Backoff).
+            Lỗi máy chủ nội bộ tạm thời (`INTERNAL_ERROR`). Xảy ra khi DynamoDB, Amazon Comprehend hoặc Amazon Translate gặp sự cố (bao gồm lỗi kết nối, giới hạn tốc độ từ dịch vụ phía sau hoặc dịch chưa hoàn tất); phần hạn mức ký tự đã đặt trước (`usage.reserve`) được tự động hoàn lại (`usage.refund`) trước khi trả mã lỗi này. Client có thể áp dụng Exponential Backoff khi gửi lại.
           content:
             application/json:
               schema:
@@ -249,21 +249,6 @@ paths:
                 error:
                   code: "INTERNAL_ERROR"
                   message: "Lỗi tạm thời phía hệ thống."
-        '503':
-          description: |
-            Dịch vụ dịch máy phía sau đang giới hạn tốc độ (`TRANSLATE_THROTTLED`).
-            - Xảy ra trong `services/api/translate/realtime.ts` khi Amazon Translate trả về `ThrottlingException` hoặc `TooManyRequestsException` sau các lần thử lại nội bộ.
-            - Phần hạn mức ký tự đã đặt trước (`usage.reserve`) được hoàn lại tự động (`usage.refund`) trước khi trả lỗi.
-            - **Lưu ý quy ước lỗi**: Phân biệt với `429 RATE_LIMITED` (vượt tốc độ gói cước API Gateway Usage Plan của tenant theo QC-2); khi nhận `503 TRANSLATE_THROTTLED`, client nên giảm mức độ gọi song song (`concurrency`) và thử lại với Exponential Backoff.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-              example:
-                request_id: "req-throttle-503"
-                error:
-                  code: "TRANSLATE_THROTTLED"
-                  message: "Dịch vụ dịch đang giới hạn tốc độ; hãy giảm concurrency rồi thử lại."
 
   /translate/batch/upload-url:
     post:
@@ -536,58 +521,6 @@ paths:
                   code: "INTERNAL_ERROR"
                   message: "Lỗi tạm thời khi nhận tệp batch."
 
-  /translate/batch/{job_id}:
-    get:
-      summary: "[CHƯA KHẢ DỤNG] Tra cứu tiến độ & kết quả công việc dịch tệp (Thiết kế kế thừa F10 Bước 6)"
-      description: |
-        > ⚠️ **THÔNG BÁO VỀ TRẠNG THÁI KHẢ DỤNG:**
-        > - Tuyến đường (route) tra cứu trạng thái công việc batch theo `job_id` thuộc phạm vi hoàn thiện của **Hạng mục 4.7 / 5.7 (TV3: Luồng xử lý & kiểm thử tích hợp batch)** trong `services/api/batch/batchIngress.ts`.
-        > - Dưới đây là đặc tả hợp đồng thiết kế theo Bảng 2.8 để đối chiếu khi tích hợp đầy đủ.
-
-        #### Hợp đồng thiết kế dự kiến:
-        - Trả về trạng thái tiến độ (`QUEUED`, `RUNNING` kèm % tiến độ, `SUCCEEDED`, `FAILED`).
-        - Khi hoàn thành (`SUCCEEDED`): trả về Presigned GET URL tải các tệp kết quả.
-        - Tuân thủ **QC-17**: nếu `job_id` không tồn tại hoặc thuộc tenant khác, trả về cùng một mã lỗi `404 NOT_FOUND`.
-      operationId: getBatchJobStatusPlanned
-      deprecated: true
-      x-implementation-status: "UNAVAILABLE_PENDING_TASK_5_7"
-      parameters:
-        - name: job_id
-          in: path
-          required: true
-          description: Mã công việc dịch tệp (định dạng `job-YYYYMMDD-xxxxxxxxxxxx`)
-          schema:
-            type: string
-            example: "job-20261108-3fa85f645717"
-      responses:
-        '200':
-          description: Trả về trạng thái hoặc kết quả công việc (khi Task 5.7 hoàn tất).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BatchJobStatusResponse'
-              example:
-                request_id: "req-poll-01"
-                job_id: "job-20261108-3fa85f645717"
-                status: "SUCCEEDED"
-                progress: 100
-                results:
-                  - target_lang: "en"
-                    file_name: "gioi-thieu-homestay.en.docx"
-                    download_url: "https://translateme-dev-batch-files.s3.ap-southeast-1.amazonaws.com/batch/tenant-u4821/results/gioi-thieu-homestay.en.docx?X-Amz-Signature=..."
-                    warnings: []
-        '404':
-          description: Tuyến đường chưa khả dụng hoặc không tìm thấy job (QC-17).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-              example:
-                request_id: "req-404-job"
-                error:
-                  code: "NOT_FOUND"
-                  message: "Không tồn tại hoặc thuộc tenant khác."
-
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -620,8 +553,7 @@ components:
           properties:
             code:
               type: string
-              description: |
-                Mã lỗi kỹ thuật tập trung theo Bảng 2.10 (QC-2), kèm mã vận hành `TRANSLATE_THROTTLED` (HTTP 503) do `services/api/translate/realtime.ts` trả về khi dịch vụ Amazon Translate phía sau giới hạn tốc độ.
+              description: Mã lỗi kỹ thuật tập trung theo Bảng 2.10 (QC-2)
               enum:
                 - INVALID_REQUEST
                 - UNSUPPORTED_LANGUAGE
@@ -638,7 +570,6 @@ components:
                 - RATE_LIMITED
                 - REQUEST_QUOTA_EXCEEDED
                 - CHAR_QUOTA_EXCEEDED
-                - TRANSLATE_THROTTLED
                 - INTERNAL_ERROR
               example: "CHAR_QUOTA_EXCEEDED"
             message:
@@ -847,7 +778,7 @@ components:
               example: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
     # ---------------------------------------------------------
-    # Schemas cho Tạo Job & Tra Cứu Batch (services/api/batch/batchIngress.ts)
+    # Schemas cho Tạo Job Batch (/translate/batch)
     # ---------------------------------------------------------
     BatchCreateJobRequest:
       type: object
@@ -945,55 +876,3 @@ components:
           type: integer
           description: Tổng số ký tự ước tính cần dịch (`sourceCharacters * target_langs.length`)
           example: 15420
-
-    BatchJobStatusResponse:
-      type: object
-      required:
-        - request_id
-        - job_id
-        - status
-        - progress
-      properties:
-        request_id:
-          type: string
-          example: "req-poll-01"
-        job_id:
-          type: string
-          example: "job-20261108-3fa85f645717"
-        status:
-          type: string
-          enum:
-            - QUEUED
-            - RUNNING
-            - SUCCEEDED
-            - FAILED
-          example: "SUCCEEDED"
-        progress:
-          type: integer
-          minimum: 0
-          maximum: 100
-          example: 100
-        results:
-          type: array
-          items:
-            type: object
-            required:
-              - target_lang
-              - file_name
-              - download_url
-            properties:
-              target_lang:
-                type: string
-                example: "en"
-              file_name:
-                type: string
-                example: "gioi-thieu-homestay.en.docx"
-              download_url:
-                type: string
-                format: uri
-                example: "https://translateme-dev-batch-files.s3.ap-southeast-1.amazonaws.com/batch/tenant-u4821/results/gioi-thieu-homestay.en.docx?X-Amz-Signature=..."
-              warnings:
-                type: array
-                items:
-                  type: string
-                example: []
