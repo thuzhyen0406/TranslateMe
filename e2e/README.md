@@ -46,6 +46,8 @@ Các test `safeFetch` trong `libs/common/test/safeFetch.test.ts` dùng transport
 
 Để kiểm tra header của request S8 từ API đang chạy, TV4 có thể cung cấp `TM_SSRF_HEADER_REPORT_URL`. Endpoint này cần trả JSON dạng `{"header_names":["host","accept"]}` mô tả tên header mà fixture redirect nhận ở request S8 gần nhất; không trả giá trị header. Khi biến này được cấu hình, test xác nhận không có cookie/header xác thực; nếu thiếu, evidence ghi riêng `S8H` là `SKIP` thay vì coi tiêu chí đó đã đạt. CloudWatch không có log kết nối outbound theo từng request trong cấu hình hiện tại, nên test không tuyên bố rằng đã kiểm tra log AWS.
 
+Khi nghiệm thu SSRF, cần kiểm tra evidence `S8H` là `pass` và đính kèm bằng chứng log outbound từ môi trường triển khai nếu tiêu chí nghiệm thu yêu cầu. Nếu `S8H` là `skip` hoặc chưa có log AWS, báo cáo chỉ xác nhận những kiểm tra đã chạy; không đánh dấu các tiêu chí header/log là đạt.
+
 ## Cấu trúc
 
 - `lib/`: cấu hình, Cognito JWT, HTTP retry, API contract, so sánh lỗi và evidence.
