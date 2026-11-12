@@ -1,7 +1,10 @@
 {
+  "name": "translateme-root",
+  "private": true,
   "scripts": {
     "lint": "cfn-lint -i W3037 -- infra/modules/*.yaml",
-    "test:unit": "npm test --prefix libs/common && npm test --prefix services/api && npm test --prefix services/proxy"
+    "test:unit": "npm test --prefix libs/common && npm test --prefix services/api && npm test --prefix services/proxy",
+    "test:ssrf": "npm --prefix libs/common run test:ssrf"
   },
   "dependencies": {
     "cors": "^2.8.6",

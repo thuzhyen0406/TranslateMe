@@ -49,7 +49,7 @@
     "../../libs/common/htmlDom.ts",
     "../../libs/common/tenantAws.ts",
     "../../libs/common/usage/usage.ts",
-    "../../tests/unit/cache_invalidation.test.ts"
+    "../../tests/unit/invalidation_contract.test.ts"
   ],
   "exclude": ["dist", "node_modules"]
 }
