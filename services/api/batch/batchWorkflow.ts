@@ -30,12 +30,14 @@ export interface BatchManifest {
   targetLangs: string[];
 }
 export interface BatchTaskEvent {
-  mode: 'PARSE_AND_CHUNK' | 'TRANSLATE_LOT' | 'MERGE_AND_WRITE' | 'MARK_FAILED';
+  mode: 'PARSE_AND_CHUNK' | 'TRANSLATE_LOT' | 'MERGE_AND_WRITE' | 'MARK_FAILED' | 'SET_NOTIFICATION_STATUS';
   tenant_id: string;
   job_id: string;
   lot_key?: string;
   target_lang?: string;
   attempt?: number;
+  notification_status?: 'SUBMITTED' | 'FAILED';
+  notification_error?: { Error?: string; Cause?: string };
   error?: { Error?: string; Cause?: string };
 }
 export interface BatchWorkflowDeps {
@@ -297,6 +299,45 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
     return { job_id: event.job_id, tenant_id: ctx.tenantId, status: 'SUCCEEDED', send_email: job.sendEmail === true, notification_email: job.notificationEmail, result_files: Object.keys(resultFiles), links };
   }
 
+  async function setNotificationStatus(event: BatchTaskEvent) {
+    const ctx = ctxOf(event.tenant_id, event.job_id);
+    const job = await loadJob(ctx, event.job_id);
+    const notificationStatus = event.notification_status === 'FAILED' ? 'FAILED' : 'SUBMITTED';
+    const message = typeof event.notification_error?.Cause === 'string' && event.notification_error.Cause.trim()
+      ? event.notification_error.Cause.trim()
+      : typeof event.notification_error?.Error === 'string' && event.notification_error.Error.trim()
+        ? event.notification_error.Error.trim()
+        : notificationStatus === 'FAILED'
+          ? 'NOTIFICATION_FAILED'
+          : 'NOTIFICATION_SUBMITTED';
+    const warnings = Array.isArray(job.warnings) ? [...(job.warnings as JobWarning[])] : [];
+    if (notificationStatus === 'FAILED') {
+      const exists = warnings.some((warning) => warning.code === 'NOTIFICATION_FAILED');
+      if (!exists) warnings.push({ code: 'NOTIFICATION_FAILED', where: 'batch-notify', count: 1, message });
+    }
+    await deps.jobs.update(ctx, {
+      Key: jobKey(ctx, event.job_id),
+      UpdateExpression: 'SET #notificationStatus = :notificationStatus, #updatedAt = :at' + (notificationStatus === 'FAILED' ? ', #warnings = :warnings' : '') + (message && notificationStatus === 'FAILED' ? ', #notificationError = :notificationError' : ''),
+      ConditionExpression: '#status IN (:queued, :running, :succeeded, :failed)',
+      ExpressionAttributeNames: {
+        '#notificationStatus': 'notificationStatus',
+        '#updatedAt': 'updatedAt',
+        '#status': 'status',
+        ...(notificationStatus === 'FAILED' ? { '#warnings': 'warnings', '#notificationError': 'notificationError' } : {}),
+      },
+      ExpressionAttributeValues: {
+        ':notificationStatus': notificationStatus,
+        ':at': now().toISOString(),
+        ':queued': 'QUEUED',
+        ':running': 'RUNNING',
+        ':succeeded': 'SUCCEEDED',
+        ':failed': 'FAILED',
+        ...(notificationStatus === 'FAILED' ? { ':warnings': warnings, ':notificationError': message } : {}),
+      },
+    });
+    return { job_id: event.job_id, tenant_id: ctx.tenantId, status: job.status, notification_status: notificationStatus, ...(notificationStatus === 'FAILED' ? { notification_error: message } : {}) };
+  }
+
   async function markFailed(event: BatchTaskEvent) {
     const ctx = ctxOf(event.tenant_id, event.job_id);
     let job = await loadJob(ctx, event.job_id);
@@ -321,6 +362,7 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
       case 'PARSE_AND_CHUNK': return parseAndChunk(event);
       case 'TRANSLATE_LOT': return translateLot(event);
       case 'MERGE_AND_WRITE': return mergeAndWrite(event);
+      case 'SET_NOTIFICATION_STATUS': return setNotificationStatus(event);
       case 'MARK_FAILED': return markFailed(event);
     }
   };

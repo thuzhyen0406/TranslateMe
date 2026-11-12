@@ -55,6 +55,8 @@ describe('batch workflow', () => {
         if (values[':warnings'] !== undefined) item.warnings = values[':warnings'];
         if (values[':reason'] !== undefined) item.reason = values[':reason'];
         if (values[':resultFiles'] !== undefined) item.resultFiles = values[':resultFiles'];
+        if (values[':notificationStatus'] !== undefined) item.notificationStatus = values[':notificationStatus'];
+        if (values[':notificationError'] !== undefined) item.notificationError = values[':notificationError'];
         if (values[':at'] !== undefined) item.updatedAt = values[':at'];
         if (values[':finishedAt'] !== undefined) item.finishedAt = values[':finishedAt'];
         if (lotId && values[':true'] === true) item.lots[lotId] = true;
@@ -124,5 +126,57 @@ describe('batch workflow', () => {
     assert.equal(failed.reason, 'BatchTranslationIncomplete');
     assert.equal(item.failed, 2);
     assert.equal(item.status, 'FAILED');
+  });
+
+  it('records notification failures without overwriting the job status', async () => {
+    const key = jobKey(ctx, 'job-20261108-abcdef012345');
+    const item: Record<string, any> = {
+      ...key, entityType: 'JOB', tenantId: ctx.tenantId, jobId: 'job-20261108-abcdef012345', type: 'FILE', status: 'SUCCEEDED',
+      targetLangs: ['fr'], total: 1, done: 1, failed: 0, warnings: [], lots: {},
+      fileKey: 'batch/t_batch/input/source.txt', fileName: 'source.txt', format: 'txt', sourceLang: 'en',
+      usageSource: { kind: 'API', keyId: 'key-test' }, sendEmail: true, notificationEmail: 'owner@example.com',
+    };
+    const db: JobDb = {
+      async get(_ctx, lookup) { return lookup.PK === key.PK && lookup.SK === key.SK ? item : null; },
+      async put(_ctx, value) { Object.assign(item, value); },
+      async update(_ctx, update) {
+        const values = update.ExpressionAttributeValues ?? {};
+        if (values[':notificationStatus'] !== undefined) item.notificationStatus = values[':notificationStatus'];
+        if (values[':notificationError'] !== undefined) item.notificationError = values[':notificationError'];
+        if (values[':warnings'] !== undefined) item.warnings = values[':warnings'];
+        if (values[':at'] !== undefined) item.updatedAt = values[':at'];
+      },
+    };
+    const deps: BatchWorkflowDeps = {
+      jobs: db,
+      objects: {
+        async get() { return null; },
+        async put() {},
+        async signGet() { return 'https://download.example'; },
+      },
+      usage: {
+        async reserve() { throw new Error('unused'); },
+        async settle() {},
+        async refund() {},
+      } as any,
+      tm: {} as any,
+      getGlossaryState: async () => ({ version: 0, terminologyName: null, terms: [] }),
+      translate: async () => ({ translated: [], pending: [], failed: [], stats: { uniqueSentences: 0, calls: 0, charsSent: 0, splits: 0, plainFallbacks: 0 } }),
+      detectLanguage: async () => 'en',
+      now: () => new Date('2026-11-08T00:00:00.000Z'),
+    };
+    const handler = createBatchWorkflowHandler(deps);
+    const result = await handler({
+      mode: 'SET_NOTIFICATION_STATUS',
+      tenant_id: ctx.tenantId,
+      job_id: 'job-20261108-abcdef012345',
+      notification_status: 'FAILED',
+      notification_error: { Error: 'SubscriptionFailed', Cause: 'EMAIL_NOT_CONFIRMED' },
+    });
+    assert.equal(result.notification_status, 'FAILED');
+    assert.equal(item.status, 'SUCCEEDED');
+    assert.equal(item.notificationStatus, 'FAILED');
+    assert.equal(item.notificationError, 'EMAIL_NOT_CONFIRMED');
+    assert.equal(item.warnings.at(-1).code, 'NOTIFICATION_FAILED');
   });
 });

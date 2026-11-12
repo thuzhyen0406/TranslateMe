@@ -56,6 +56,8 @@ export interface JobSummary {
   target_langs: string[];
   warnings: JobWarning[];
   reason?: string;
+  notification_status?: 'PENDING' | 'SUBMITTED' | 'FAILED';
+  notification_error?: string;
   created_at: string;
   updated_at: string;
 }
@@ -76,6 +78,8 @@ export function toJobSummary(item: Record<string, unknown>): JobSummary {
   const failed = num(item.failed);
   const status = item.status as JobStatus;
   const progress = status === 'SUCCEEDED' ? 100 : total > 0 ? Math.min(100, Math.floor(((done + failed) * 100) / total)) : 0;
+  const notificationStatus = typeof item.notificationStatus === 'string' ? item.notificationStatus as JobSummary['notification_status'] : undefined;
+  const notificationError = typeof item.notificationError === 'string' ? item.notificationError : undefined;
   return {
     job_id: String(item.jobId ?? String(item.SK ?? '').slice(4)),
     type: item.type === 'FILE' ? 'FILE' : 'PREWARM',
@@ -88,6 +92,8 @@ export function toJobSummary(item: Record<string, unknown>): JobSummary {
     target_langs: Array.isArray(item.targetLangs) ? (item.targetLangs as string[]) : [],
     warnings: Array.isArray(item.warnings) ? (item.warnings as JobWarning[]) : [],
     ...(typeof item.reason === 'string' ? { reason: item.reason } : {}),
+    ...(notificationStatus ? { notification_status: notificationStatus } : {}),
+    ...(notificationError ? { notification_error: notificationError } : {}),
     created_at: String(item.createdAt ?? ''),
     updated_at: String(item.updatedAt ?? item.createdAt ?? ''),
   };

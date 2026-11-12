@@ -304,19 +304,19 @@ Resources:
               "NotifyResult": {
                 "Type": "Choice",
                 "Choices": [{ "Variable": "$.send_email", "BooleanEquals": true, "Next": "CreateTenantResultTopic" }],
-                "Default": "FinishWorkflow"
+                "Default": "RecordNotificationSuccess"
               },
               "CreateTenantResultTopic": {
                 "Type": "Task", "Resource": "arn:${AWS::Partition}:states:::aws-sdk:sns:createTopic",
                 "Parameters": { "Name.$": "States.Format('translateme-batch-${StageName}-{}', $.tenant_id)" },
                 "ResultPath": "$.sns_topic", "Next": "SubscribeTenantEmail",
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "FinishWorkflow" }]
+                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "RecordNotificationFailure" }]
               },
               "SubscribeTenantEmail": {
                 "Type": "Task", "Resource": "arn:${AWS::Partition}:states:::aws-sdk:sns:subscribe",
                 "Parameters": { "TopicArn.$": "$.sns_topic.TopicArn", "Protocol": "email", "Endpoint.$": "$.notification_email", "ReturnSubscriptionArn": true },
                 "ResultPath": "$.sns_subscription", "Next": "PublishResultEmail",
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "FinishWorkflow" }]
+                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "RecordNotificationFailure" }]
               },
               "PublishResultEmail": {
                 "Type": "Task", "Resource": "arn:${AWS::Partition}:states:::aws-sdk:sns:publish",
@@ -326,8 +326,29 @@ Resources:
                   "Message.$": "States.JsonToString($)",
                   "MessageAttributes": { "tenant_id": { "DataType": "String", "StringValue.$": "$.tenant_id" } }
                 },
-                "ResultPath": null, "Next": "FinishWorkflow",
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "FinishWorkflow" }]
+                "ResultPath": null, "Next": "RecordNotificationSuccess",
+                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "RecordNotificationFailure" }]
+              },
+              "RecordNotificationFailure": {
+                "Type": "Task", "Resource": "${BatchWorkflowArn}",
+                "Parameters": {
+                  "mode": "SET_NOTIFICATION_STATUS",
+                  "job_id.$": "$.job_id",
+                  "tenant_id.$": "$.tenant_id",
+                  "notification_status": "FAILED",
+                  "notification_error.$": "$.notification_error"
+                },
+                "Next": "FinishWorkflow"
+              },
+              "RecordNotificationSuccess": {
+                "Type": "Task", "Resource": "${BatchWorkflowArn}",
+                "Parameters": {
+                  "mode": "SET_NOTIFICATION_STATUS",
+                  "job_id.$": "$.job_id",
+                  "tenant_id.$": "$.tenant_id",
+                  "notification_status": "SUBMITTED"
+                },
+                "Next": "FinishWorkflow"
               },
               "FinishWorkflow": {
                 "Type": "Choice",
