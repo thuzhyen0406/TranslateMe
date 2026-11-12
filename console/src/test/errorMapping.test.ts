@@ -428,4 +428,114 @@ describe('Task 5.8 – Ánh xạ mã lỗi chuẩn Bảng 2.10 & nguyên tắc Q
       );
     }
   });
+
+  it('lọc và phân loại chuỗi lỗi thô (TENANT#, stack trace, tiếng Anh, lỗi mạng) nhất quán qua resolveConsoleError & errorToUiPayload', () => {
+    const leakTenantEn = 'AccessDenied on TENANT#t_01#HOST#secret.example.com';
+    const leakTenantVi = 'Không thể cập nhật bản ghi TENANT#t_01#HASH#abc';
+    const multiLineStack =
+      'TypeError: Cannot read properties of undefined\n    at GlossaryPage (GlossaryPage.tsx:112:15)';
+    const singleLineStack = 'Error: unexpected null at saveTerm (glossaryApi.ts:88:12)';
+    const rawEnglish = 'Database connection timed out';
+    const cloudFrontNoise = 'CloudFront ThrottlingException: Rate exceeded';
+    const safeViValidation = 'Vui lòng nhập từ nguồn (không được để trống).';
+
+    for (const bad of [
+      leakTenantEn,
+      leakTenantVi,
+      multiLineStack,
+      singleLineStack,
+      rawEnglish,
+      cloudFrontNoise,
+    ]) {
+      assert.equal(sanitizeClientSafeMessage(bad), null);
+
+      const resolvedRead = resolveConsoleError(bad, { operation: 'read' });
+      assert.equal(resolvedRead.code, 'INTERNAL_ERROR');
+      assert.equal(resolvedRead.message.includes('TENANT#'), false);
+      assert.equal(resolvedRead.message.includes('GlossaryPage.tsx'), false);
+      assert.equal(resolvedRead.message.includes('glossaryApi.ts'), false);
+      assert.equal(resolvedRead.message.includes('Database'), false);
+      assert.equal(resolvedRead.message.includes('ThrottlingException'), false);
+
+      const resolvedWrite = resolveConsoleError(bad, { operation: 'write' });
+      assert.equal(resolvedWrite.code, 'INTERNAL_ERROR');
+      assert.equal(resolvedWrite.retryable, false);
+      assert.equal(resolvedWrite.requiresStatusCheck, true);
+
+      for (const fmt of [
+        undefined,
+        glossaryErrorMessage,
+        websiteErrorMessage,
+        reviewErrorMessage,
+        mapCognitoErrorToVietnamese,
+      ]) {
+        const uiRead = errorToUiPayload(bad, { operation: 'read', formatMessage: fmt });
+        assert.ok(uiRead);
+        assert.equal(uiRead.code, 'INTERNAL_ERROR');
+        assert.equal(uiRead.message.includes('TENANT#'), false);
+        assert.equal(uiRead.message.includes('GlossaryPage'), false);
+        assert.equal(uiRead.message.includes('Database'), false);
+
+        const uiWrite = errorToUiPayload(bad, { operation: 'write', formatMessage: fmt });
+        assert.ok(uiWrite);
+        assert.equal(uiWrite.code, 'INTERNAL_ERROR');
+        assert.equal(uiWrite.retryable, false);
+        assert.equal(uiWrite.requiresStatusCheck, true);
+      }
+
+      // Ngay cả khi caller truyền custom formatMessage trả thẳng chuỗi rò rỉ, errorToUiPayload vẫn lọc lại
+      const uiLeakingFmt = errorToUiPayload(bad, {
+        operation: 'write',
+        formatMessage: (e) => (typeof e === 'string' ? e : 'Lỗi'),
+      });
+      assert.ok(uiLeakingFmt);
+      assert.equal(uiLeakingFmt.code, 'INTERNAL_ERROR');
+      assert.equal(uiLeakingFmt.message.includes('TENANT#'), false);
+      assert.equal(uiLeakingFmt.message.includes('GlossaryPage'), false);
+      assert.equal(uiLeakingFmt.message.includes('Database'), false);
+      assert.equal(uiLeakingFmt.retryable, false);
+      assert.equal(uiLeakingFmt.requiresStatusCheck, true);
+    }
+
+    // Chuỗi lỗi mạng được phân loại sang NETWORK_ERROR để bật retry (read) hoặc yêu cầu kiểm tra trạng thái (write)
+    for (const netStr of [
+      'Failed to fetch',
+      'NetworkError when attempting to fetch resource',
+      'load failed',
+    ]) {
+      for (const fmt of [
+        undefined,
+        glossaryErrorMessage,
+        websiteErrorMessage,
+        reviewErrorMessage,
+        mapCognitoErrorToVietnamese,
+      ]) {
+        const netRead = errorToUiPayload(netStr, { operation: 'read', formatMessage: fmt });
+        assert.ok(netRead);
+        assert.equal(netRead.code, 'NETWORK_ERROR');
+        assert.equal(netRead.retryable, true);
+        assert.equal(Boolean(netRead.requiresStatusCheck), false);
+        assert.equal(netRead.message.toLowerCase().includes('failed to fetch'), false);
+
+        const netWrite = errorToUiPayload(netStr, { operation: 'write', formatMessage: fmt });
+        assert.ok(netWrite);
+        assert.equal(netWrite.code, 'NETWORK_ERROR');
+        assert.equal(netWrite.retryable, false);
+        assert.equal(netWrite.requiresStatusCheck, true);
+      }
+    }
+
+    // Chuỗi validation tiếng Việt an toàn do client tự sinh vẫn được giữ nguyên qua các formatter miền
+    assert.equal(sanitizeClientSafeMessage(safeViValidation), safeViValidation);
+    for (const fmt of [undefined, glossaryErrorMessage, websiteErrorMessage, reviewErrorMessage]) {
+      const viPayload = errorToUiPayload(safeViValidation, {
+        operation: 'write',
+        formatMessage: fmt,
+      });
+      assert.ok(viPayload);
+      assert.equal(viPayload.message, safeViValidation);
+      assert.equal(viPayload.retryable, false);
+      assert.equal(Boolean(viPayload.requiresStatusCheck), false);
+    }
+  });
 });

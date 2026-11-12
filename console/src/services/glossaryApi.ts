@@ -15,7 +15,6 @@
  */
 import {
   extractApiErrorPayload,
-  mapErrorCodeToVietnamese,
   resolveConsoleError,
   type ResolveConsoleErrorOptions,
   type KnownConsoleErrorCode,
@@ -655,9 +654,6 @@ const GLOSSARY_ERROR_OVERRIDES: Partial<Record<KnownConsoleErrorCode, string>> =
 });
 
 export function glossaryErrorMessage(err: unknown, opts: ResolveConsoleErrorOptions = {}): string {
-  if (!(err instanceof GlossaryApiError)) {
-    return mapErrorCodeToVietnamese('INTERNAL_ERROR', opts);
-  }
   return resolveConsoleError(err, {
     ...opts,
     scope: 'glossary',

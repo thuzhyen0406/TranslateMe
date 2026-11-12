@@ -7,7 +7,7 @@ import {
 } from '../services/errorMapping.js';
 
 export interface ErrorAlertProps {
-  /** Đối tượng lỗi (WebsiteApiError, GlossaryApiError, ReviewApiError, ConsoleAuthError) hoặc chuỗi tiếng Việt */
+  /** Đối tượng lỗi (WebsiteApiError, GlossaryApiError, ReviewApiError, ConsoleAuthError) hoặc chuỗi lỗi (đều qua lọc QC-2) */
   error: unknown;
   /** Tiêu đề ngắn gọn (tùy chọn) */
   title?: string;

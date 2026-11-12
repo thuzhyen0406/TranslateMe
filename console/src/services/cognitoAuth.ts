@@ -17,7 +17,9 @@
 import {
   extractApiErrorPayload,
   isKnownConsoleErrorCode,
+  isNetworkErrorMessage,
   isSafeToRetryOperation,
+  parseKnownUpperErrorCode,
   resolveConsoleError,
   sanitizeClientSafeMessage,
   type ResolveConsoleErrorOptions,
@@ -218,7 +220,9 @@ export function mapCognitoErrorToVietnamese(
             (err as Record<string, unknown>).name,
         )
       : '';
-  const code = rawCode.includes('#') ? rawCode.split('#').pop()! : rawCode;
+  const code = rawCode.includes('#')
+    ? rawCode.split('#').pop()!
+    : rawCode || (parseKnownUpperErrorCode(err) ?? '');
   const rawMessage = err instanceof Error ? err.message : String(err ?? '');
 
   if (
@@ -263,7 +267,7 @@ export function mapCognitoErrorToVietnamese(
           },
         }).message;
       }
-      if (/^(failed to fetch|fetch failed|network\s?error|load failed)/i.test(rawMessage.trim())) {
+      if (isNetworkErrorMessage(rawMessage)) {
         return resolveConsoleError(err, { ...opts, scope: opts.scope ?? 'auth' }).message;
       }
       if (err && typeof err === 'object' && 'httpStatus' in err) {

@@ -16,7 +16,6 @@
 import {
   VERIFICATION_FAILURE_MESSAGES,
   extractApiErrorPayload,
-  mapErrorCodeToVietnamese,
   resolveConsoleError,
   type ResolveConsoleErrorOptions,
   type KnownConsoleErrorCode,
@@ -154,7 +153,6 @@ export const VERIFICATION_REASON_LABEL: Readonly<Record<VerificationFailureReaso
 
 /** Thông báo tiếng Việt cho lỗi của nhóm /console/hosts (Bảng 2.10), kể cả mã của siteManager hiện tại. */
 export function websiteErrorMessage(err: unknown, opts: ResolveConsoleErrorOptions = {}): string {
-  if (!(err instanceof WebsiteApiError)) return mapErrorCodeToVietnamese('INTERNAL_ERROR', opts);
   return resolveConsoleError(err, {
     ...opts,
     scope: 'website',

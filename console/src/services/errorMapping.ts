@@ -248,6 +248,13 @@ export function isKnownConsoleErrorCode(code: unknown): code is KnownConsoleErro
   return typeof code === 'string' && KNOWN_CODE_SET.has(code.trim().toUpperCase());
 }
 
+/** Nhận diện chuỗi mã lỗi viết HOA đúng chuẩn từ backend/SDK (tránh nhầm câu mô tả như 'Forbidden'). */
+export function parseKnownUpperErrorCode(raw: unknown): KnownConsoleErrorCode | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  return /^[A-Z][A-Z0-9_]+$/.test(trimmed) && isKnownConsoleErrorCode(trimmed) ? trimmed : null;
+}
+
 /**
  * Ánh xạ HTTP status code sang mã lỗi chuẩn Bảng 2.10 khi máy chủ không trả `error.code`.
  */
@@ -273,21 +280,31 @@ export function formatPlaceholderMismatchMessage(
 }
 
 const INTERNAL_LEAK_RE =
-  /(TENANT#[A-Za-z0-9_-]+|HASH#[0-9a-f]+|arn:aws:|ConditionalCheckFailed|DynamoDB|ResourceNotFoundException|\n\s+at\s+)/i;
+  /(TENANT#[A-Za-z0-9_-]+|HASH#[0-9a-f]+|arn:aws:|ConditionalCheckFailed|DynamoDB|[A-Za-z]+Exception\b|\n\s*at\s+|\bat\s+(?:[\w$.<>[\]]+\s*\([^)]*:\d+:\d+\)|[^\s()]+:\d+:\d+)|\b(?:Type|Reference|Syntax|Range|URI|Eval|Aggregate)?Error:\s)/i;
 
 const GENERIC_ENGLISH_NOISE_RE =
-  /^(bad request|unauthorized|forbidden|not found|conflict|too many requests|internal server error|service unavailable|failed to fetch|fetch failed|network\s?error|load failed|request timed out|error|failed|unknown error)$/i;
+  /^(bad request|unauthorized|forbidden|not found|conflict|too many requests|internal server error|service unavailable|bad gateway|gateway timeout|something went wrong|something crashed|unexpected error|failed to fetch|fetch failed|network\s?error|load failed|request timed out|error|failed|unknown error)$/i;
+
+const NETWORK_ERROR_MESSAGE_RE =
+  /^(?:(?:type|network)?error:\s*)?(?:failed to fetch|fetch failed|network\s?error(?:\b.*)?|load failed|request timed out|network request failed|err_network|econnreset|econnrefused|etimedout|enotfound)$/i;
+
+const VIETNAMESE_CHAR_RE =
+  /[ÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚÝàáâãèéêìíòóôõùúýĂăĐđĨĩŨũƠơƯưẠ-ỹ]/u;
+
+export function isNetworkErrorMessage(raw?: string | null): boolean {
+  return typeof raw === 'string' && NETWORK_ERROR_MESSAGE_RE.test(raw.trim());
+}
 
 /**
- * Lọc thông điệp thô để ngăn rò rỉ stack trace, khóa nội bộ DynamoDB hoặc dữ liệu tenant khác (QC-2).
+ * Lọc thông điệp thô để ngăn rò rỉ stack trace, khóa nội bộ DynamoDB, lỗi tiếng Anh thô hoặc dữ liệu tenant khác (QC-2).
  */
 export function sanitizeClientSafeMessage(raw?: string | null): string | null {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
-  if (!trimmed) return null;
-  if (trimmed.length <= 2) return null;
+  if (!trimmed || trimmed.length <= 2) return null;
   if (INTERNAL_LEAK_RE.test(trimmed)) return null;
   if (GENERIC_ENGLISH_NOISE_RE.test(trimmed)) return null;
+  if (!VIETNAMESE_CHAR_RE.test(trimmed.normalize('NFC'))) return null;
   return trimmed.slice(0, 280);
 }
 
@@ -429,9 +446,33 @@ export function resolveConsoleError(
   const safeRetryOp = isSafeToRetryOperation(opts.operation);
 
   if (typeof err === 'string') {
-    const clean =
-      sanitizeClientSafeMessage(err) ?? mapErrorCodeToVietnamese('INTERNAL_ERROR', opts);
-    return { message: clean, retryable: false };
+    const trimmed = err.trim();
+    const knownCode = isNetworkErrorMessage(trimmed)
+      ? 'NETWORK_ERROR'
+      : parseKnownUpperErrorCode(trimmed);
+    if (knownCode) {
+      const spec = ERROR_CODE_SPECS[knownCode];
+      const isUncertain = knownCode === 'INTERNAL_ERROR' || knownCode === 'NETWORK_ERROR';
+      return {
+        code: knownCode,
+        message: mapErrorCodeToVietnamese(knownCode, opts),
+        ...(spec.httpStatus > 0 ? { httpStatus: spec.httpStatus } : {}),
+        retryable: isUncertain ? safeRetryOp : spec.retryable,
+        ...(isUncertain && !safeRetryOp ? { requiresStatusCheck: true } : {}),
+      };
+    }
+
+    const clean = sanitizeClientSafeMessage(trimmed);
+    if (clean) {
+      return { message: clean, retryable: false };
+    }
+
+    return {
+      code: 'INTERNAL_ERROR',
+      message: mapErrorCodeToVietnamese('INTERNAL_ERROR', opts),
+      retryable: safeRetryOp,
+      ...(safeRetryOp ? {} : { requiresStatusCheck: true }),
+    };
   }
 
   const obj = err && typeof err === 'object' ? (err as Record<string, unknown>) : null;
@@ -482,9 +523,7 @@ export function resolveConsoleError(
           : undefined;
 
   const isFetchFailure =
-    IGNORED_RUNTIME_ERROR_NAMES.has(rawCode) &&
-    typeof rawServerMessage === 'string' &&
-    /^(failed to fetch|fetch failed|network\s?error|load failed)/i.test(rawServerMessage.trim());
+    IGNORED_RUNTIME_ERROR_NAMES.has(rawCode) && isNetworkErrorMessage(rawServerMessage);
 
   const effectiveCode = isKnownConsoleErrorCode(upperCode)
     ? upperCode
@@ -541,17 +580,16 @@ export function errorToUiPayload(
   } = {},
 ): ConsoleUiError | null {
   if (err === null || err === undefined || err === '') return null;
-  if (typeof err === 'string') {
-    const trimmed = err.trim();
-    if (!trimmed) return null;
-    return { message: trimmed, retryable: false };
-  }
+  if (typeof err === 'string' && !err.trim()) return null;
 
   const resolved = resolveConsoleError(err, opts);
   if (opts.formatMessage) {
     const customMsg = opts.formatMessage(err, opts)?.trim();
     if (customMsg) {
-      resolved.message = customMsg;
+      const safeCustomMsg = sanitizeClientSafeMessage(customMsg);
+      if (safeCustomMsg) {
+        resolved.message = safeCustomMsg;
+      }
     }
   }
   return resolved;

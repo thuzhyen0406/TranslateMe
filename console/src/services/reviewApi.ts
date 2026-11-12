@@ -11,7 +11,6 @@
 import {
   extractApiErrorPayload,
   formatPlaceholderMismatchMessage,
-  mapErrorCodeToVietnamese,
   resolveConsoleError,
   type ResolveConsoleErrorOptions,
   type KnownConsoleErrorCode,
@@ -179,9 +178,6 @@ const REVIEW_ERROR_OVERRIDES: Partial<Record<KnownConsoleErrorCode, string>> = O
 
 /** Thông báo tiếng Việt cho các mã lỗi của nhóm F5 (Bảng 2.10) */
 export function reviewErrorMessage(err: unknown, opts: ResolveConsoleErrorOptions = {}): string {
-  if (!(err instanceof ReviewApiError)) {
-    return mapErrorCodeToVietnamese('INTERNAL_ERROR', opts);
-  }
   return resolveConsoleError(err, {
     ...opts,
     scope: 'review',

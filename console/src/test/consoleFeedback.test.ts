@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ErrorAlert } from '../components/ConsoleFeedback.js';
+import { glossaryErrorMessage } from '../services/glossaryApi.js';
 
 describe('ConsoleFeedback – ErrorAlert retry & status check button visibility', () => {
   it('không hiện nút "Thử lại" cho lỗi không retryable kể cả khi màn hình truyền onRetry', () => {
@@ -88,5 +89,65 @@ describe('ConsoleFeedback – ErrorAlert retry & status check button visibility'
     assert.equal(html.includes('>Thử lại</button>'), false);
     assert.equal(html.includes('>Kiểm tra trạng thái</button>'), true);
     assert.equal(html.includes('kiểm tra lại trạng thái trước khi gửi lại'), true);
+  });
+
+  it('lọc chuỗi lỗi chứa TENANT#/stack trace và giữ thông báo validation tiếng Việt an toàn', () => {
+    const tenantLeakHtml = renderToStaticMarkup(
+      React.createElement(ErrorAlert, {
+        error: 'DynamoDB error on TENANT#t_99#HOST#secret.vn',
+        operation: 'read',
+        formatMessage: glossaryErrorMessage,
+        onRetry: () => {},
+      }),
+    );
+    assert.equal(tenantLeakHtml.includes('TENANT#'), false);
+    assert.equal(tenantLeakHtml.includes('t_99'), false);
+    assert.equal(tenantLeakHtml.includes('secret.vn'), false);
+
+    const stackHtml = renderToStaticMarkup(
+      React.createElement(ErrorAlert, {
+        error: 'TypeError: Cannot read properties of null\n    at GlossaryPage (GlossaryPage.tsx:55:9)',
+        operation: 'write',
+        onRetry: () => {},
+        onCheckStatus: () => {},
+      }),
+    );
+    assert.equal(stackHtml.includes('TypeError'), false);
+    assert.equal(stackHtml.includes('GlossaryPage.tsx'), false);
+    assert.equal(stackHtml.includes('>Thử lại</button>'), false);
+    assert.equal(stackHtml.includes('>Kiểm tra trạng thái</button>'), true);
+
+    const netReadHtml = renderToStaticMarkup(
+      React.createElement(ErrorAlert, {
+        error: 'Failed to fetch',
+        operation: 'read',
+        onRetry: () => {},
+      }),
+    );
+    assert.equal(netReadHtml.includes('Failed to fetch'), false);
+    assert.equal(netReadHtml.includes('>Thử lại</button>'), true);
+
+    const netWriteHtml = renderToStaticMarkup(
+      React.createElement(ErrorAlert, {
+        error: 'Failed to fetch',
+        operation: 'write',
+        onRetry: () => {},
+        onCheckStatus: () => {},
+      }),
+    );
+    assert.equal(netWriteHtml.includes('Failed to fetch'), false);
+    assert.equal(netWriteHtml.includes('>Thử lại</button>'), false);
+    assert.equal(netWriteHtml.includes('>Kiểm tra trạng thái</button>'), true);
+
+    const safeViHtml = renderToStaticMarkup(
+      React.createElement(ErrorAlert, {
+        error: 'Vui lòng nhập từ nguồn (không được để trống).',
+        operation: 'write',
+        formatMessage: glossaryErrorMessage,
+        onRetry: () => {},
+      }),
+    );
+    assert.equal(safeViHtml.includes('Vui lòng nhập từ nguồn (không được để trống).'), true);
+    assert.equal(safeViHtml.includes('>Thử lại</button>'), false);
   });
 });
