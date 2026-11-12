@@ -1,0 +1,22 @@
+{
+  "name": "translateme-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hạ tầng và bộ kiểm thử E2E tuần 5 (TV1)",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test:isolation": "node --require ts-node/register/transpile-only --test tests/isolation.test.ts",
+    "test:limits": "node --require ts-node/register/transpile-only --test tests/limits.test.ts",
+    "test:ssrf": "node --require ts-node/register/transpile-only --test tests/ssrf.test.ts",
+    "test:helpers": "node --require ts-node/register/transpile-only --test tests/helpers.test.ts",
+    "test:gate": "npm run typecheck && npm run test:helpers && npm run test:isolation && npm run test:ssrf",
+    "test:all": "node --require ts-node/register/transpile-only --test --test-concurrency=1 tests/helpers.test.ts tests/isolation.test.ts tests/ssrf.test.ts tests/limits.test.ts",
+    "selftest": "ts-node --transpile-only scripts/selftest.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.0"
+  }
+}
