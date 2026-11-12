@@ -38,9 +38,13 @@ npm run demo:seed -- all --dry-run
 
 Preflight chỉ gọi API AWS đọc trạng thái; bước kiểm tra Translate dùng `list-terminologies`, không gửi yêu cầu dịch tính phí. Deploy mặc định cần bảy stack entry-point `data.yaml`, `identity.yaml`, `api.yaml`, `edge.yaml`, `workflow.yaml`, `console.yaml`, `ops.yaml` trong `TM_TEMPLATE_DIR`. Có thể chỉ định từng file qua `TM_TEMPLATE_DATA`, `TM_TEMPLATE_IDENTITY`, v.v. Script kiểm tra đủ file trước khi bắt đầu deploy để tránh deploy được vài stack rồi mới gặp file thiếu.
 
+`demo:deploy` chỉ nhận stage `dev` hoặc `demo`, bắt buộc `TM_ACCOUNT` là account ID 12 chữ số, rồi gọi `sts get-caller-identity` và dừng nếu credentials hiện hành không khớp. Kiểm tra này chạy ngay trong lệnh deploy, kể cả khi người chạy bỏ qua preflight; `--dry-run` cũng cần credentials để xác nhận đúng account.
+
 Repo hiện có `infra/modules/{data,iam,lambdas,api-gateway}.yaml` và một `infra/template.yaml`; các file này chưa phải bảy stack entry-point độc lập, và `infra/template.yaml` là template dev riêng. Vì vậy cần cung cấp/ghép các stack templates trước khi deploy thật. `TM_PARAMS_<STACK>` dùng để truyền parameter overrides theo phụ thuộc giữa stack.
 
-Seed tenant yêu cầu `TM_DEMO_ORIGIN_A/B/C` trỏ tới ba hostname khác nhau, có thể truy cập và xác minh bằng META. API tự sinh slug từ hostname. Script lấy `tenant_id` từ ID token Cognito, lưu state trước các thao tác tạo tài nguyên để hỗ trợ chạy lại sau gián đoạn, và tải batch file lên bằng đúng `Content-Type` do API yêu cầu. Seed Platform Config vẫn cần route `/platform/config` được triển khai trong API.
+Seed tenant yêu cầu `TM_DEMO_ORIGIN_A/B/C` trỏ tới ba hostname khác nhau, có thể truy cập và xác minh bằng META. API tự sinh slug từ hostname. Script lấy `tenant_id` từ ID token Cognito, lưu state trước các thao tác tạo tài nguyên để hỗ trợ chạy lại sau gián đoạn, và tải batch file lên bằng đúng `Content-Type` do API yêu cầu. Nếu xác minh website lỗi hoặc không trả trạng thái `ACTIVE`, seed dừng ngay và hướng dẫn kiểm tra origin/META; state ghi `websiteStatus` để lần chạy sau không nhầm dữ liệu một phần là tenant sẵn sàng. Sau khi sửa origin hoặc cấu hình META, chạy lại `npm run demo:seed -- tenants`. Seed Platform Config vẫn cần route `/platform/config` được triển khai trong API.
+
+Các stack entry-point vẫn chưa có trong `main` hoặc PR 42: `infra/modules/*.yaml` và `infra/template.yaml` là module/template dev, không thay thế bảy entry-point độc lập. Vì vậy phần deploy hiện là script có kiểm tra an toàn và đang chờ PR cung cấp templates; không thể coi repo hiện tại đã triển khai được bảy stack từ đầu.
 
 ## Hợp đồng khớp project hiện tại
 

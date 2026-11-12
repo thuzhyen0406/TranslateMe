@@ -57,7 +57,10 @@ async function seedPlatform(st: State): Promise<void> {
 }
 
 async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
-  if (st.tenants[label]?.apiKey && !force) { console.log(`Tenant ${label}: đã có, bỏ qua (dùng --force để làm lại)`); return; }
+  if (st.tenants[label]?.apiKey && st.tenants[label]?.websiteStatus === 'ACTIVE' && !force) {
+    console.log(`Tenant ${label}: đã có và website ACTIVE, bỏ qua (dùng --force để làm lại)`);
+    return;
+  }
   const c = cfg();
   const pool = need('TM_CONSOLE_USER_POOL_ID');
   const existing = st.tenants[label];
@@ -107,12 +110,21 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
     }
   }
   t.slug = slug;
+  t.websiteStatus = priorHost?.status === 'ACTIVE' ? 'ACTIVE' : 'PENDING';
   saveState(st);
   if (priorHost?.status !== 'ACTIVE') {
     const ver = await call('POST', R.hostVerify(slug), { token: tok, body: { method: 'META' } });
-    if (ver.status < 200 || ver.status >= 300) {
-      console.warn(`  ! Website ${slug} chưa xác minh được (${ver.status}). Test khóa tenant cần website ACTIVE; kiểm tra origin và mã META xác minh.`);
+    const verifiedStatus = ver.body?.host?.status ?? ver.body?.status;
+    if (ver.status < 200 || ver.status >= 300 || verifiedStatus !== 'ACTIVE') {
+      throw new Error(
+        `Tenant ${label}: website ${slug} chưa ACTIVE sau xác minh ` +
+        `(HTTP ${ver.status}, status=${verifiedStatus ?? 'không có'}). Seed dừng tại đây; ` +
+        `kiểm tra TM_DEMO_ORIGIN_${label}, cấu hình META và hoàn tất xác minh website, ` +
+        `sau đó chạy lại "npm run demo:seed -- tenants". State hiện tại chưa đủ điều kiện chạy bài test khóa tenant.`,
+      );
     }
+    t.websiteStatus = 'ACTIVE';
+    saveState(st);
   }
 
   if (!t.apiKey || force) {
@@ -161,19 +173,20 @@ function seedTinyPlan(st: State): void {
       '--api-stages', `apiId=${apiId},stage=${apiStage}`, ...region]);
     planId = r.id ?? 'DRY-RUN';
   }
+  const selectedPlanId = planId ?? 'DRY-RUN';
   const keyId = c?.tinyKeyId ?? 'DRY-RUN-KEY';
-  if (!dry && st.tinyPlanId && st.tinyPlanId !== planId) {
+  if (!dry && st.tinyPlanId && st.tinyPlanId !== selectedPlanId) {
     aws(['apigateway', 'delete-usage-plan-key', '--usage-plan-id', st.tinyPlanId, '--key-id', keyId, ...region], { allowFail: true });
   }
   // Một key chỉ ở một usage plan trên cùng một stage: gỡ khỏi plan Basic trước khi thêm vào plan nhỏ
   aws(['apigateway', 'delete-usage-plan-key', '--usage-plan-id', need('TM_PLAN_BASIC'), '--key-id', keyId, ...region], { allowFail: true });
-  const attached = dry ? undefined : aws(['apigateway', 'get-usage-plan-keys', '--usage-plan-id', planId, '--key-id', keyId, ...region], { readonly: true });
+  const attached = dry ? undefined : aws(['apigateway', 'get-usage-plan-keys', '--usage-plan-id', selectedPlanId, '--key-id', keyId, ...region], { readonly: true });
   if (dry || !attached?.items?.some((item: any) => item.id === keyId)) {
-    aws(['apigateway', 'create-usage-plan-key', '--usage-plan-id', planId, '--key-id', keyId, '--key-type', 'API_KEY', ...region]);
+    aws(['apigateway', 'create-usage-plan-key', '--usage-plan-id', selectedPlanId, '--key-id', keyId, '--key-type', 'API_KEY', ...region]);
   }
-  st.tinyPlanId = planId;
+  st.tinyPlanId = selectedPlanId;
   if (!dry) saveState(st);
-  console.log(`${dry ? '[dry-run] ' : ''}Usage plan nhỏ ${planId} (3 yêu cầu/ngày) gắn cho key ${keyId}`);
+  console.log(`${dry ? '[dry-run] ' : ''}Usage plan nhỏ ${selectedPlanId} (3 yêu cầu/ngày) gắn cho key ${keyId}`);
 }
 
 async function main() {

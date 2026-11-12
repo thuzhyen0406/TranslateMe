@@ -9,6 +9,8 @@ export interface TenantState {
   tenantId: string;
   slug: string;
   origin: string;
+  /** Chỉ ACTIVE khi API đã xác nhận website sẵn sàng cho bộ test demo. */
+  websiteStatus?: string;
   apiKey: string;
   keyId: string;
   /** Chỉ tenant C: key đã chuyển sang usage plan rất nhỏ để thử REQUEST_QUOTA_EXCEEDED */

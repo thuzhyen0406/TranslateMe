@@ -11,7 +11,25 @@ const stage = arg('stage') ?? process.env.TM_STAGE ?? 'dev';
 const only = arg('only');
 const approvedBy = arg('approved-by');
 const region = process.env.TM_REGION;
+if (!['dev', 'demo'].includes(stage)) {
+  console.error(`--stage không hợp lệ: ${stage}. Chỉ hỗ trợ dev hoặc demo.`);
+  process.exit(1);
+}
 if (!region) { console.error('Chưa đặt TM_REGION'); process.exit(1); }
+const expectedAccount = process.env.TM_ACCOUNT;
+if (!expectedAccount || !/^\d{12}$/.test(expectedAccount)) {
+  console.error('Bắt buộc đặt TM_ACCOUNT thành AWS account ID gồm 12 chữ số trước khi deploy.');
+  process.exit(1);
+}
+
+// Không dựa vào việc người chạy đã gọi preflight: xác minh credentials ngay
+// trong tiến trình deploy, trước khi có bất kỳ lệnh CloudFormation ghi nào.
+const identity = aws(['sts', 'get-caller-identity'], { readonly: true });
+if (identity.Account !== expectedAccount) {
+  console.error(`AWS account không khớp: credentials hiện tại là ${identity.Account ?? '(không xác định)'}, TM_ACCOUNT=${expectedAccount}. Dừng deploy.`);
+  process.exit(1);
+}
+console.log(`AWS account đã xác nhận: ${identity.Account}`);
 
 if (stage === 'demo' && !flag('allow-untagged')) {
   const tag = git(['describe', '--exact-match', '--tags', 'HEAD']);
