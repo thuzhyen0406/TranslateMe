@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { chooseSafeRunId, isSafeRunId } from '../lib/evidenceRunId';
 
 type Evidence = { at: string; scenario: number; id: string; title: string; status: 'pass' | 'fail' | 'skip'; data?: unknown };
 const expected: Record<number, string[]> = {
@@ -12,18 +13,14 @@ const args = process.argv.slice(2);
 const runArg = args.find((a) => !a.startsWith('--'));
 const allowIncomplete = args.includes('--allow-incomplete');
 const requiredScenarios = new Set((process.env.TM_EVIDENCE_REQUIRED_SCENARIOS ?? '4,5,6').split(',').map(Number).filter(Number.isInteger));
-const safeRunId = (value: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,100}$/.test(value) && value !== '.' && value !== '..';
 const evidenceRoot = resolve(__dirname, '..', 'evidence');
 
 function chooseRunId(): string {
-  if (runArg) {
-    if (!safeRunId(runArg)) throw new Error(`Run ID không an toàn: ${runArg}`);
-    return runArg;
-  }
-  if (!existsSync(evidenceRoot)) return process.env.TM_RUN_ID ?? 'local';
-  const dirs = readdirSync(evidenceRoot).filter((name) => safeRunId(name) && statSync(join(evidenceRoot, name)).isDirectory());
+  if (runArg) return chooseSafeRunId(runArg, undefined, process.env.TM_RUN_ID);
+  if (!existsSync(evidenceRoot)) return chooseSafeRunId(undefined, undefined, process.env.TM_RUN_ID);
+  const dirs = readdirSync(evidenceRoot).filter((name) => isSafeRunId(name) && statSync(join(evidenceRoot, name)).isDirectory());
   dirs.sort((a, b) => statSync(join(evidenceRoot, b)).mtimeMs - statSync(join(evidenceRoot, a)).mtimeMs);
-  return dirs[0] ?? process.env.TM_RUN_ID ?? 'local';
+  return chooseSafeRunId(undefined, dirs[0], process.env.TM_RUN_ID);
 }
 
 const runId = chooseRunId();

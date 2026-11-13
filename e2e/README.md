@@ -58,6 +58,8 @@ npm run demo:deploy -- --stage dev --dry-run
 npm run demo:seed -- all --dry-run
 ```
 
+Lưu ý: `demo:seed --dry-run` vẫn gọi `sts get-caller-identity` thật để xác nhận account đích. Cần AWS credentials hợp lệ và `TM_ACCOUNT` là ID 12 chữ số khớp với account hiện tại; các lệnh ghi AWS/API được mô phỏng, không thực thi.
+
 Preflight chỉ gọi AWS API đọc trạng thái. Deploy xác nhận `TM_ACCOUNT` với `sts get-caller-identity` trước lệnh ghi và chỉ nhận stage `dev` hoặc `demo`. Script deploy cần bảy stack entry-point `data.yaml`, `identity.yaml`, `api.yaml`, `edge.yaml`, `workflow.yaml`, `console.yaml`, `ops.yaml`; có thể cấu hình qua `TM_TEMPLATE_DIR` hoặc `TM_TEMPLATE_<STACK>`.
 
 Repo hiện chưa có bảy entry-point này. `infra/template.yaml` là template dev riêng chỉ tạo budget và Hello Lambda, không chứa hạ tầng TranslateMe; `infra/modules/*.yaml` là module, không thể deploy trực tiếp thành bảy stack. Vì vậy deploy thật vẫn dừng trước mọi lệnh CloudFormation cho đến khi các entry-point đúng phạm vi được cung cấp. Không dùng template Hello Lambda làm bản thay thế cho hạ tầng demo.
@@ -93,6 +95,8 @@ npm run demo:preflight
 npm run demo:deploy -- --stage dev --dry-run
 npm run demo:seed -- all --dry-run
 ```
+
+Lưu ý: `demo:seed --dry-run` vẫn gọi `sts get-caller-identity` thật để xác nhận account đích. Cần AWS credentials hợp lệ và `TM_ACCOUNT` là ID 12 chữ số khớp với account hiện tại; các lệnh ghi AWS/API được mô phỏng, không thực thi.
 
 Preflight chỉ gọi AWS API đọc trạng thái. Deploy xác nhận `TM_ACCOUNT` với `sts get-caller-identity` trước lệnh ghi và chỉ nhận stage `dev` hoặc `demo`. Script deploy cần bảy stack entry-point `data.yaml`, `identity.yaml`, `api.yaml`, `edge.yaml`, `workflow.yaml`, `console.yaml`, `ops.yaml`; có thể cấu hình qua `TM_TEMPLATE_DIR` hoặc `TM_TEMPLATE_<STACK>`.
 
