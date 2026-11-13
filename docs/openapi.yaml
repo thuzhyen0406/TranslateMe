@@ -23,8 +23,9 @@ info:
     - **Phạm vi các endpoint được công bố trong tài liệu này**:
       - `POST /translate/realtime`: **Đang hoạt động** (`services/api/translate/realtime.ts`).
       - `POST /translate/batch/upload-url`: **Đang hoạt động** (định tuyến từ `services/api/translate/realtime.ts` sang `services/api/batch/batchIngress.ts`).
-      - `POST /translate/batch`: **Đang hoạt động** cho bước kiểm duyệt tệp S3 (`HeadObject`/`GetObject`), kiểm tra định dạng/kích thước/hạn mức và tạo bản ghi `JOB` trạng thái `QUEUED` tại `services/api/batch/batchIngress.ts` (khởi chạy Step Functions workflow được nối ở Hạng mục 4.7/5.7).
-      - *Lưu ý về tra cứu job (`GET /translate/batch/{job_id}`)*: Chưa được triển khai trên `batchIngress.ts` hiện tại nên **không công bố trong `paths`** của OpenAPI để tránh sinh SDK cho route chưa tồn tại; hợp đồng thiết kế dự kiến cho Hạng mục 4.7/5.7 xem tại `docs/batch-job-polling-design.md`.
+      - `POST /translate/batch`: **Đang hoạt động**; kiểm tra tệp, hạn mức, tạo JOB và khởi chạy workflow batch tại `services/api/batch/batchIngress.ts`.
+      - `GET /translate/batch/{job_id}`: **Đang hoạt động**; trả trạng thái JOB và URL tải có chữ ký. Nếu tenant ở trạng thái `LOCKED`, chỉ route đọc trạng thái này được phép tiếp tục; thao tác tạo batch vẫn bị chặn.
+      - Vai trò `REVIEWER` không được truy cập API batch; job không tồn tại hoặc thuộc tenant khác đều trả cùng `404 NOT_FOUND` (QC-17).
   contact:
     name: TranslateMe Engineering Team (Nhóm 03 - INT3319_1)
     email: support@translateme.example.com
@@ -521,6 +522,79 @@ paths:
                   code: "INTERNAL_ERROR"
                   message: "Lỗi tạm thời khi nhận tệp batch."
 
+  /translate/batch/{job_id}:
+    get:
+      summary: Tra cứu trạng thái công việc dịch batch
+      description: |
+        Tra cứu JOB trong tenant đã xác thực và tạo presigned GET URL cho mỗi kết quả khi JOB ở trạng thái `SUCCEEDED`.
+        Không tiết lộ sự tồn tại của JOB tenant khác: JOB không tồn tại và JOB tenant khác đều trả cùng `404 NOT_FOUND` (QC-17).
+        Tenant `LOCKED` vẫn được phép dùng GET này ở chế độ chỉ đọc; vai trò `REVIEWER` bị từ chối.
+      operationId: getBatchJob
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Mã JOB trả về bởi `POST /translate/batch`
+          schema:
+            type: string
+            pattern: '^(job-)?\d{8}-[0-9a-f]{12}$'
+          example: "job-20261108-3fa85f645717"
+      responses:
+        '200':
+          description: Trạng thái JOB của tenant hiện tại.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchJobPollingResponse'
+              example:
+                request_id: "req-batch-poll-01"
+                job:
+                  job_id: "job-20261108-3fa85f645717"
+                  status: "SUCCEEDED"
+                  total: 2
+                  done: 2
+                  failed: 0
+                  progress: 100
+                  target_langs: ["en", "ko"]
+                  warnings: []
+                  results:
+                    - target_lang: "en"
+                      file_name: "gioi-thieu.en.docx"
+                      download_url: "https://translateme-dev-batch-files.s3.ap-southeast-1.amazonaws.com/batch/tenant-u4821/results/job-20261108-3fa85f645717/gioi-thieu.en.docx?X-Amz-Signature=..."
+                      warnings: []
+                  notification_status: "SUBMITTED"
+        '401':
+          description: Thiếu hoặc sai thông tin xác thực (`UNAUTHORIZED`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Vai trò không được phép truy cập API batch (`PERMISSION_DENIED`); tenant `LOCKED` vẫn được phép polling chỉ đọc.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: JOB không tồn tại hoặc không thuộc tenant hiện tại (`NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                request_id: "req-batch-poll-404"
+                error:
+                  code: "NOT_FOUND"
+                  message: "Không tìm thấy công việc batch."
+        '500':
+          description: Lỗi tạm thời khi tra cứu JOB hoặc tạo presigned URL (`INTERNAL_ERROR`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -851,6 +925,126 @@ components:
           description: Tùy chọn gửi thông báo email khi hoàn tất
           default: false
           example: false
+
+    BatchJobWarning:
+      type: object
+      required:
+        - code
+        - where
+        - count
+        - message
+      properties:
+        code:
+          type: string
+          example: "DOCX_UNSUPPORTED_CONTENT"
+        where:
+          type: string
+          example: "document"
+        count:
+          type: integer
+          minimum: 0
+          example: 1
+        message:
+          type: string
+          example: "Một số nội dung không được xử lý."
+
+    BatchJobResult:
+      type: object
+      required:
+        - target_lang
+        - file_name
+        - download_url
+        - warnings
+      properties:
+        target_lang:
+          type: string
+          example: "en"
+        file_name:
+          type: string
+          example: "gioi-thieu.en.docx"
+        download_url:
+          type: string
+          format: uri
+          description: Presigned GET URL có thời hạn 15 phút
+          example: "https://translateme-dev-batch-files.s3.ap-southeast-1.amazonaws.com/result.docx?X-Amz-Signature=..."
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchJobWarning'
+
+    BatchJobPollingResponse:
+      type: object
+      required:
+        - request_id
+        - job
+      properties:
+        request_id:
+          type: string
+          example: "req-batch-poll-01"
+        job:
+          type: object
+          required:
+            - job_id
+            - status
+            - total
+            - done
+            - failed
+            - progress
+            - target_langs
+            - warnings
+          properties:
+            job_id:
+              type: string
+              pattern: '^(job-)?\d{8}-[0-9a-f]{12}$'
+              example: "job-20261108-3fa85f645717"
+            status:
+              type: string
+              enum: [QUEUED, RUNNING, SUCCEEDED, FAILED]
+              example: "RUNNING"
+            total:
+              type: integer
+              minimum: 0
+              example: 10
+            done:
+              type: integer
+              minimum: 0
+              example: 5
+            failed:
+              type: integer
+              minimum: 0
+              example: 0
+            progress:
+              type: integer
+              minimum: 0
+              maximum: 100
+              example: 50
+            target_langs:
+              type: array
+              items:
+                type: string
+              example: ["en", "ko"]
+            reason:
+              type: string
+              description: Lý do khi JOB thất bại
+              example: "LanguageNotDetected"
+            warnings:
+              type: array
+              items:
+                $ref: '#/components/schemas/BatchJobWarning'
+            results:
+              type: array
+              description: Có mặt khi JOB đã SUCCEEDED
+              items:
+                $ref: '#/components/schemas/BatchJobResult'
+            notification_status:
+              type: string
+              enum: [SUBMITTED, FAILED]
+              description: Trạng thái gửi notification nếu JOB yêu cầu email
+              example: "SUBMITTED"
+            notification_error:
+              type: string
+              description: Mã/lý do lỗi notification nếu gửi thất bại
+              example: "EMAIL_NOT_CONFIRMED"
 
     BatchCreateJobResponse:
       type: object

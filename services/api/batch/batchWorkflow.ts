@@ -18,6 +18,8 @@ import { createTranslator } from '../../../libs/common/translator.js';
 export const BATCH_BLOCK_BYTES = 10_000;
 export const BATCH_LOT_BLOCKS = 20;
 export const BATCH_RETRY_LIMIT = 3;
+const BATCH_LANGUAGE_CONFIDENCE_THRESHOLD = 0.70;
+const BATCH_SUPPORTED_LANGUAGES = new Set(['ar', 'de', 'en', 'es', 'fr', 'hi', 'id', 'it', 'ja', 'ko', 'nl', 'pl', 'pt', 'ru', 'sv', 'th', 'tr', 'vi', 'zh']);
 
 export interface BatchBlock { id: number; text: string; sourceId?: number; partIndex?: number }
 export interface BatchManifest {
@@ -50,7 +52,7 @@ export interface BatchWorkflowDeps {
   tm: ReturnType<typeof createTM>;
   getGlossaryState(ctx: Ctx): Promise<GlossaryState>;
   translate: (input: Parameters<ReturnType<typeof createTranslator>>[0]) => ReturnType<ReturnType<typeof createTranslator>>;
-  detectLanguage(text: string): Promise<string | undefined>;
+  detectLanguage(text: string): Promise<{ language?: string; confidence?: number }>;
   now?: () => Date;
 }
 
@@ -225,8 +227,15 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
     const file = job;
     const source = job.usageSource as UsageSource | undefined;
     if (!source) throw Object.assign(new Error('Job is missing usage source.'), { name: 'InvalidJob' });
-    const sourceLang = typeof file.sourceLang === 'string' ? file.sourceLang : await deps.detectLanguage(blocks.map((b) => b.text).join('\n').slice(0, 5000));
-    if (!sourceLang) throw Object.assign(new Error('Source language could not be detected.'), { name: 'LanguageNotDetected' });
+    let sourceLang = typeof file.sourceLang === 'string' ? file.sourceLang : undefined;
+    if (!sourceLang) {
+      const detected = await deps.detectLanguage(blocks.map((b) => b.text).join('\n').slice(0, 5000));
+      if (!detected.language || !BATCH_SUPPORTED_LANGUAGES.has(detected.language) ||
+          (detected.confidence ?? 0) < BATCH_LANGUAGE_CONFIDENCE_THRESHOLD) {
+        throw Object.assign(new Error('Source language could not be detected with confidence of at least 0.70.'), { name: 'LanguageNotDetected' });
+      }
+      sourceLang = detected.language;
+    }
     const glossary = await deps.getGlossaryState(ctx);
     const sentences: SentenceWithHash[] = blocks.map(({ id, text }) => {
       const normalized = normalize_hash(text);
@@ -500,7 +509,8 @@ export const handler = async (event: BatchTaskEvent) => {
     translate: translator,
     async detectLanguage(text) {
       const result = await comprehend.send(new DetectDominantLanguageCommand({ Text: text }));
-      return result.Languages?.sort((a, b) => (b.Score ?? 0) - (a.Score ?? 0))[0]?.LanguageCode;
+      const top = result.Languages?.sort((a, b) => (b.Score ?? 0) - (a.Score ?? 0))[0];
+      return { language: top?.LanguageCode, confidence: top?.Score };
     },
   });
   return workflow(event);

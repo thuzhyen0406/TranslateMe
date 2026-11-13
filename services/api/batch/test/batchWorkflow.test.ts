@@ -109,7 +109,7 @@ describe('batch workflow', () => {
         translateCalls++;
         return { translated: input.sentences.map((sentence) => ({ id: sentence.id, tgt: `FR:${sentence.text}`, needsReview: false })), pending: [], failed: [], stats: { uniqueSentences: input.sentences.length, calls: 1, charsSent: 0, splits: 0, plainFallbacks: 0 } };
       },
-      async detectLanguage() { return 'en'; },
+      async detectLanguage() { return { language: 'en', confidence: 0.99 }; },
       now: () => new Date('2026-11-08T00:00:00.000Z'),
     };
     const handler = createBatchWorkflowHandler(deps);
@@ -220,7 +220,7 @@ describe('batch workflow', () => {
         translateCalls++;
         return { translated: input.sentences.map((sentence) => ({ id: sentence.id, tgt: `FR:${sentence.text}`, needsReview: false })), pending: [], failed: [], stats: { uniqueSentences: input.sentences.length, calls: 1, charsSent: 0, splits: 0, plainFallbacks: 0 } };
       },
-      async detectLanguage() { return 'en'; },
+      async detectLanguage() { return { language: 'en', confidence: 0.99 }; },
       now: () => new Date('2026-11-08T00:00:00.000Z'),
     };
     const handler = createBatchWorkflowHandler(deps);
@@ -235,6 +235,58 @@ describe('batch workflow', () => {
     assert.equal(settleCalls, 2);
     assert.equal(settledRequests.size, 1);
     assert.equal(item.done, 1);
+  });
+
+  it('requires at least 0.70 confidence when detecting the source language', async () => {
+    const detectedJobId = 'job-20261108-123456abcdef';
+    const key = jobKey(ctx, detectedJobId);
+    const lotKey = `batch/${ctx.tenantId}/results/${detectedJobId}/lots/lot-0000.json`;
+    const item: Record<string, any> = {
+      ...key, entityType: 'JOB', tenantId: ctx.tenantId, jobId: detectedJobId, type: 'FILE', status: 'RUNNING',
+      targetLangs: ['fr'], total: 1, done: 0, failed: 0, warnings: [], lots: {},
+      fileKey: `batch/${ctx.tenantId}/input/source.txt`, fileName: 'source.txt', format: 'txt',
+      usageSource: { kind: 'API', keyId: 'key-test' }, sendEmail: false,
+    };
+    const objects = new Map<string, Uint8Array>([[lotKey, new TextEncoder().encode('[]')]]);
+    const db: JobDb = {
+      async get(_ctx, lookup) { return lookup.PK === key.PK && lookup.SK === key.SK ? item : null; },
+      async put(_ctx, value) { Object.assign(item, value); },
+      async update(_ctx, update) {
+        const values = update.ExpressionAttributeValues ?? {};
+        if (values[':done'] !== undefined) item.done += Number(values[':done']);
+        if (values[':failed'] !== undefined) item.failed += Number(values[':failed']);
+        if (values[':true'] === true) item.lots[update.ExpressionAttributeNames?.['#lot'] ?? ''] = true;
+      },
+    };
+    const createHandler = (confidence: number) => createBatchWorkflowHandler({
+      jobs: db,
+      objects: {
+        async get(_tenantId, objectKey) { return objects.get(objectKey) ?? null; },
+        async put(_tenantId, objectKey, bytes) { objects.set(objectKey, bytes); },
+        async signGet() { return 'https://download.example'; },
+      },
+      usage: {
+        async reserve(input: Parameters<BatchWorkflowDeps['usage']['reserve']>[0]) {
+          return { tenantId: input.tenantId, requestId: input.requestId, month: '2026-11', reservedChars: input.n, limit: 1000, source: input.source, createdAt: input.now!.toISOString() };
+        },
+        async settle() {},
+        async refund() {},
+      } as unknown as BatchWorkflowDeps['usage'],
+      tm: {
+        async getTM() { return { hits: new Map(), misses: [], reviewFlags: [] }; },
+        async markHumanNeedsReview() { return { marked: 0, skipped: 0, failed: [] }; },
+        async putMachineTM() { return { written: 0, skippedHuman: 0, failed: [] }; },
+      } as unknown as BatchWorkflowDeps['tm'],
+      async getGlossaryState() { return { version: 0, terminologyName: null, terms: [] }; },
+      async translate() { throw new Error('Translation is not expected for an empty lot.'); },
+      async detectLanguage() { return { language: 'en', confidence }; },
+      now: () => new Date('2026-11-08T00:00:00.000Z'),
+    });
+    const task = { mode: 'TRANSLATE_LOT' as const, tenant_id: ctx.tenantId, job_id: detectedJobId, target_lang: 'fr', lot_key: lotKey };
+
+    await assert.rejects(createHandler(0.69)(task), { name: 'LanguageNotDetected' });
+    const result = await createHandler(0.70)(task) as { result_key: string };
+    assert.equal(result.result_key, `batch/${ctx.tenantId}/results/${detectedJobId}/translated/fr/lot-0000.json`);
   });
 
   it('records notification failures without overwriting the job status', async () => {
@@ -271,7 +323,7 @@ describe('batch workflow', () => {
       tm: {} as any,
       getGlossaryState: async () => ({ version: 0, terminologyName: null, terms: [] }),
       translate: async () => ({ translated: [], pending: [], failed: [], stats: { uniqueSentences: 0, calls: 0, charsSent: 0, splits: 0, plainFallbacks: 0 } }),
-      detectLanguage: async () => 'en',
+      detectLanguage: async () => ({ language: 'en', confidence: 0.99 }),
       now: () => new Date('2026-11-08T00:00:00.000Z'),
     };
     const handler = createBatchWorkflowHandler(deps);

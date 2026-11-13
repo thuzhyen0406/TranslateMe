@@ -12,7 +12,7 @@ import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { db } from '../../../libs/common/db.js';
 import { contextFromIdTokenClaims } from '../auth/context.js';
-import { CorruptFile, countChars, FORMAT_PARSERS, parse, UnsupportedFormat } from '../../../libs/common/parsers.js';
+import { CorruptFile, countChars, FORMAT_PARSERS, parse, translatedFileName, UnsupportedFormat } from '../../../libs/common/parsers.js';
 import { createTenantDocumentClientRouter, createTenantS3Client } from '../../../libs/common/tenantAws.js';
 import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
 import { CharacterQuotaExceededError, UsageService, type UsageReservation } from '../../../libs/common/usage/usage.js';
@@ -184,10 +184,14 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
       if (!ctx) throw new AppError('UNAUTHORIZED', 'Cần phiên đăng nhập hợp lệ hoặc API key hợp lệ.');
       if (ctx.via === 'KEYMAP' && !ctx.keyId) throw new AppError('UNAUTHORIZED', 'API batch yêu cầu API key hợp lệ.');
       if (ctx.via === 'JWT' && !ctx.sub) throw new AppError('UNAUTHORIZED', 'Phiên đăng nhập không có mã người dùng hợp lệ.');
-      const config = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
-      if (!config || config.status !== 'ACTIVE') throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị tạm khóa.');
+      if (ctx.role === 'REVIEWER') throw new AppError('PERMISSION_DENIED', 'Vai trò REVIEWER không được phép truy cập API batch.');
       const method = (event.httpMethod ?? 'GET').toUpperCase();
       const path = event.path ?? event.rawPath ?? '';
+      const isBatchJobGet = method === 'GET' && /^\/translate\/batch\/((?:job-)?\d{8}-[0-9a-f]{12})\/?$/u.test(path);
+      const config = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
+      if (!config || (config.status !== 'ACTIVE' && !(isBatchJobGet && config.status === 'LOCKED'))) {
+        throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị tạm khóa.');
+      }
       const body = method === 'GET' ? {} : parseBody(event.body);
 
       if (method === 'POST' && /\/translate\/batch\/(?:session\/)?upload-url\/?$/u.test(path)) {
@@ -294,7 +298,7 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
         try {
           reservation = await deps.usage.reserve({
             tenantId: ctx.tenantId,
-            requestId: jobId,
+            requestId: `batch-preflight-${jobId}-${randomUUID()}`,
             n: estimatedCharacters,
             source,
             now: deps.now(),
@@ -358,12 +362,24 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
         if (job.status === 'SUCCEEDED' && deps.s3.signGet) {
           for (const [lang, key] of Object.entries(resultFiles)) downloads[lang] = await deps.s3.signGet({ tenantId: ctx.tenantId, bucket: deps.bucket, key, expiresIn: 900 });
         }
+        const warnings = Array.isArray(job.warnings) ? job.warnings : [];
         return respond(200, {
           job: {
             job_id: jobId, status: job.status, total: Number(job.total ?? 0), done: Number(job.done ?? 0), failed: Number(job.failed ?? 0),
             progress: job.status === 'SUCCEEDED' ? 100 : Number(job.total) > 0 ? Math.floor(((Number(job.done ?? 0) + Number(job.failed ?? 0)) * 100) / Number(job.total)) : 0,
-            target_langs: Array.isArray(job.targetLangs) ? job.targetLangs : [], ...(typeof job.reason === 'string' ? { reason: job.reason } : {}),
-            ...(Object.keys(downloads).length ? { downloads } : {}), warnings: Array.isArray(job.warnings) ? job.warnings : [],
+            target_langs: Array.isArray(job.targetLangs) ? job.targetLangs : [],
+            ...(typeof job.reason === 'string' ? { reason: job.reason } : {}),
+            warnings,
+            ...(job.status === 'SUCCEEDED' ? {
+              results: Object.entries(downloads).map(([targetLang, downloadUrl]) => ({
+                target_lang: targetLang,
+                file_name: translatedFileName(String(job.fileName ?? ''), targetLang),
+                download_url: downloadUrl,
+                warnings,
+              })),
+            } : {}),
+            ...(typeof job.notificationStatus === 'string' ? { notification_status: job.notificationStatus } : {}),
+            ...(typeof job.notificationError === 'string' ? { notification_error: job.notificationError } : {}),
           },
         });
       }

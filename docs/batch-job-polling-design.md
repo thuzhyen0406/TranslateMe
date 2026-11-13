@@ -1,33 +1,39 @@
-# Thiết kế dự kiến: `GET /translate/batch/{job_id}` (F10 Bước 6 – Tra cứu công việc dịch batch)
+# `GET /translate/batch/{job_id}` (F10 Bước 6 – Tra cứu công việc dịch batch)
 
-> **Trạng thái hiện tại:** **Chưa triển khai** trên `services/api/batch/batchIngress.ts` ở nhánh `main`.
->
-> Trong handler hiện tại, `createBatchIngressHandler` chỉ xử lý `POST /translate/batch/upload-url` và `POST /translate/batch`, đồng thời gọi `parseBody(event.body)` trước khi phân nhánh route nên yêu cầu `GET` không có body sẽ nhận `400 INVALID_REQUEST`. Do đó, endpoint này **chưa được công bố trong `paths` của [`docs/openapi.yaml`](./openapi.yaml)** để tránh sinh SDK gọi route chưa tồn tại.
+> **Trạng thái:** Đã triển khai trong `services/api/batch/batchIngress.ts` và công bố trong [`docs/openapi.yaml`](./openapi.yaml).
 
 ---
 
 ## 1. Hợp đồng dự kiến (theo Bảng 2.8 & `jobs.ts`)
 
 - **Method & Path:** `GET /translate/batch/{job_id}`
-- **Xác thực:** `x-api-key` (API Gateway API Key → DynamoDB `KEYMAP`, QC-3) hoặc Cognito ID token cho session Console tương ứng khi tích hợp.
+- **Xác thực:** API Gateway API Key → DynamoDB `KEYMAP` (QC-3).
 - **Tham số đường dẫn (`job_id`):** Định dạng `job-YYYYMMDD-xxxxxxxxxxxx` (nhận từ `POST /translate/batch`).
+- Tenant `LOCKED` vẫn đọc được trạng thái JOB; thao tác ghi vẫn bị chặn. Vai trò `REVIEWER` không được truy cập API batch.
 
 ### Phản hồi `200 OK` (dự kiến)
 
 ```json
 {
   "request_id": "req-poll-01",
-  "job_id": "job-20261108-3fa85f645717",
-  "status": "SUCCEEDED",
-  "progress": 100,
-  "results": [
-    {
-      "target_lang": "en",
-      "file_name": "gioi-thieu-homestay.en.docx",
-      "download_url": "https://translateme-dev-batch-files.s3.ap-southeast-1.amazonaws.com/batch/tenant-u4821/results/gioi-thieu-homestay.en.docx?X-Amz-Signature=...",
-      "warnings": []
-    }
-  ]
+  "job": {
+    "job_id": "job-20261108-3fa85f645717",
+    "status": "SUCCEEDED",
+    "total": 1,
+    "done": 1,
+    "failed": 0,
+    "progress": 100,
+    "target_langs": ["en"],
+    "warnings": [],
+    "results": [
+      {
+        "target_lang": "en",
+        "file_name": "gioi-thieu-homestay.en.docx",
+        "download_url": "https://translateme-dev-batch-files.s3.ap-southeast-1.amazonaws.com/batch/tenant-u4821/results/job-20261108-3fa85f645717/gioi-thieu-homestay.en.docx?X-Amz-Signature=...",
+        "warnings": []
+      }
+    ]
+  }
 }
 ```
 
@@ -51,8 +57,8 @@
 
 ---
 
-## 2. Việc cần làm khi Hạng mục 4.7 / 5.7 tích hợp route polling
+## 2. Quy chuẩn triển khai
 
-1. Cập nhật `services/api/batch/batchIngress.ts` bỏ qua `parseBody` cho `GET` và bổ sung handler `GET /translate/batch/{job_id}` (chú ý cấu trúc payload trả về thực tế `job` / `downloads` hoặc phẳng theo thống nhất với Console/Client).
-2. Bổ sung test kiểm tra cô lập tenant theo **QC-17** trên route thật (`404 NOT_FOUND` cho cả job không tồn tại lẫn job của tenant khác).
-3. Đưa operation `GET /translate/batch/{job_id}` và schema response tương ứng quay lại [`docs/openapi.yaml`](./openapi.yaml) khớp 100% với implementation đã kiểm thử.
+- JOB không tồn tại và JOB thuộc tenant khác phải có cùng `404 NOT_FOUND` response (QC-17).
+- Chỉ cấp presigned GET URL khi JOB `SUCCEEDED`; URL có thời hạn 15 phút.
+- Schema OpenAPI và ví dụ phải khớp với payload thực tế `{ request_id, job: { ... } }`.
