@@ -6,7 +6,7 @@ Thư mục này là package độc lập dành cho test hộp đen qua HTTP. Nó
 
 ```sh
 cd e2e
-npm install
+npm ci
 npm run selftest
 ```
 
@@ -14,7 +14,7 @@ Selftest chạy mock local, không gọi AWS. Các mode lỗi cố ý kiểm tra
 
 ## Chạy trên môi trường đã seed dữ liệu
 
-Tạo file `.env.<stage>` từ `.env.example`; test tự nạp file stage. Chạy các lệnh trong thư mục `e2e/`:
+Tạo file `.env.<stage>` từ `.env.example`; package tự nạp file tương ứng với `TM_STAGE` hoặc `TM_ENV_FILE`. Chạy các lệnh trong thư mục `e2e/`:
 
 ```sh
 npm run test:isolation
@@ -23,7 +23,7 @@ TM_ALLOW_MUTATION=1 npm run test:limits
 npm run typecheck
 ```
 
-Test cần `.state/<stage>.json` có tài khoản tenant A/B/C, Platform Admin, API keys, job và file_key. File state chứa mật khẩu và key, không được commit. Phần tạo dữ liệu demo thuộc nhánh triển khai demo; không có seed AWS trong package của nhánh này.
+Test cần `.state/<stage>.json` có tài khoản tenant A/B/C, Platform Admin, API keys, job và file_key. Tạo state bằng `npm run demo:seed -- all` sau khi cấu hình AWS/API. File state chứa mật khẩu và key, không được commit.
 
 `limits.test.ts` đổi hạn mức và khóa tenant A. Chỉ bật `TM_ALLOW_MUTATION=1` trên dev/demo, và không chạy song song với isolation. SSRF S7/S8 cần fixture do TV4 cung cấp; nếu thiếu fixture, test đánh dấu SKIP và không được tính là đủ bằng chứng. Vì API chưa có route xóa website, test sẽ nhận diện slug từ hostname fixture và tái sử dụng bản ghi `PENDING` cùng origin ở lần chạy sau; nếu slug đó đã được dùng bởi origin khác hoặc website không còn `PENDING`, test dừng với thông báo rõ ràng.
 
@@ -58,6 +58,8 @@ npm run demo:deploy -- --stage dev --dry-run
 npm run demo:seed -- all --dry-run
 ```
 
+Lưu ý: `demo:seed --dry-run` vẫn gọi `sts get-caller-identity` thật để xác nhận account đích. Cần AWS credentials hợp lệ và `TM_ACCOUNT` là ID 12 chữ số khớp với account hiện tại; các lệnh ghi AWS/API được mô phỏng, không thực thi.
+
 Preflight chỉ gọi AWS API đọc trạng thái. Deploy xác nhận `TM_ACCOUNT` với `sts get-caller-identity` trước lệnh ghi và chỉ nhận stage `dev` hoặc `demo`. Script deploy cần bảy stack entry-point `data.yaml`, `identity.yaml`, `api.yaml`, `edge.yaml`, `workflow.yaml`, `console.yaml`, `ops.yaml`; có thể cấu hình qua `TM_TEMPLATE_DIR` hoặc `TM_TEMPLATE_<STACK>`.
 
 Repo hiện chưa có bảy entry-point này. `infra/template.yaml` là template dev riêng chỉ tạo budget và Hello Lambda, không chứa hạ tầng TranslateMe; `infra/modules/*.yaml` là module, không thể deploy trực tiếp thành bảy stack. Vì vậy deploy thật vẫn dừng trước mọi lệnh CloudFormation cho đến khi các entry-point đúng phạm vi được cung cấp. Không dùng template Hello Lambda làm bản thay thế cho hạ tầng demo.
@@ -80,5 +82,27 @@ State lưu `fileKey` và trạng thái batch trước khi POST. Khi kết quả 
 ## Cấu trúc
 
 - `lib/`: cấu hình, Cognito JWT, HTTP retry, API contract, so sánh lỗi và evidence.
-- `tests/`: isolation (kịch bản 4), limits (kịch bản 5), SSRF (kịch bản 6).
+- `tests/`: isolation (kịch bản 4), limits (kịch bản 5), SSRF (kịch bản 6) và helper/demo tests.
 - `mock/`, `scripts/selftest.ts`: mock và tự kiểm tra offline.
+- `demo/`: AWS preflight, deploy bảy stack theo thứ tự và seed dữ liệu demo.
+
+## Evidence report (hạng mục 5.2)
+
+Mỗi phép thử ghi JSONL vào `e2e/evidence/<run-id>/scenario-<n>.jsonl`. Tổng hợp sau khi chạy:
+
+Run ID được chọn theo thứ tự đối số CLI, `TM_RUN_ID`, rồi thư mục evidence mới nhất. Aggregator chỉ đọc thư mục đã có; nếu run ID không tồn tại, lệnh báo lỗi thay vì tạo summary rỗng.
+
+```sh
+TM_RUN_ID=local npm run test:gate
+npm run evidence -- local
+```
+
+Summary phân biệt `ĐẠT`, `LỖI`, `BỎ QUA` và `THIẾU`; lỗi luôn làm lệnh thất bại, scenario bắt buộc có ca skip/thiếu cũng trả mã lỗi. Scenario 6 gồm S1–S9 và S8H; bằng chứng header S8 phải đạt riêng, không được coi là đạt nếu fixture report bị thiếu.
+
+## GitHub Actions release gate
+
+`release-gate.yml` hiện chỉ chạy thủ công qua `workflow_dispatch` trên nhánh `main`; các dispatch từ nhánh khác bị từ chối trước khi cấp AWS credentials. Trigger sau deploy được tạm tắt cho tới khi các route, fixture SSRF, state demo và hạ tầng sản phẩm sẵn sàng. Sau khi các dependency này được cung cấp, có thể bật lại trigger deploy.
+
+Trước khi chạy test, workflow kiểm tra secrets `AWS_ROLE_ARN`, `TM_CI_ENV`, `TM_STATE_JSON`; Actions variables `TM_ACCOUNT` (12 chữ số) và `TM_REGION`; state tenant A/B/C; fixtures `TM_SSRF_REBIND_URL`, `TM_SSRF_REDIRECT_URL`, `TM_SSRF_HEADER_REPORT_URL`; và capability flags cho các route bắt buộc. Sau khi assume role, workflow xác nhận account bằng STS trước khi kiểm tra stack. Các capability route chỉ đặt `1` sau khi route đã deploy. Artifact chỉ chứa `summary.md`, đã lược chi tiết lỗi/phản hồi, và được giữ 7 ngày; JSONL thô không được upload.
+
+Thiếu route, fixture hoặc seed state sẽ làm validation/evidence gate thất bại; không dùng kết quả đó làm tín hiệu release. Route/capability chưa sẵn sàng được liệt kê ở phần trên của README. Repo cũng chưa có bảy CloudFormation stack entry-point cho deploy demo.

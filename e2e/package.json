@@ -10,13 +10,15 @@
     "test:ssrf": "node --require ts-node/register/transpile-only --test tests/ssrf.test.ts",
     "test:demo": "node --require ts-node/register/transpile-only --test tests/demo-seed.test.ts tests/siteVerification.test.ts tests/seed-preflight.test.ts",
     "test:helpers": "node --require ts-node/register/transpile-only --test tests/helpers.test.ts",
-    "test:gate": "npm run typecheck && npm run test:helpers && npm run test:isolation && npm run test:ssrf",
-    "test:all": "node --require ts-node/register/transpile-only --test --test-concurrency=1 tests/helpers.test.ts tests/isolation.test.ts tests/ssrf.test.ts tests/limits.test.ts tests/demo-seed.test.ts tests/siteVerification.test.ts tests/seed-preflight.test.ts",
+    "test:evidence": "node --require ts-node/register/transpile-only --test tests/aggregate-evidence.test.ts",
+    "test:gate": "npm run typecheck && npm run test:helpers && npm run test:evidence && npm run test:isolation && npm run test:ssrf",
+    "test:all": "node --require ts-node/register/transpile-only --test --test-concurrency=1 tests/helpers.test.ts tests/aggregate-evidence.test.ts tests/isolation.test.ts tests/ssrf.test.ts tests/limits.test.ts tests/demo-seed.test.ts tests/siteVerification.test.ts tests/seed-preflight.test.ts",
     "selftest": "ts-node --transpile-only scripts/selftest.ts",
     "demo:preflight": "ts-node --transpile-only demo/preflight.ts",
     "demo:deploy": "ts-node --transpile-only demo/deploy.ts",
     "demo:seed": "ts-node --transpile-only demo/seed.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "evidence": "ts-node --transpile-only tools/aggregate-evidence.ts"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",

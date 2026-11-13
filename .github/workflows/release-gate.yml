@@ -1,0 +1,169 @@
+name: E2E Release Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_limits:
+        description: Run mutation test for limits/tenant lock (dev only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: e2e-release-gate-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release-gate:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AWS_REGION: ${{ vars.TM_REGION }}
+      TM_REGION: ${{ vars.TM_REGION }}
+      TM_ACCOUNT: ${{ vars.TM_ACCOUNT }}
+      TM_DEPLOY_STACK_NAME: ${{ vars.TM_DEPLOY_STACK_NAME || 'translateme-dev-stack' }}
+      TM_RUN_ID: ${{ github.run_id }}
+      TM_ALLOW_MUTATION: ${{ inputs.run_limits == true && '1' || '0' }}
+      TM_EVIDENCE_REQUIRED_SCENARIOS: ${{ inputs.run_limits == true && '4,5,6' || '4,6' }}
+    steps:
+      - name: Checkout selected revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Install E2E dependencies
+        working-directory: e2e
+        run: npm ci
+
+      - name: Validate release gate inputs
+        working-directory: e2e
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          TM_CI_ENV: ${{ secrets.TM_CI_ENV }}
+          TM_STATE_JSON: ${{ secrets.TM_STATE_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "$AWS_ROLE_ARN" || { echo '::error::Missing repository secret AWS_ROLE_ARN'; exit 1; }
+          test -n "$TM_CI_ENV" || { echo '::error::Missing repository secret TM_CI_ENV'; exit 1; }
+          test -n "$TM_STATE_JSON" || { echo '::error::Missing repository secret TM_STATE_JSON'; exit 1; }
+          [[ "$TM_ACCOUNT" =~ ^[0-9]{12}$ ]] || { echo '::error::Set Actions variable TM_ACCOUNT to the expected 12-digit AWS account ID'; exit 1; }
+          test -n "$TM_REGION" || { echo '::error::Set Actions variable TM_REGION to the deployment region'; exit 1; }
+          node <<'NODE'
+          const dotenv = require('dotenv');
+          const env = dotenv.parse(process.env.TM_CI_ENV);
+          const required = [
+            'TM_API_BASE', 'TM_REGION', 'TM_CONSOLE_CLIENT_ID', 'TM_PLATFORM_CLIENT_ID',
+            'TM_CONSOLE_USER_POOL_ID', 'TM_PLATFORM_USER_POOL_ID',
+            'TM_SSRF_REBIND_URL', 'TM_SSRF_REDIRECT_URL', 'TM_SSRF_HEADER_REPORT_URL',
+            'TM_E2E_HAS_CONSOLE_ME', 'TM_E2E_HAS_CONSOLE_USAGE',
+            'TM_E2E_HAS_CONSOLE_BATCH_RESULT', 'TM_E2E_HAS_PLATFORM_TENANT_DETAIL',
+            'TM_E2E_HAS_PLATFORM_TENANT_LIST',
+          ];
+          const missing = required.filter((key) => !env[key]);
+          if (missing.length) {
+            console.error(`::error::TM_CI_ENV is missing required values: ${missing.join(', ')}`);
+            process.exit(1);
+          }
+          if (env.TM_REGION !== process.env.TM_REGION) {
+            console.error('::error::TM_CI_ENV TM_REGION must match the Actions variable TM_REGION');
+            process.exit(1);
+          }
+          const capabilities = required.filter((key) => key.startsWith('TM_E2E_HAS_'));
+          const disabled = capabilities.filter((key) => env[key] !== '1');
+          if (disabled.length) {
+            console.error(`::error::Required product routes are not enabled in TM_CI_ENV: ${disabled.join(', ')}`);
+            process.exit(1);
+          }
+          let state;
+          try { state = JSON.parse(process.env.TM_STATE_JSON); }
+          catch { console.error('::error::TM_STATE_JSON must contain valid JSON'); process.exit(1); }
+          const missingState = [];
+          for (const key of ['username', 'password']) if (!state.platform?.[key]) missingState.push(`platform.${key}`);
+          for (const label of ['A', 'B', 'C']) {
+            for (const key of ['username', 'password', 'tenantId', 'slug', 'apiKey', 'jobId', 'fileKey', 'tmText', 'tmHash']) {
+              if (!state.tenants?.[label]?.[key]) missingState.push(`tenants.${label}.${key}`);
+            }
+          }
+          if (missingState.length) {
+            console.error(`::error::TM_STATE_JSON is missing required seeded fields: ${missingState.join(', ')}`);
+            process.exit(1);
+          }
+          NODE
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Confirm assumed AWS account
+        run: |
+          set -euo pipefail
+          actual="$(aws sts get-caller-identity --query Account --output text)"
+          if [[ "$actual" != "$TM_ACCOUNT" ]]; then
+            echo "::error::Assumed AWS account $actual does not match expected TM_ACCOUNT $TM_ACCOUNT"
+            exit 1
+          fi
+
+      - name: Confirm deployed CloudFormation stack
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks --stack-name "$TM_DEPLOY_STACK_NAME" --query 'Stacks[0].StackStatus' --output text | grep -E '^(CREATE|UPDATE)_COMPLETE$'
+
+      - name: Prepare E2E environment and seeded state
+        working-directory: e2e
+        env:
+          TM_CI_ENV: ${{ secrets.TM_CI_ENV }}
+          TM_STATE_JSON: ${{ secrets.TM_STATE_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "$TM_CI_ENV" || { echo 'Missing repository secret TM_CI_ENV'; exit 1; }
+          test -n "$TM_STATE_JSON" || { echo 'Missing repository secret TM_STATE_JSON'; exit 1; }
+          printf '%s\n' "$TM_CI_ENV" > .env.ci
+          mkdir -p .state
+          printf '%s\n' "$TM_STATE_JSON" > .state/ci.json
+          chmod 600 .env.ci .state/ci.json
+
+      - name: Run tenant isolation and SSRF suites
+        working-directory: e2e
+        env:
+          TM_STAGE: ci
+          TM_ENV_FILE: .env.ci
+        run: npm run test:gate
+
+      - name: Run limits suite when explicitly requested
+        if: github.event_name == 'workflow_dispatch' && inputs.run_limits
+        working-directory: e2e
+        env:
+          TM_STAGE: ci
+          TM_ENV_FILE: .env.ci
+          TM_ALLOW_MUTATION: '1'
+        run: npm run test:limits
+
+      - name: Aggregate evidence
+        if: always()
+        working-directory: e2e
+        env:
+          TM_RUN_ID: ${{ github.run_id }}
+          TM_EVIDENCE_REQUIRED_SCENARIOS: ${{ inputs.run_limits == true && '4,5,6' || '4,6' }}
+        run: npm run evidence -- "$TM_RUN_ID"
+
+      - name: Upload evidence report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-evidence-${{ github.run_id }}
+          path: e2e/evidence/${{ github.run_id }}/summary.md
+          if-no-files-found: warn
+          retention-days: 7
