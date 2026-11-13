@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { chooseSafeRunId, isSafeRunId } from '../lib/evidenceRunId';
 
@@ -25,7 +25,9 @@ function chooseRunId(): string {
 
 const runId = chooseRunId();
 const runDir = join(evidenceRoot, runId);
-mkdirSync(runDir, { recursive: true });
+if (!existsSync(runDir) || !statSync(runDir).isDirectory()) {
+  throw new Error(`Không tìm thấy thư mục evidence cho run ID "${runId}". Hãy chạy test trước hoặc chọn run ID hợp lệ.`);
+}
 const latest = new Map<string, Evidence>();
 const files = readdirSync(runDir).filter((f) => /^scenario-\d+\.jsonl$/.test(f)).sort();
 for (const file of files) {

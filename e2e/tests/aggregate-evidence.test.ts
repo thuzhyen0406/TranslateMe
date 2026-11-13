@@ -15,9 +15,11 @@ test('aggregator rejects unsafe IDs from TM_RUN_ID fallback', () => {
 });
 
 test('aggregator validates the selected ID regardless of its source', () => {
+  assert.equal(chooseSafeRunId('cli-run', 'latest-run', 'env-run'), 'cli-run');
   assert.throws(() => chooseSafeRunId('../outside', undefined, undefined), /Run ID không an toàn/u);
   assert.throws(() => chooseSafeRunId(undefined, undefined, '..'), /Run ID không an toàn/u);
-  assert.equal(chooseSafeRunId(undefined, 'run-123', '../../../../tmp'), 'run-123');
+  assert.throws(() => chooseSafeRunId(undefined, 'run-123', '../../../../tmp'), /Run ID không an toàn/u);
+  assert.equal(chooseSafeRunId(undefined, 'run-123', 'env-run'), 'env-run');
   assert.equal(chooseSafeRunId(undefined, undefined, 'run-456'), 'run-456');
 });
 
@@ -67,4 +69,18 @@ test('aggregator rejects missing or invalid timestamps instead of retaining an o
       rmSync(runDir, { recursive: true, force: true });
     }
   }
+});
+
+test('aggregator errors for an unknown run ID without creating an empty evidence directory', () => {
+  const e2eRoot = resolve(__dirname, '..');
+  const runId = `missing-run-${process.pid}-${Date.now()}`;
+  const runDir = join(e2eRoot, 'evidence', runId);
+  rmSync(runDir, { recursive: true, force: true });
+
+  const result = spawnSync(process.execPath, [
+    '--require', 'ts-node/register/transpile-only', 'tools/aggregate-evidence.ts', runId,
+  ], { cwd: e2eRoot, encoding: 'utf8' });
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stderr}${result.stdout}`, /Không tìm thấy thư mục evidence/u);
+  assert.equal(existsSync(runDir), false);
 });

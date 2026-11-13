@@ -5,7 +5,7 @@ export function chooseSafeRunId(
   latestExistingRunId: string | undefined,
   envRunId: string | undefined,
 ): string {
-  const runId = cliRunId || latestExistingRunId || envRunId || 'local';
+  const runId = cliRunId || envRunId || latestExistingRunId || 'local';
   if (!isSafeRunId(runId)) throw new Error(`Run ID không an toàn: ${runId}`);
   return runId;
 }
