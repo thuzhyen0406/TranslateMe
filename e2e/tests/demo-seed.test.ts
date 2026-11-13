@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ensureUsagePlanKey } from '../demo/usagePlan';
-import { batchRecoveryWaitSeconds, recoverBatchJob } from '../demo/batchRecovery';
+import { batchRecoveryPollDelayMs, batchRecoveryWaitSeconds, recoverBatchJob } from '../demo/batchRecovery';
 
 const envBefore = {
   AWS_BIN: process.env.AWS_BIN,
@@ -54,6 +54,16 @@ if (service === 'apigateway' && command === 'get-api-key') {
   }
   json({ id: value('--key-id') });
 } else if (service === 'dynamodb' && command === 'query') {
+  if (process.env.FAKE_AWS_MODE === 'batch-page-two') {
+    if (!args.includes('--exclusive-start-key')) {
+      json({ Items: [], LastEvaluatedKey: { PK: { S: 'TENANT#tenant-c#JOB' }, SK: { S: 'JOB#page-1' } } });
+    } else {
+      json({ Items: [{
+        PK: { S: 'TENANT#tenant-c#JOB' }, SK: { S: 'JOB#job-20261113-page-two' },
+        jobId: { S: 'job-20261113-page-two' }, fileKey: { S: 'batch/tenant-c/input/upload.txt' }, type: { S: 'FILE' },
+      }] });
+    }
+  } else
   if (process.env.FAKE_AWS_MODE === 'batch-found') {
     json({ Items: [{
       PK: { S: 'TENANT#tenant-c#JOB' }, SK: { S: 'JOB#job-20261113-0123456789ab' },
@@ -122,6 +132,22 @@ test('batch recovery query theo tenant/fileKey bằng consistent read trước k
   assert.ok(query.some((arg) => arg.includes('batch/tenant-c/input/upload.txt')), JSON.stringify(query));
 });
 
+test('batch recovery tiếp tục phân trang khi trang đầu không khớp fileKey', async () => {
+  const log = setupFakeAws('batch-page-two');
+  process.env.TM_TABLE = 'translate-data';
+  process.env.TM_BATCH_RECOVERY_WAIT_S = '90';
+  const jobId = await recoverBatchJob('tenant-c', 'batch/tenant-c/input/upload.txt');
+  assert.equal(jobId, 'job-20261113-page-two');
+  const queries = calls(log);
+  assert.equal(queries.length, 2);
+  const pageTwo = queries[1];
+  const startKeyIndex = pageTwo.indexOf('--exclusive-start-key');
+  assert.ok(startKeyIndex >= 0, JSON.stringify(pageTwo));
+  assert.deepEqual(JSON.parse(pageTwo[startKeyIndex + 1]), {
+    PK: { S: 'TENANT#tenant-c#JOB' }, SK: { S: 'JOB#page-1' },
+  });
+});
+
 test('batch recovery từ chối tiếp tục nếu không thể đọc state để đối soát', async () => {
   setupFakeAws();
   delete process.env.TM_TABLE;
@@ -133,4 +159,9 @@ test('batch recovery không cho cấu hình thời gian dò ngắn hơn Lambda t
   assert.equal(batchRecoveryWaitSeconds(undefined), 90);
   assert.equal(batchRecoveryWaitSeconds('120'), 120);
   assert.throws(() => batchRecoveryWaitSeconds('35'), /không được ngắn hơn timeout Lambda/u);
+});
+
+test('batch recovery tăng dần khoảng dò và giới hạn backoff ở 10 giây', () => {
+  assert.deepEqual([0, 1, 2, 3, 4, 8].map(batchRecoveryPollDelayMs), [1000, 2000, 4000, 8000, 10000, 10000]);
+  assert.throws(() => batchRecoveryPollDelayMs(-1), /số nguyên không âm/u);
 });

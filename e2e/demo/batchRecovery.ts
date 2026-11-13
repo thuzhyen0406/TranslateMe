@@ -4,6 +4,12 @@ import { aws } from './aws';
 // plus a 30s margin for Lambda completion and DynamoDB visibility.
 export const MIN_BATCH_RECOVERY_WAIT_SECONDS = 90;
 const MAX_BATCH_RECOVERY_WAIT_SECONDS = 1200;
+const MAX_BATCH_RECOVERY_POLL_INTERVAL_MS = 10_000;
+
+export function batchRecoveryPollDelayMs(attempt: number): number {
+  if (!Number.isInteger(attempt) || attempt < 0) throw new Error('Số lần dò batch phải là số nguyên không âm.');
+  return Math.min(1000 * (2 ** attempt), MAX_BATCH_RECOVERY_POLL_INTERVAL_MS);
+}
 
 const need = (name: string): string => {
   const value = process.env[name];
@@ -12,20 +18,29 @@ const need = (name: string): string => {
 };
 
 export function findBatchJobByFileKey(tenantId: string, fileKey: string, region: string[] = []): string | undefined {
-  const response = aws([
-    'dynamodb', 'query', '--table-name', need('TM_TABLE'),
-    '--key-condition-expression', 'PK = :pk',
-    '--filter-expression', 'fileKey = :fileKey AND #type = :type',
-    '--expression-attribute-names', JSON.stringify({ '#type': 'type' }),
-    '--expression-attribute-values', JSON.stringify({
-      ':pk': { S: `TENANT#${tenantId}#JOB` },
-      ':fileKey': { S: fileKey },
-      ':type': { S: 'FILE' },
-    }),
-    '--consistent-read', ...region,
-  ], { readonly: true });
-  const matches = (response.Items ?? []).filter((item: any) =>
-    item?.fileKey?.S === fileKey && item?.type?.S === 'FILE');
+  const matches: any[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const args = [
+      'dynamodb', 'query', '--table-name', need('TM_TABLE'),
+      '--key-condition-expression', 'PK = :pk',
+      '--filter-expression', 'fileKey = :fileKey AND #type = :type',
+      '--expression-attribute-names', JSON.stringify({ '#type': 'type' }),
+      '--expression-attribute-values', JSON.stringify({
+        ':pk': { S: `TENANT#${tenantId}#JOB` },
+        ':fileKey': { S: fileKey },
+        ':type': { S: 'FILE' },
+      }),
+      '--consistent-read',
+      ...(exclusiveStartKey ? ['--exclusive-start-key', JSON.stringify(exclusiveStartKey)] : []),
+      ...region,
+    ];
+    const response = aws(args, { readonly: true });
+    matches.push(...(response.Items ?? []).filter((item: any) =>
+      item?.fileKey?.S === fileKey && item?.type?.S === 'FILE'));
+    exclusiveStartKey = response.LastEvaluatedKey;
+  } while (exclusiveStartKey && Object.keys(exclusiveStartKey).length > 0);
+
   if (matches.length > 1) {
     throw new Error(`Tìm thấy nhiều batch job cùng fileKey ${fileKey}; cần đối soát thủ công, không gửi lại.`);
   }
@@ -49,11 +64,14 @@ export function batchRecoveryWaitSeconds(raw = process.env.TM_BATCH_RECOVERY_WAI
 export async function recoverBatchJob(tenantId: string, fileKey: string, region: string[] = []): Promise<string | undefined> {
   const waitSeconds = batchRecoveryWaitSeconds();
   const deadline = Date.now() + waitSeconds * 1000;
+  let attempt = 0;
   do {
     const found = findBatchJobByFileKey(tenantId, fileKey, region);
     if (found) return found;
     if (Date.now() >= deadline) break;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+    const delayMs = Math.min(batchRecoveryPollDelayMs(attempt), deadline - Date.now());
+    attempt++;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   } while (true);
   return undefined;
 }

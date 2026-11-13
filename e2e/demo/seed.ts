@@ -41,6 +41,20 @@ function loadOrNew(): State {
   };
 }
 
+function assertSeedTarget(): void {
+  if (stage !== 'dev' && stage !== 'demo') {
+    throw new Error(`TM_STAGE không hợp lệ: ${stage}. Seed chỉ chấp nhận dev hoặc demo.`);
+  }
+  const expectedAccount = process.env.TM_ACCOUNT ?? '';
+  if (!/^\d{12}$/.test(expectedAccount)) {
+    throw new Error('TM_ACCOUNT bắt buộc phải là AWS account ID gồm đúng 12 chữ số trước khi seed.');
+  }
+  const identity = aws(['sts', 'get-caller-identity'], { readonly: true });
+  if (identity.Account !== expectedAccount) {
+    throw new Error(`AWS account hiện tại (${identity.Account ?? 'không xác định'}) không khớp TM_ACCOUNT (${expectedAccount}); seed bị hủy.`);
+  }
+}
+
 async function uploadBatchFile(t: TenantState, st: State, contents: string): Promise<void> {
   const up = must(await call('POST', R.uploadUrl, {
     apiKey: t.apiKey, body: B.uploadUrl('e2e.txt', Buffer.byteLength(contents)),
@@ -248,12 +262,15 @@ function seedTinyPlan(st: State): void {
 
 async function main() {
   const cmd = argv.find((a) => !a.startsWith('--')) ?? 'all';
+  if (!['platform', 'tenants', 'tiny-plan', 'all'].includes(cmd)) {
+    throw new Error('Lệnh: platform | tenants | tiny-plan | all');
+  }
+  assertSeedTarget();
   const st = loadOrNew();
   if (cmd === 'platform' || cmd === 'all') await seedPlatform(st);
   if (!dry) saveState(st);
   if (cmd === 'tenants' || cmd === 'all') for (const l of ['A', 'B', 'C'] as const) await seedTenant(l, st);
   if (cmd === 'tiny-plan' || cmd === 'all') seedTinyPlan(st);
-  if (!['platform', 'tenants', 'tiny-plan', 'all'].includes(cmd)) { console.error('Lệnh: platform | tenants | tiny-plan | all'); process.exit(1); }
   console.log(`\nTrạng thái: ${stateFile(stage)} (chứa mật khẩu và key, không commit)`);
 }
 main().catch((e) => { console.error(e.message ?? e); process.exit(1); });

@@ -23,6 +23,7 @@ describe('tenant-scoped AWS sessions', () => {
       'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa',
       'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa#*',
     ]);
+    assert.equal(policy.Statement[0].Condition.Null['dynamodb:LeadingKeys'], 'false');
     assert.ok(!keys.some((key: string) => key.includes('t_*')));
     assert.throws(() => tenantSessionPolicy('t_bad#other'), /Invalid tenant ID/);
   });
@@ -61,6 +62,19 @@ describe('tenant-scoped AWS sessions', () => {
     assert.match(websiteTransaction[0], /TENANT#\$\{aws:PrincipalTag\/TenantId\}#\*/);
     assert.match(websiteTransaction[0], /TENANT#PLATFORM#SLUG#\*/);
     assert.doesNotMatch(websiteTransaction[0], /dynamodb:(?:DeleteItem|UpdateItem)/);
+  });
+
+  it('IAM tenant role stays tenant-scoped even without an STS session policy', () => {
+    const repositoryRoot = findRepositoryRoot();
+    const iamTemplate = readFileSync(resolve(repositoryRoot, 'infra/modules/iam.yaml'), 'utf8');
+    const tenantRole = iamTemplate.match(/  TenantDataAccessRole:[\s\S]*?(?=\n  TenantPayloadAccessRole:)/);
+    assert.ok(tenantRole, 'TenantDataAccessRole exists');
+    assert.match(tenantRole[0], /aws:RequestTag\/TenantId: '\$\{sts:SourceIdentity\}'/);
+    assert.match(tenantRole[0], /dynamodb:LeadingKeys:[\s\S]*?'TENANT#\$\{aws:PrincipalTag\/TenantId\}'/);
+    assert.match(tenantRole[0], /Null:\s*\n\s*dynamodb:LeadingKeys: 'false'/);
+    assert.match(tenantRole[0], /\/batch\/\$\{!aws:PrincipalTag\/TenantId\}\/input\/\*/);
+    assert.match(tenantRole[0], /\/batch\/\$\{!aws:PrincipalTag\/TenantId\}\/results\/\*/);
+    assert.doesNotMatch(tenantRole[0], /TENANT#t_\*|\/batch\/\*\/\*/);
   });
 
   it('defines HostSlugResource as a valid child of HostsResource', () => {

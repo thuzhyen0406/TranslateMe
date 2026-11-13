@@ -59,6 +59,10 @@ invocation permissions remain in `api-gateway.yaml`.
   `sts:AssumeRole` can choose another tenant ID. If that threat must be blocked
   by IAM alone, this design is insufficient and needs tenant-bound AWS
   identities or a different authorization boundary.
+  The role's `PrincipalTag/TenantId` conditions are the maximum-permission
+  boundary: omitting the inline session policy does not grant access to other
+  tenant partitions or S3 prefixes for the session's tag. This does not make
+  that caller-supplied tag an authenticated tenant identity.
   A `DenyRoleChaining` statement on each tenant role's trust policy prevents
   a caller that already carries a `TenantId` session tag from assuming the role
   again — blocking an already-scoped session from pivoting to another tenant.
@@ -87,8 +91,9 @@ invocation permissions remain in `api-gateway.yaml`.
   public access blocked, default SSE-KMS encryption, a one-day payload lifecycle,
   and a TLS-only bucket policy. Worker payload keys use
   `tenant/<tenantId>/worker/<file>`. Batch uploads use
-  `batch/<tenantId>/input/<file>` and the batch bucket's KMS key.
-- `TenantDataAccessRole` supplies DynamoDB and batch-upload maximum permissions;
+  `batch/<tenantId>/input/<file>` and workflow intermediates/results under
+  `batch/<tenantId>/results/<jobId>/`, all using the batch bucket's KMS key.
+- `TenantDataAccessRole` supplies DynamoDB and tenant-scoped batch object/KMS maximum permissions;
   `TenantPayloadAccessRole` supplies worker-payload maximum permissions. The
   inline session policy narrows each assumed role to the current tenant.
 - `translate:TranslateText` and `comprehend:DetectDominantLanguage` require
