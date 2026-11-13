@@ -545,6 +545,75 @@ export function buildConsoleRouteModules(
 /** Danh sách các mô-đun route mặc định của Console Lambda (hợp nhất đầy đủ 6 nhóm). */
 export const CONSOLE_ROUTE_MODULES: readonly ConsoleRouteModule[] = buildConsoleRouteModules();
 
+/** Dependencies cho endpoint danh tính & trạng thái tenant (`GET /console/me`). */
+export interface ConsoleMeDeps {
+  db?: Pick<typeof db, 'get'>;
+}
+
+/**
+ * Adapter HTTP cho `GET /console/me`: trả về danh tính, vai trò hiện hành và
+ * trạng thái khóa/hoạt động từ bản ghi `CONFIG` của tenant để Console bật/tắt thao tác ghi fail-closed.
+ * Mọi vai trò hợp lệ (`TENANT_ADMIN`, `DEVELOPER`, `REVIEWER`) đều đọc được kể cả khi tenant đang `LOCKED`.
+ */
+export async function handleConsoleMeApiGatewayRoute(
+  event: ConsoleEvent,
+  ctx: Ctx,
+  deps?: ConsoleMeDeps,
+): Promise<ConsoleResponse | null> {
+  const rawPath = event.path ?? (event as { rawPath?: string }).rawPath ?? '';
+  const path = normalizeConsolePath(rawPath);
+  if (path !== '/console/me' && path !== '/console/me/') {
+    return null;
+  }
+
+  const requestId = event.requestContext?.requestId ?? 'req-unknown';
+  const method = (event.httpMethod ?? event.requestContext?.http?.method ?? 'GET').toUpperCase();
+  if (method !== 'GET') {
+    return errorResponse(404, 'NOT_FOUND', 'Không tìm thấy endpoint.', requestId);
+  }
+
+  try {
+    requireRole(ctx, ['TENANT_ADMIN', 'DEVELOPER', 'REVIEWER']);
+    const getFn = deps?.db?.get ?? db.get;
+    const config = await getFn(ctx, keys.config(ctx), { consistent: true });
+    if (!config) {
+      return errorResponse(404, 'NOT_FOUND', 'Không tìm thấy thông tin tổ chức.', requestId);
+    }
+
+    const rawStatus = typeof config.status === 'string' ? config.status.trim().toUpperCase() : '';
+    if (rawStatus !== 'ACTIVE' && rawStatus !== 'LOCKED') {
+      return errorResponse(500, 'INTERNAL_ERROR', 'Trạng thái tổ chức không hợp lệ.', requestId);
+    }
+
+    const tenantStatus: 'ACTIVE' | 'LOCKED' = rawStatus;
+    const payload: Record<string, unknown> = {
+      request_id: requestId,
+      tenant_id: ctx.tenantId,
+      role: ctx.role,
+      tenant_status: tenantStatus,
+      tenant_locked: tenantStatus === 'LOCKED',
+    };
+    if (typeof config.organizationName === 'string' && config.organizationName.trim()) {
+      payload.organization_name = config.organizationName;
+    }
+    if (typeof config.plan === 'string' && config.plan.trim()) {
+      payload.plan = config.plan;
+    }
+
+    return {
+      statusCode: 200,
+      headers: HEADERS,
+      body: JSON.stringify(payload),
+    };
+  } catch (err: any) {
+    if (err instanceof AppError) {
+      const statusCode = statusForConsoleError(err.code);
+      return errorResponse(statusCode, err.code, err.message, requestId, err.details);
+    }
+    return errorResponse(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
+  }
+}
+
 export interface ConsoleHandlerDeps {
   contextFromClaims?: (claims: Record<string, unknown>, requestId: string) => Promise<Ctx>;
   db?: Pick<typeof db, 'get'>;
@@ -581,6 +650,14 @@ export function createConsoleHandler(
       return errorResponse(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
     }
     try {
+      if (!modules) {
+        const meResponse = await handleConsoleMeApiGatewayRoute(
+          event,
+          ctx,
+          deps?.db ? { db: deps.db } : undefined,
+        );
+        if (meResponse) return meResponse;
+      }
       for (const route of effectiveModules) {
         const response = await route(event, ctx);
         if (response) return response;

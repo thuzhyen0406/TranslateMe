@@ -35,4 +35,44 @@ describe('console tenant lock policy', () => {
       tenantStatus: 'LOCKED',
     }), false);
   });
+
+  it('chặn thao tác ghi fail-closed khi tenantStatus là UNKNOWN', () => {
+    for (const method of ['GET', 'HEAD']) {
+      assert.equal(
+        canConsoleRequest({
+          method,
+          path: '/console/hosts',
+          tenantStatus: 'UNKNOWN',
+        }),
+        true,
+      );
+    }
+
+    assert.equal(
+      canConsoleRequest({
+        method: 'POST',
+        path: '/console/glossary/import/preview',
+        tenantStatus: 'UNKNOWN',
+      }),
+      true,
+    );
+
+    for (const [method, path] of [
+      ['POST', '/console/members/invite'],
+      ['POST', '/console/hosts'],
+      ['PUT', '/console/glossary/terms/example'],
+      ['DELETE', '/console/glossary/terms/example'],
+      ['PUT', '/console/translations'],
+    ] as const) {
+      assert.equal(
+        canConsoleRequest({
+          method,
+          path,
+          tenantStatus: 'UNKNOWN',
+        }),
+        false,
+        `${method} ${path} phải bị chặn khi tenantStatus=UNKNOWN`,
+      );
+    }
+  });
 });

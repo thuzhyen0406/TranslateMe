@@ -393,6 +393,10 @@ describe('siteManager', () => {
       pauseSite(tenantA, 'missing-site', harness.dependencies),
       (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
+    await assert.rejects(
+      verifySite(tenantA, 'missing-site', 'META', harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
+    );
   });
 
   it('cho phép thử lại invalidation sau khi trạng thái đã đổi', async () => {
