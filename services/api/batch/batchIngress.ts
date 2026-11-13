@@ -352,7 +352,7 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
         return respond(202, { job_id: jobId, status: 'QUEUED', estimated_characters: estimatedCharacters });
       }
 
-      const jobMatch = /^\/translate\/batch\/((?:job-)?\d{8}-[0-9a-f]{12})\/?$/u.exec(path);
+      const jobMatch = /^\/translate\/batch\/(?:session\/)?((?:job-)?\d{8}-[0-9a-f]{12})\/?$/u.exec(path);
       if (method === 'GET' && jobMatch) {
         const jobId = jobMatch[1].startsWith('job-') ? jobMatch[1] : `job-${jobMatch[1]}`;
         const job = await deps.db.get(ctx, jobKey(ctx, jobId), { consistent: true });

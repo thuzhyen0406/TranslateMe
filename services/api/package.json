@@ -9,6 +9,7 @@
   },
   "scripts": {
   "build": "tsc -p tsconfig.json",
+  "demo:realtime-tm": "node --env-file=scripts/realtime-tm-demo.env scripts/realtime-tm-demo.mjs",
   "test": "tsc -p tsconfig.json && node --test \"dist/services/api/**/*.test.js\" dist/tests/unit/invalidation_contract.test.js"
 },
   "dependencies": {
