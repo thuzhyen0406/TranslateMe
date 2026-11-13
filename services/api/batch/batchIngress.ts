@@ -187,7 +187,7 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
       if (ctx.role === 'REVIEWER') throw new AppError('PERMISSION_DENIED', 'Vai trò REVIEWER không được phép truy cập API batch.');
       const method = (event.httpMethod ?? 'GET').toUpperCase();
       const path = event.path ?? event.rawPath ?? '';
-      const isBatchJobGet = method === 'GET' && /^\/translate\/batch\/((?:job-)?\d{8}-[0-9a-f]{12})\/?$/u.test(path);
+      const isBatchJobGet = method === 'GET' && /(?:^|\/)translate\/batch\/(?:session\/)?((?:job-)?\d{8}-[0-9a-f]{12})\/?$/u.test(path);
       const config = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
       if (!config || (config.status !== 'ACTIVE' && !(isBatchJobGet && config.status === 'LOCKED'))) {
         throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị tạm khóa.');
@@ -352,7 +352,7 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
         return respond(202, { job_id: jobId, status: 'QUEUED', estimated_characters: estimatedCharacters });
       }
 
-      const jobMatch = /^\/translate\/batch\/(?:session\/)?((?:job-)?\d{8}-[0-9a-f]{12})\/?$/u.exec(path);
+      const jobMatch = /(?:^|\/)translate\/batch\/(?:session\/)?((?:job-)?\d{8}-[0-9a-f]{12})\/?$/u.exec(path);
       if (method === 'GET' && jobMatch) {
         const jobId = jobMatch[1].startsWith('job-') ? jobMatch[1] : `job-${jobMatch[1]}`;
         const job = await deps.db.get(ctx, jobKey(ctx, jobId), { consistent: true });
@@ -368,6 +368,7 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
             job_id: jobId, status: job.status, total: Number(job.total ?? 0), done: Number(job.done ?? 0), failed: Number(job.failed ?? 0),
             progress: job.status === 'SUCCEEDED' ? 100 : Number(job.total) > 0 ? Math.floor(((Number(job.done ?? 0) + Number(job.failed ?? 0)) * 100) / Number(job.total)) : 0,
             target_langs: Array.isArray(job.targetLangs) ? job.targetLangs : [],
+            send_email: job.sendEmail === true,
             ...(typeof job.reason === 'string' ? { reason: job.reason } : {}),
             warnings,
             ...(job.status === 'SUCCEEDED' ? {
@@ -377,6 +378,7 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
                 download_url: downloadUrl,
                 warnings,
               })),
+              ...(Object.keys(downloads).length ? { downloads } : {}),
             } : {}),
             ...(typeof job.notificationStatus === 'string' ? { notification_status: job.notificationStatus } : {}),
             ...(typeof job.notificationError === 'string' ? { notification_error: job.notificationError } : {}),

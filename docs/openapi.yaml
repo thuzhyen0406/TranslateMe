@@ -558,6 +558,7 @@ paths:
                   failed: 0
                   progress: 100
                   target_langs: ["en", "ko"]
+                  send_email: true
                   warnings: []
                   results:
                     - target_lang: "en"
@@ -1023,6 +1024,10 @@ components:
               items:
                 type: string
               example: ["en", "ko"]
+            send_email:
+              type: boolean
+              description: Có yêu cầu gửi email thông báo cho công việc này hay không
+              example: true
             reason:
               type: string
               description: Lý do khi JOB thất bại
@@ -1038,8 +1043,8 @@ components:
                 $ref: '#/components/schemas/BatchJobResult'
             notification_status:
               type: string
-              enum: [SUBMITTED, FAILED]
-              description: Trạng thái gửi notification nếu JOB yêu cầu email
+              enum: [PENDING, SUBMITTED, FAILED]
+              description: Trạng thái gửi notification; SUBMITTED nghĩa là SNS đã nhận yêu cầu gửi
               example: "SUBMITTED"
             notification_error:
               type: string

@@ -1,12 +1,13 @@
 import type { AuthenticatedSession } from '../types/auth.js';
 import { IS_DEMO_AUTH_MODE } from './cognitoAuth.js';
+import type { BatchNotificationStatus } from './batchJobStatus.js';
 
 const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
 const baseUrl = (env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 export type KeyPlan = 'Basic' | 'Standard';
 export interface ApiKeyRow { key_id: string; name: string; plan: KeyPlan; status: 'ACTIVE' | 'REVOKED'; last4: string; created_at: string; rotated_from?: string }
 export interface ApiKeySecret extends ApiKeyRow { value: string }
-export interface BatchJob { job_id: string; status: string; total: number; done: number; failed: number; progress: number; target_langs: string[]; reason?: string; downloads?: Record<string, string> }
+export interface BatchJob { job_id: string; status: string; total: number; done: number; failed: number; progress: number; target_langs: string[]; send_email?: boolean; notification_status?: BatchNotificationStatus; notification_error?: string; reason?: string; downloads?: Record<string, string> }
 export interface TranslateResult { translated_text: string; source_lang: string; source_lang_detected: boolean; detection_confidence?: number; target_lang: string; characters_machine_translated: number; characters_from_memory: number; terminology_version: number }
 
 const mockKeyRows = new Map<string, ApiKeyRow[]>();
@@ -62,7 +63,7 @@ export async function translateText(session: AuthenticatedSession, input: { text
 export async function submitBatch(session: AuthenticatedSession, file: File, sourceLang: string, targetLangs: string[], sendEmail: boolean): Promise<BatchJob> {
   if (IS_DEMO_AUTH_MODE) {
     const jobId = `job-${new Date().toISOString().slice(0,10).replaceAll('-', '')}-${crypto.randomUUID().replaceAll('-', '').slice(0,12)}`;
-    const job: BatchJob = { job_id: jobId, status: 'RUNNING', total: Math.max(1, Math.ceil(file.size / 2000)), done: 0, failed: 0, progress: 0, target_langs: targetLangs };
+    const job: BatchJob = { job_id: jobId, status: 'RUNNING', total: Math.max(1, Math.ceil(file.size / 2000)), done: 0, failed: 0, progress: 0, target_langs: targetLangs, send_email: sendEmail };
     mockJobs.set(jobId, { file, job, createdAt: Date.now() }); return job;
   }
   const upload = await request<{ file_key: string; upload_url: string; required_headers: Record<string, string> }>(session, '/translate/batch/session/upload-url', { method: 'POST', body: JSON.stringify({ file_name: file.name, size_bytes: file.size }) });
@@ -70,13 +71,17 @@ export async function submitBatch(session: AuthenticatedSession, file: File, sou
   if (!put.ok) throw new Error('Không thể tải tệp lên kho lưu trữ.');
   const body = { file_key: upload.file_key, target_langs: targetLangs, ...(sourceLang ? { source_lang: sourceLang } : {}), send_email: sendEmail };
   const result = await request<{ job_id: string; status: string; estimated_characters: number }>(session, '/translate/batch/session', { method: 'POST', body: JSON.stringify(body) });
-  return { job_id: result.job_id, status: result.status, total: result.estimated_characters, done: 0, failed: 0, progress: 0, target_langs: targetLangs };
+  return { job_id: result.job_id, status: result.status, total: result.estimated_characters, done: 0, failed: 0, progress: 0, target_langs: targetLangs, send_email: sendEmail };
 }
 export async function getBatchJob(session: AuthenticatedSession, id: string): Promise<BatchJob> {
   if (IS_DEMO_AUTH_MODE) {
     const item = mockJobs.get(id); if (!item) throw new Error('Không tìm thấy công việc.');
-    if (Date.now() - item.createdAt > 1500) { item.job.status = 'SUCCEEDED'; item.job.done = item.job.total; item.job.progress = 100; item.job.downloads ??= Object.fromEntries(item.job.target_langs.map((lang) => [lang, URL.createObjectURL(new Blob([`Bản dịch demo của ${item.file.name}`], { type: 'text/plain' }))])); }
+    if (Date.now() - item.createdAt > 1500) { item.job.status = 'SUCCEEDED'; item.job.done = item.job.total; item.job.progress = 100; if (item.job.send_email) item.job.notification_status = 'SUBMITTED'; item.job.downloads ??= Object.fromEntries(item.job.target_langs.map((lang) => [lang, URL.createObjectURL(new Blob([`Bản dịch demo của ${item.file.name}`], { type: 'text/plain' }))])); }
     return { ...item.job };
   }
-  return (await request<{ job: BatchJob }>(session, `/translate/batch/session/${encodeURIComponent(id)}`)).job;
+  const job = (await request<{ job: BatchJob & { results?: Array<{ target_lang: string; download_url: string }> } }>(session, `/translate/batch/session/${encodeURIComponent(id)}`)).job;
+  if (!job.downloads && Array.isArray(job.results)) {
+    job.downloads = Object.fromEntries(job.results.map((r) => [r.target_lang, r.download_url]));
+  }
+  return job;
 }

@@ -461,4 +461,24 @@ describe('POST /translate/realtime', () => {
     assert.equal(test.stored.length, 0, 'không được tạo bản ghi TM mới');
     assert.equal(test.calls.some((call) => call.name === 'UpdateCommand'), false, 'không được gọi UpdateCommand ghi TM');
   });
+
+  it('từ chối vai trò REVIEWER khi gọi qua JWT session (PERMISSION_DENIED)', async () => {
+    const test = setup();
+    const response = await test.handler({
+      body: JSON.stringify({ text: 'Xin chào.', target_lang: 'en' }),
+      requestContext: {
+        requestId: 'req-reviewer-01',
+        authorizer: {
+          claims: {
+            sub: 'sub-reviewer-1',
+            'custom:tenant_id': TENANT,
+            'custom:role': 'REVIEWER',
+          },
+        },
+      },
+    });
+    const body = responseBody(response);
+    assert.equal(response.statusCode, 403);
+    assert.equal(body.error.code, 'PERMISSION_DENIED');
+  });
 });

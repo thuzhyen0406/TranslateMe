@@ -245,17 +245,16 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session, onUpdateS
             onTenantStatusDetected={handleTenantStatusDetected}
           />
         ) : activeMenu === 'website' ? (
-          <WebsitePage session={session} />
-        ) : activeMenu === 'apikey' ? (
-          <ApiKeysPage session={session} />
-        ) : activeMenu === 'playground' ? (
-          <PlaygroundPage session={session} />
-        ) : activeMenu === 'doc-translate' ? (
-          <BatchTranslatePage session={session} />
           <WebsitePage
             session={effectiveSession}
             onTenantStatusDetected={handleTenantStatusDetected}
           />
+        ) : activeMenu === 'apikey' ? (
+          <ApiKeysPage session={effectiveSession} />
+        ) : activeMenu === 'playground' ? (
+          <PlaygroundPage session={effectiveSession} />
+        ) : activeMenu === 'doc-translate' ? (
+          <BatchTranslatePage session={effectiveSession} />
         ) : activeMenu === 'glossary' ? (
           <GlossaryPage
             session={effectiveSession}

@@ -182,6 +182,9 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
       const auth = await resolveTenant(event, deps);
       if (!auth.tenantId || (!auth.keyId && !auth.ctx)) return apiError(401, 'UNAUTHORIZED', 'API key hoặc phiên đăng nhập không hợp lệ.', requestId);
       const ctx: Ctx = auth.ctx ?? { tenantId: auth.tenantId, via: 'KEYMAP', requestId, keyId: auth.keyId };
+      if (ctx.via === 'JWT' && ctx.role === 'REVIEWER') {
+        throw new AppError('PERMISSION_DENIED', 'Reviewer không có quyền dùng tính năng thử dịch.');
+      }
       await assertTenantWritable(ctx, {
         async get(_ctx, key) {
           const result = await deps.ddb.send(new GetCommand({

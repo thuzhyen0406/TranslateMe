@@ -82,6 +82,9 @@ export function tenantSessionPolicy(
       'ForAllValues:StringLike': {
         'dynamodb:LeadingKeys': leadingKeys,
       },
+      Null: {
+        'dynamodb:LeadingKeys': 'false',
+      },
     },
   }];
   if (buckets.dataKmsKeyArn && buckets.dataTableName) {

@@ -59,6 +59,10 @@ invocation permissions remain in `api-gateway.yaml`.
   `sts:AssumeRole` can choose another tenant ID. If that threat must be blocked
   by IAM alone, this design is insufficient and needs tenant-bound AWS
   identities or a different authorization boundary.
+  The role's `PrincipalTag/TenantId` conditions are the maximum-permission
+  boundary: omitting the inline session policy does not grant access to other
+  tenant partitions or S3 prefixes for the session's tag. This does not make
+  that caller-supplied tag an authenticated tenant identity.
   A `DenyRoleChaining` statement on each tenant role's trust policy prevents
   a caller that already carries a `TenantId` session tag from assuming the role
   again — blocking an already-scoped session from pivoting to another tenant.
