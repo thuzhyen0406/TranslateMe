@@ -1,11 +1,13 @@
 // Ghi bằng chứng cho từng phép thử; báo cáo tổng hợp thuộc hạng mục 5.2.
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { chooseSafeRunId } from './evidenceRunId';
 
 export type Status = 'pass' | 'fail' | 'skip';
 
 export function record(scenario: number, id: string, title: string, status: Status, data: unknown = {}): void {
-  const dir = join(__dirname, '..', 'evidence', process.env.TM_RUN_ID ?? 'local');
+  const runId = chooseSafeRunId(undefined, undefined, process.env.TM_RUN_ID);
+  const dir = join(__dirname, '..', 'evidence', runId);
   mkdirSync(dir, { recursive: true });
   const line = JSON.stringify({ at: new Date().toISOString(), scenario, id, title, status, data });
   appendFileSync(join(dir, `scenario-${scenario}.jsonl`), line + '\n');
