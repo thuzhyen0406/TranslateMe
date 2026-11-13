@@ -229,7 +229,7 @@ Resources:
                 Resource: !GetAtt BatchWorkflowFunction.Arn
               - Effect: Allow
                 Action: sns:CreateTopic
-                Resource: '*'
+                Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:translateme-batch-${StageName}-*'
               - Effect: Allow
                 Action: sns:Subscribe
                 Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:translateme-batch-${StageName}-*'
