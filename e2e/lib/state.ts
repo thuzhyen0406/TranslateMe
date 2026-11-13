@@ -9,6 +9,8 @@ export interface TenantState {
   tenantId: string;
   slug: string;
   origin: string;
+  /** Website được API xác nhận sẵn sàng cho các test demo. */
+  websiteStatus?: string;
   apiKey: string;
   keyId: string;
   /** Chỉ tenant C: key đã chuyển sang usage plan rất nhỏ để thử REQUEST_QUOTA_EXCEEDED */
@@ -16,6 +18,8 @@ export interface TenantState {
   tinyKeyId?: string;
   jobId: string;
   fileKey: string;
+  /** Được lưu trước khi POST batch để lần chạy sau dò job theo fileKey. */
+  batchSubmissionState?: 'UPLOADING' | 'SUBMITTING' | 'SUBMITTED';
   tmText: string;
   tmHash: string;
 }

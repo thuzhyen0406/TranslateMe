@@ -48,6 +48,35 @@ Các test `safeFetch` trong `libs/common/test/safeFetch.test.ts` dùng transport
 
 Khi nghiệm thu SSRF, cần kiểm tra evidence `S8H` là `pass` và đính kèm bằng chứng log outbound từ môi trường triển khai nếu tiêu chí nghiệm thu yêu cầu. Nếu `S8H` là `skip` hoặc chưa có log AWS, báo cáo chỉ xác nhận những kiểm tra đã chạy; không đánh dấu các tiêu chí header/log là đạt.
 
+## Preflight, deploy và seed demo
+
+Các lệnh vận hành chạy từ `e2e/`:
+
+```sh
+npm run demo:preflight
+npm run demo:deploy -- --stage dev --dry-run
+npm run demo:seed -- all --dry-run
+```
+
+Preflight chỉ gọi AWS API đọc trạng thái. Deploy xác nhận `TM_ACCOUNT` với `sts get-caller-identity` trước lệnh ghi và chỉ nhận stage `dev` hoặc `demo`. Script deploy cần bảy stack entry-point `data.yaml`, `identity.yaml`, `api.yaml`, `edge.yaml`, `workflow.yaml`, `console.yaml`, `ops.yaml`; có thể cấu hình qua `TM_TEMPLATE_DIR` hoặc `TM_TEMPLATE_<STACK>`.
+
+Repo hiện chưa có bảy entry-point này. `infra/template.yaml` là template dev riêng chỉ tạo budget và Hello Lambda, không chứa hạ tầng TranslateMe; `infra/modules/*.yaml` là module, không thể deploy trực tiếp thành bảy stack. Vì vậy deploy thật vẫn dừng trước mọi lệnh CloudFormation cho đến khi các entry-point đúng phạm vi được cung cấp. Không dùng template Hello Lambda làm bản thay thế cho hạ tầng demo.
+
+Seed tenant yêu cầu `TM_DEMO_ORIGIN_A/B/C` trỏ tới ba hostname riêng. Nếu website chưa `ACTIVE`, seed thử xác minh bằng `META` mặc định; có thể chọn `FILE` bằng `TM_DEMO_VERIFY_METHOD=FILE`. Script lấy `verification_code` từ response host. Nếu nội dung xác minh chưa được publish tại hostname, seed dừng và in token cùng hướng dẫn chính xác, không đánh dấu website sẵn sàng. Sau khi publish, chạy lại `npm run demo:seed -- tenants`; state đã lưu nên seed tiếp tục các tài nguyên còn thiếu. Seed không thể tự ghi vào website bên ngoài nếu chưa cấu hình quyền/đích hosting của hostname. `seed all` chỉ PUT Platform Config khi `TM_E2E_HAS_PLATFORM_CONFIG=1`; mặc định ghi chú skip vì route `/platform/config` chưa có trong API hiện tại.
+
+### Xác minh hostname demo
+
+API trả `verification_code` trong đối tượng `host` khi tạo website và trong danh sách website. Seed dùng code đó để gọi verify. Nếu hostname chưa xác minh, thông báo lỗi của seed in hướng dẫn chứa token:
+
+- Với `META` (mặc định), đặt `<meta name="translateme-site-verification" content="<token>">` bên trong `<head>` của trang chủ tại `TM_DEMO_ORIGIN_<A|B|C>`.
+- Với `FILE`, đặt nội dung tệp chỉ gồm token (text/plain) tại đường dẫn gốc `/translateme-verification.txt`; bật bằng `TM_DEMO_VERIFY_METHOD=FILE`.
+
+Đảm bảo trang/file được phục vụ công khai qua HTTPS và phản hồi GET được, rồi chạy lại `npm run demo:seed -- tenants`. Backend yêu cầu nội dung file khớp token chính xác sau khi trim khoảng trắng. Seed chỉ tiếp tục tạo API key, TM và batch job khi API xác nhận trạng thái website `ACTIVE`.
+
+Tenant Cognito được tạo bằng `SignUp` rồi `AdminConfirmSignUp` để kích hoạt PostConfirmation và sinh `custom:tenant_id`; seed không đặt password permanent trước bước confirm. API key dùng payload `{ name, plan: "Basic" }` và đọc `key_id`/`value` từ response lồng trong `api_key` theo contract của API hiện tại.
+
+State lưu `fileKey` và trạng thái batch trước khi POST. Khi kết quả request chưa rõ, lần chạy sau query DynamoDB theo tenant và file key để khôi phục job trước khi gửi lại. Cần `TM_TABLE`, quyền `dynamodb:Query`, và thời gian dò ít nhất 90 giây (`TM_BATCH_RECOVERY_WAIT_S`, timeout Lambda 60 giây cộng 30 giây đệm). `npm run test:demo` dùng `AWS_BIN` giả để kiểm tra thao tác usage plan và batch recovery offline.
+
 ## Cấu trúc
 
 - `lib/`: cấu hình, Cognito JWT, HTTP retry, API contract, so sánh lỗi và evidence.

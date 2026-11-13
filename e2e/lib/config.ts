@@ -1,4 +1,6 @@
 // Đọc cấu hình từ biến môi trường. Gọi cfg() lúc chạy, không đọc lúc import.
+import './env';
+
 export interface Cfg {
   stage: string;
   region: string;
