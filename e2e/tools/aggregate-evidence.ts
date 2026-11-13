@@ -38,9 +38,13 @@ for (const file of files) {
     if (!Number.isInteger(row.scenario) || !row.id || !['pass', 'fail', 'skip'].includes(row.status)) {
       throw new Error(`${path}:${i + 1}: bản ghi evidence thiếu scenario/id/status hợp lệ`);
     }
+    const timestamp = typeof row.at === 'string' && row.at.trim() ? Date.parse(row.at) : Number.NaN;
+    if (!Number.isFinite(timestamp)) {
+      throw new Error(`${path}:${i + 1}: timestamp evidence thiếu hoặc không hợp lệ`);
+    }
     const key = `${row.scenario}:${row.id}`;
     const prior = latest.get(key);
-    if (!prior || Date.parse(row.at) >= Date.parse(prior.at)) latest.set(key, row);
+    if (!prior || timestamp >= Date.parse(prior.at)) latest.set(key, row);
   }
 }
 

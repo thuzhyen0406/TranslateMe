@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { record } from '../lib/evidence';
 import { chooseSafeRunId } from '../lib/evidenceRunId';
 
@@ -36,5 +37,34 @@ test('evidence writer rejects unsafe TM_RUN_ID before creating output files', ()
     if (previousRunId === undefined) delete process.env.TM_RUN_ID;
     else process.env.TM_RUN_ID = previousRunId;
     rmSync(targetDir, { recursive: true, force: true });
+  }
+});
+
+test('aggregator rejects missing or invalid timestamps instead of retaining an older pass', () => {
+  const e2eRoot = resolve(__dirname, '..');
+  const evidenceRoot = join(e2eRoot, 'evidence');
+  const cases: Array<{ at?: string }> = [
+    { at: 'not-a-timestamp' },
+    {},
+  ];
+
+  for (const [index, badTimestamp] of cases.entries()) {
+    const runId = `invalid-timestamp-${process.pid}-${Date.now()}-${index}`;
+    const runDir = join(evidenceRoot, runId);
+    mkdirSync(runDir, { recursive: true });
+    const first = { ...(badTimestamp.at === undefined ? {} : { at: badTimestamp.at }), scenario: 5, id: 'L1', title: 'old pass', status: 'pass' };
+    const later = { at: '2026-11-14T00:00:00.000Z', scenario: 5, id: 'L1', title: 'new failure', status: 'fail' };
+    writeFileSync(join(runDir, 'scenario-5.jsonl'), `${JSON.stringify(first)}\n${JSON.stringify(later)}\n`, 'utf8');
+
+    try {
+      const result = spawnSync(process.execPath, [
+        '--require', 'ts-node/register/transpile-only', 'tools/aggregate-evidence.ts', runId,
+      ], { cwd: e2eRoot, encoding: 'utf8' });
+      assert.notEqual(result.status, 0);
+      assert.match(`${result.stderr}${result.stdout}`, /timestamp evidence thiếu hoặc không hợp lệ/u);
+      assert.equal(existsSync(join(runDir, 'summary.md')), false);
+    } finally {
+      rmSync(runDir, { recursive: true, force: true });
+    }
   }
 });
