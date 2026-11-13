@@ -1,10 +1,6 @@
 name: E2E Release Gate
 
 on:
-  workflow_run:
-    workflows: [Deploy Infrastructure via CloudFormation]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
     inputs:
       run_limits:
@@ -17,12 +13,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: e2e-release-gate-${{ github.event.workflow_run.head_branch || github.ref_name }}
+  group: e2e-release-gate-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   release-gate:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -34,10 +30,10 @@ jobs:
       TM_ALLOW_MUTATION: ${{ inputs.run_limits == true && '1' || '0' }}
       TM_EVIDENCE_REQUIRED_SCENARIOS: ${{ inputs.run_limits == true && '4,5,6' || '4,6' }}
     steps:
-      - name: Checkout deployed revision
+      - name: Checkout selected revision
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -69,7 +65,7 @@ jobs:
           const required = [
             'TM_API_BASE', 'TM_REGION', 'TM_CONSOLE_CLIENT_ID', 'TM_PLATFORM_CLIENT_ID',
             'TM_CONSOLE_USER_POOL_ID', 'TM_PLATFORM_USER_POOL_ID',
-            'TM_SSRF_REBIND_URL', 'TM_SSRF_REDIRECT_URL',
+            'TM_SSRF_REBIND_URL', 'TM_SSRF_REDIRECT_URL', 'TM_SSRF_HEADER_REPORT_URL',
             'TM_E2E_HAS_CONSOLE_ME', 'TM_E2E_HAS_CONSOLE_USAGE',
             'TM_E2E_HAS_CONSOLE_BATCH_RESULT', 'TM_E2E_HAS_PLATFORM_TENANT_DETAIL',
             'TM_E2E_HAS_PLATFORM_TENANT_LIST',
@@ -170,4 +166,4 @@ jobs:
           name: e2e-evidence-${{ github.run_id }}
           path: e2e/evidence/${{ github.run_id }}/
           if-no-files-found: warn
-          retention-days: 90
+          retention-days: 7

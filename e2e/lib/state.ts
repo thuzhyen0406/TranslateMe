@@ -9,7 +9,7 @@ export interface TenantState {
   tenantId: string;
   slug: string;
   origin: string;
-  /** Website chỉ sẵn sàng cho demo khi API xác nhận ACTIVE. */
+  /** Website được API xác nhận sẵn sàng cho các test demo. */
   websiteStatus?: string;
   apiKey: string;
   keyId: string;
@@ -18,7 +18,7 @@ export interface TenantState {
   tinyKeyId?: string;
   jobId: string;
   fileKey: string;
-  /** Trạng thái lưu trước POST để lần chạy sau đối soát batch theo fileKey. */
+  /** Được lưu trước khi POST batch để lần chạy sau dò job theo fileKey. */
   batchSubmissionState?: 'UPLOADING' | 'SUBMITTING' | 'SUBMITTED';
   tmText: string;
   tmHash: string;

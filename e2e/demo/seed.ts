@@ -16,6 +16,7 @@ import { loadState, saveState, State, stateFile, TenantState } from '../lib/stat
 import { idTokenClaims, login } from '../lib/auth';
 import { call, errCode, Resp } from '../lib/http';
 import { B, R, hashSentence, jobIdOf, keyIdOf, keyValueOf, listOf } from '../lib/contract';
+import { verificationInstructions, verificationMethod } from './siteVerification';
 
 const need = (k: string): string => { const v = process.env[k]; if (!v) throw new Error(`Thiếu biến môi trường ${k}`); return v; };
 const hex = (n: number) => randomBytes(n).toString('hex');
@@ -68,7 +69,11 @@ async function seedPlatform(st: State): Promise<void> {
     '--permanent', ...region]);
   aws(['cognito-idp', 'admin-add-user-to-group', '--user-pool-id', pool, '--username', username, '--group-name', group, ...region],
     { allowFail: true });
-  if (dry) { console.log('[dry-run] sẽ PUT /platform/config với demo/platform-config.json'); return; }
+  if (dry) { console.log('[dry-run] sẽ PUT /platform/config với demo/platform-config.json nếu TM_E2E_HAS_PLATFORM_CONFIG=1'); return; }
+  if (process.env.TM_E2E_HAS_PLATFORM_CONFIG !== '1') {
+    console.log('Platform Admin đã sẵn sàng; bỏ qua PUT /platform/config vì route chưa được bật (đặt TM_E2E_HAS_PLATFORM_CONFIG=1 sau khi tích hợp).');
+    return;
+  }
   const tok = await login(cfg().platformClientId, username, password);
   must(await call('PUT', R.platformConfig, { token: tok, body }), 'PUT /platform/config');
   console.log(`Platform Admin: ${username}; PLATFORM CONFIG đã đặt`);
@@ -96,8 +101,8 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
   if (!dry) saveState(st); // Giữ credential ổn định nếu seed bị ngắt giữa chừng.
   aws(['cognito-idp', 'sign-up', '--client-id', c.consoleClientId, '--username', username, '--password', password,
     '--user-attributes', `Name=email,Value=${username}`, ...region], { allowFail: true });
-  aws(['cognito-idp', 'admin-set-user-password', '--user-pool-id', pool, '--username', username, '--password', password,
-    '--permanent', ...region]);
+  // SignUp đã đặt password. Confirm trực tiếp để PostConfirmation tạo tenant_id;
+  // AdminSetUserPassword permanent trước bước này sẽ bỏ qua trigger PostConfirmation.
   aws(['cognito-idp', 'admin-confirm-sign-up', '--user-pool-id', pool, '--username', username, ...region], { allowFail: true });
   if (dry) { console.log(`[dry-run] tenant ${label}: đăng nhập, tạo website, API key, TM, job`); return; }
 
@@ -116,11 +121,15 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
   const existingHosts = must(await call('GET', R.hosts, { token: tok }), 'GET /console/hosts');
   const priorHost = listOf(existingHosts.body).find((h: any) => h?.slug === expectedSlug);
   let slug = expectedSlug;
+  let verificationCode = typeof priorHost?.verification_code === 'string' ? priorHost.verification_code : '';
   if (priorHost) {
     slug = String(priorHost.slug);
   } else {
     const created = must(await call('POST', R.hosts, { token: tok, body: B.addHost(`e2e-${label}`, origin) }), 'POST /console/hosts');
     slug = created.body?.host?.slug;
+    verificationCode = typeof created.body?.host?.verification_code === 'string'
+      ? created.body.host.verification_code
+      : '';
     if (typeof slug !== 'string' || slug !== expectedSlug) {
       throw new Error(`Tenant ${label}: API trả slug website không khớp hostname ${expectedSlug}`);
     }
@@ -129,13 +138,17 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
   t.websiteStatus = priorHost?.status === 'ACTIVE' ? 'ACTIVE' : 'PENDING';
   saveState(st);
   if (priorHost?.status !== 'ACTIVE') {
-    const ver = await call('POST', R.hostVerify(slug), { token: tok, body: { method: 'META' } });
+    const method = verificationMethod(process.env.TM_DEMO_VERIFY_METHOD);
+    const ver = await call('POST', R.hostVerify(slug), { token: tok, body: { method } });
     const verifiedStatus = ver.body?.host?.status ?? ver.body?.status;
     if (ver.status < 200 || ver.status >= 300 || verifiedStatus !== 'ACTIVE') {
+      const instructions = verificationCode
+        ? verificationInstructions(method, verificationCode, origin)
+        : 'API không trả verification_code; kiểm tra contract GET/POST /console/hosts trước khi tiếp tục.';
       throw new Error(
         `Tenant ${label}: website ${slug} chưa ACTIVE sau xác minh ` +
         `(HTTP ${ver.status}, status=${verifiedStatus ?? 'không có'}). Seed dừng tại đây; ` +
-        `kiểm tra TM_DEMO_ORIGIN_${label}, cấu hình META và hoàn tất xác minh website, ` +
+        `hoàn tất xác minh ${method} cho TM_DEMO_ORIGIN_${label}. ${instructions} ` +
         `sau đó chạy lại "npm run demo:seed -- tenants". State hiện tại chưa đủ điều kiện chạy bài test khóa tenant.`,
       );
     }

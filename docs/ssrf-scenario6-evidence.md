@@ -112,7 +112,7 @@ Khi môi trường demo được triển khai hoàn chỉnh (khi các hạng m�
 
 ```text
 ========================================================================================================
-             BỘ KIỂM THỬ HỒI QUY MÔ PHỎNG AN TOÀN SSRF (KỊCH BẢN 6 – MOCK SIMULATION)
+             BỘ KIỂM THỬ HỒI QUY MÔ PHỎNG AN TOÀN SSRF (KỊCH BẢN 6 – MOCK SIMULATION)                  
 ========================================================================================================
 Thời gian thực thi:          2026-11-11T14:50:06.285Z
 Chế độ kiểm thử:             Mô phỏng đơn vị (Mock Dependencies: fakeResolver + fakeTransport)

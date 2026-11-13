@@ -5,7 +5,7 @@ type Evidence = { at: string; scenario: number; id: string; title: string; statu
 const expected: Record<number, string[]> = {
   4: [...Array.from({ length: 8 }, (_, i) => `P${i + 1}`), ...Array.from({ length: 8 }, (_, i) => `X${i + 1}`), ...Array.from({ length: 4 }, (_, i) => `E${i + 1}`)],
   5: ['L1', 'L2', 'L3', 'L4', 'L5'],
-  6: Array.from({ length: 9 }, (_, i) => `S${i + 1}`),
+  6: [...Array.from({ length: 8 }, (_, i) => `S${i + 1}`), 'S8H', 'S9'],
 };
 const labels: Record<number, string> = { 4: 'Cô lập tenant và Platform Admin', 5: 'Giới hạn và khóa tenant', 6: 'Chặn SSRF' };
 const args = process.argv.slice(2);

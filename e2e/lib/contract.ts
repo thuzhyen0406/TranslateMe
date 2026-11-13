@@ -41,7 +41,7 @@ export const B = {
   // PATCH không đổi gì thật, để phép thử chéo không làm hỏng website của tenant B nếu có lỗ hổng
   noopHostPatch: () => ({ target_langs: ['en'] }),
   // [GIẢ ĐỊNH]
-  createKey: (name: string) => ({ name }),
+  createKey: (name: string) => ({ name, plan: 'Basic' }),
   glossaryTerm: (src: string, tgt: string) => ({ source_term: src, target_term: tgt, mode: 'TRANSLATE_AS' }),
   // [GIẢ ĐỊNH] cấu hình nền tảng: hạn mức ký tự theo gói. Dùng cho test CHAR_QUOTA_EXCEEDED.
   platformQuota: (plan: string, chars: number) => ({ plan_limits: { [plan]: chars } }),
@@ -65,8 +65,8 @@ export function listOf(body: any): any[] {
   }
   return [];
 }
-export const keyIdOf = (b: any): string => b?.key_id ?? b?.keyId ?? b?.id ?? '';
-export const keyValueOf = (b: any): string => b?.api_key ?? b?.value ?? b?.key ?? '';
+export const keyIdOf = (b: any): string => b?.api_key?.key_id ?? b?.key?.key_id ?? b?.key_id ?? b?.keyId ?? b?.id ?? '';
+export const keyValueOf = (b: any): string => b?.api_key?.value ?? b?.key?.value ?? b?.api_key ?? b?.value ?? b?.key ?? '';
 export const tenantIdOf = (b: any): string => b?.tenant_id ?? b?.tenantId ?? '';
 export const jobIdOf = (b: any): string => b?.job_id ?? b?.jobId ?? '';
 
