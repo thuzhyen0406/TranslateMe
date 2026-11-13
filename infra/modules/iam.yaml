@@ -119,12 +119,14 @@ Resources:
                     dynamodb:LeadingKeys:
                       - 'TENANT#${aws:PrincipalTag/TenantId}'
                       - 'TENANT#${aws:PrincipalTag/TenantId}#*'
-              - Sid: TenantBatchUploadObjects
+              - Sid: TenantBatchObjects
                 Effect: Allow
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: !Sub '${BatchUploadBucketArn}/batch/${!aws:PrincipalTag/TenantId}/input/*'
+                Resource:
+                  - !Sub '${BatchUploadBucketArn}/batch/${!aws:PrincipalTag/TenantId}/input/*'
+                  - !Sub '${BatchUploadBucketArn}/batch/${!aws:PrincipalTag/TenantId}/results/*'
               - Sid: TenantDataKmsUse
                 Effect: Allow
                 Action:
@@ -140,7 +142,7 @@ Resources:
                     kms:ViaService: !Sub 'dynamodb.${AWS::Region}.amazonaws.com'
                     kms:EncryptionContext:aws:dynamodb:tableName: !Select [1, !Split ['/', !Ref TableArn]]
                     kms:EncryptionContext:aws:dynamodb:subscriberId: !Ref AWS::AccountId
-              - Sid: TenantBatchUploadKmsAccess
+              - Sid: TenantBatchKmsAccess
                 Effect: Allow
                 Action:
                   - kms:Decrypt

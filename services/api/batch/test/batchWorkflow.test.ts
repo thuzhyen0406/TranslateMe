@@ -65,12 +65,21 @@ describe('batch workflow', () => {
     const objects = new Map<string, Uint8Array>([[item.fileKey, new TextEncoder().encode('Hello.\nGood morning.')]]);
     const reservations: number[] = [];
     const settlements: number[] = [];
+    const settledRequests = new Map<string, string>();
+    let refunds = 0;
+    let failOutputWrite = true;
     let translateCalls = 0;
     const deps: BatchWorkflowDeps = {
       jobs: db,
       objects: {
         async get(_tenantId, objectKey) { return objects.get(objectKey) ?? null; },
-        async put(_tenantId, objectKey, bytes) { objects.set(objectKey, bytes); },
+        async put(_tenantId, objectKey, bytes) {
+          if (objectKey.includes('/translated/') && failOutputWrite) {
+            failOutputWrite = false;
+            throw new Error('Temporary S3 result write failure');
+          }
+          objects.set(objectKey, bytes);
+        },
         async signGet(_tenantId, objectKey) { return `https://download.example/${objectKey}`; },
       },
       usage: {
@@ -78,8 +87,17 @@ describe('batch workflow', () => {
           reservations.push(input.n);
           return { tenantId: input.tenantId, requestId: input.requestId, month: '2026-11', reservedChars: input.n, limit: 1000, source: input.source, createdAt: input.now!.toISOString() };
         },
-        async settle(ticket: Parameters<BatchWorkflowDeps['usage']['settle']>[0], actual: Parameters<BatchWorkflowDeps['usage']['settle']>[1]) { settlements.push(actual.machineChars); },
-        async refund() {},
+        async settle(ticket: Parameters<BatchWorkflowDeps['usage']['settle']>[0], actual: Parameters<BatchWorkflowDeps['usage']['settle']>[1]) {
+          const serialized = JSON.stringify(actual);
+          const prior = settledRequests.get(ticket.requestId);
+          if (prior) {
+            assert.equal(prior, serialized);
+            return;
+          }
+          settledRequests.set(ticket.requestId, serialized);
+          settlements.push(actual.machineChars);
+        },
+        async refund() { refunds++; },
       } as unknown as BatchWorkflowDeps['usage'],
       tm: {
         async getTM(_ctx: Ctx, _src: string, _tgt: string, sentences: Array<{ id: number; text: string; hash: string }>) { return { hits: new Map(), misses: [...sentences], reviewFlags: [] }; },
@@ -93,7 +111,6 @@ describe('batch workflow', () => {
       },
       async detectLanguage() { return 'en'; },
       now: () => new Date('2026-11-08T00:00:00.000Z'),
-      uuid: () => 'attempt-uuid-1234',
     };
     const handler = createBatchWorkflowHandler(deps);
     const parsed = await handler({ mode: 'PARSE_AND_CHUNK', tenant_id: ctx.tenantId, job_id: jobId }) as { lot_keys: string[] };
@@ -101,10 +118,13 @@ describe('batch workflow', () => {
     assert.equal(item.total, 1);
     const lotKey = parsed.lot_keys[0];
     const task = { mode: 'TRANSLATE_LOT' as const, tenant_id: ctx.tenantId, job_id: jobId, target_lang: 'fr', lot_key: lotKey };
-    await handler(task);
-    await handler(task);
-    assert.equal(translateCalls, 1);
-    assert.equal(reservations.length, 1);
+    await assert.rejects(handler({ ...task, attempt: 0 }), /Temporary S3 result write failure/u);
+    assert.equal(settlements.length, 0);
+    await handler({ ...task, attempt: 1 });
+    await handler({ ...task, attempt: 1 });
+    assert.equal(translateCalls, 2);
+    assert.equal(reservations.length, 2);
+    assert.equal(refunds, 1);
     assert.equal(item.done, 1);
 
     const merged = await handler({ mode: 'MERGE_AND_WRITE', tenant_id: ctx.tenantId, job_id: jobId }) as { status: string };
@@ -126,6 +146,95 @@ describe('batch workflow', () => {
     assert.equal(failed.reason, 'BatchTranslationIncomplete');
     assert.equal(item.failed, 2);
     assert.equal(item.status, 'FAILED');
+  });
+
+  it('replays a persisted lot checkpoint after settlement fails without translating or settling twice', async () => {
+    const retryJobId = 'job-20261108-abcdef012345';
+    const key = jobKey(ctx, retryJobId);
+    const lotKey = `batch/${ctx.tenantId}/results/${retryJobId}/lots/lot-0000.json`;
+    const outputKey = `batch/${ctx.tenantId}/results/${retryJobId}/translated/fr/lot-0000.json`;
+    const item: Record<string, any> = {
+      ...key, entityType: 'JOB', tenantId: ctx.tenantId, jobId: retryJobId, type: 'FILE', status: 'RUNNING',
+      targetLangs: ['fr'], total: 1, done: 0, failed: 0, warnings: [], lots: {},
+      fileKey: `batch/${ctx.tenantId}/input/source.txt`, fileName: 'source.txt', format: 'txt', sourceLang: 'en',
+      usageSource: { kind: 'API', keyId: 'key-test' }, sendEmail: false,
+    };
+    const objects = new Map<string, Uint8Array>([
+      [lotKey, new TextEncoder().encode(JSON.stringify([{ id: 0, text: 'Hello.' }]))],
+    ]);
+    const reservations: string[] = [];
+    const settledRequests = new Map<string, string>();
+    let settleCalls = 0;
+    let translateCalls = 0;
+    const db: JobDb = {
+      async get(_ctx, lookup) { return lookup.PK === key.PK && lookup.SK === key.SK ? item : null; },
+      async put(_ctx, value) { Object.assign(item, value); },
+      async update(_ctx, update) {
+        const values = update.ExpressionAttributeValues ?? {};
+        const lotId = update.ExpressionAttributeNames?.['#lot'];
+        if (lotId && item.lots[lotId] === true) {
+          throw Object.assign(new Error('Conditional check failed'), { name: 'ConditionalCheckFailedException' });
+        }
+        if (values[':done'] !== undefined) item.done += Number(values[':done']);
+        if (values[':failed'] !== undefined) item.failed += Number(values[':failed']);
+        if (lotId && values[':true'] === true) item.lots[lotId] = true;
+      },
+    };
+    const deps: BatchWorkflowDeps = {
+      jobs: db,
+      objects: {
+        async get(_tenantId, objectKey) { return objects.get(objectKey) ?? null; },
+        async put(_tenantId, objectKey, bytes) { objects.set(objectKey, bytes); },
+        async signGet() { return 'https://download.example'; },
+      },
+      usage: {
+        async reserve(input: Parameters<BatchWorkflowDeps['usage']['reserve']>[0]) {
+          reservations.push(input.requestId);
+          return { tenantId: input.tenantId, requestId: input.requestId, month: '2026-11', reservedChars: input.n, limit: 1000, source: input.source, createdAt: input.now!.toISOString() };
+        },
+        async settle(
+          ticket: Parameters<BatchWorkflowDeps['usage']['settle']>[0],
+          actual: Parameters<BatchWorkflowDeps['usage']['settle']>[1],
+        ) {
+          settleCalls++;
+          const serialized = JSON.stringify(actual);
+          const prior = settledRequests.get(ticket.requestId);
+          if (prior) {
+            assert.equal(prior, serialized);
+            return;
+          }
+          if (settleCalls === 1) throw new Error('Temporary usage settlement failure');
+          settledRequests.set(ticket.requestId, serialized);
+        },
+        async refund() { assert.fail('A persisted checkpoint must not be refunded'); },
+      } as unknown as BatchWorkflowDeps['usage'],
+      tm: {
+        async getTM(_ctx: Ctx, _src: string, _tgt: string, sentences: Array<{ id: number; text: string; hash: string }>) {
+          return { hits: new Map(), misses: [...sentences], reviewFlags: [] };
+        },
+        async markHumanNeedsReview() { return { marked: 0, skipped: 0, failed: [] }; },
+        async putMachineTM() { return { written: 1, skippedHuman: 0, failed: [] }; },
+      } as unknown as BatchWorkflowDeps['tm'],
+      async getGlossaryState() { return { version: 0, terminologyName: null, terms: [] }; },
+      async translate(input) {
+        translateCalls++;
+        return { translated: input.sentences.map((sentence) => ({ id: sentence.id, tgt: `FR:${sentence.text}`, needsReview: false })), pending: [], failed: [], stats: { uniqueSentences: input.sentences.length, calls: 1, charsSent: 0, splits: 0, plainFallbacks: 0 } };
+      },
+      async detectLanguage() { return 'en'; },
+      now: () => new Date('2026-11-08T00:00:00.000Z'),
+    };
+    const handler = createBatchWorkflowHandler(deps);
+    const task = { mode: 'TRANSLATE_LOT' as const, tenant_id: ctx.tenantId, job_id: retryJobId, target_lang: 'fr', lot_key: lotKey };
+
+    await assert.rejects(handler(task), /Temporary usage settlement failure/u);
+    assert.ok(objects.has(outputKey));
+    await handler(task);
+
+    assert.equal(translateCalls, 1);
+    assert.equal(reservations.length, 1);
+    assert.equal(settleCalls, 2);
+    assert.equal(settledRequests.size, 1);
+    assert.equal(item.done, 1);
   });
 
   it('records notification failures without overwriting the job status', async () => {
@@ -172,7 +281,7 @@ describe('batch workflow', () => {
       job_id: 'job-20261108-abcdef012345',
       notification_status: 'FAILED',
       notification_error: { Error: 'SubscriptionFailed', Cause: 'EMAIL_NOT_CONFIRMED' },
-    });
+    }) as { notification_status?: string };
     assert.equal(result.notification_status, 'FAILED');
     assert.equal(item.status, 'SUCCEEDED');
     assert.equal(item.notificationStatus, 'FAILED');

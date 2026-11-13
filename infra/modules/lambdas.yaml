@@ -304,7 +304,7 @@ Resources:
               "NotifyResult": {
                 "Type": "Choice",
                 "Choices": [{ "Variable": "$.send_email", "BooleanEquals": true, "Next": "CreateTenantResultTopic" }],
-                "Default": "RecordNotificationSuccess"
+                "Default": "FinishWorkflow"
               },
               "CreateTenantResultTopic": {
                 "Type": "Task", "Resource": "arn:${AWS::Partition}:states:::aws-sdk:sns:createTopic",
