@@ -12,20 +12,29 @@ const need = (name: string): string => {
 };
 
 export function findBatchJobByFileKey(tenantId: string, fileKey: string, region: string[] = []): string | undefined {
-  const response = aws([
-    'dynamodb', 'query', '--table-name', need('TM_TABLE'),
-    '--key-condition-expression', 'PK = :pk',
-    '--filter-expression', 'fileKey = :fileKey AND #type = :type',
-    '--expression-attribute-names', JSON.stringify({ '#type': 'type' }),
-    '--expression-attribute-values', JSON.stringify({
-      ':pk': { S: `TENANT#${tenantId}#JOB` },
-      ':fileKey': { S: fileKey },
-      ':type': { S: 'FILE' },
-    }),
-    '--consistent-read', ...region,
-  ], { readonly: true });
-  const matches = (response.Items ?? []).filter((item: any) =>
-    item?.fileKey?.S === fileKey && item?.type?.S === 'FILE');
+  const matches: any[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const args = [
+      'dynamodb', 'query', '--table-name', need('TM_TABLE'),
+      '--key-condition-expression', 'PK = :pk',
+      '--filter-expression', 'fileKey = :fileKey AND #type = :type',
+      '--expression-attribute-names', JSON.stringify({ '#type': 'type' }),
+      '--expression-attribute-values', JSON.stringify({
+        ':pk': { S: `TENANT#${tenantId}#JOB` },
+        ':fileKey': { S: fileKey },
+        ':type': { S: 'FILE' },
+      }),
+      '--consistent-read',
+      ...(exclusiveStartKey ? ['--exclusive-start-key', JSON.stringify(exclusiveStartKey)] : []),
+      ...region,
+    ];
+    const response = aws(args, { readonly: true });
+    matches.push(...(response.Items ?? []).filter((item: any) =>
+      item?.fileKey?.S === fileKey && item?.type?.S === 'FILE'));
+    exclusiveStartKey = response.LastEvaluatedKey;
+  } while (exclusiveStartKey && Object.keys(exclusiveStartKey).length > 0);
+
   if (matches.length > 1) {
     throw new Error(`Tìm thấy nhiều batch job cùng fileKey ${fileKey}; cần đối soát thủ công, không gửi lại.`);
   }

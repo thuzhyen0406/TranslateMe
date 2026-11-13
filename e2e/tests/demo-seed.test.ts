@@ -54,6 +54,16 @@ if (service === 'apigateway' && command === 'get-api-key') {
   }
   json({ id: value('--key-id') });
 } else if (service === 'dynamodb' && command === 'query') {
+  if (process.env.FAKE_AWS_MODE === 'batch-page-two') {
+    if (!args.includes('--exclusive-start-key')) {
+      json({ Items: [], LastEvaluatedKey: { PK: { S: 'TENANT#tenant-c#JOB' }, SK: { S: 'JOB#page-1' } } });
+    } else {
+      json({ Items: [{
+        PK: { S: 'TENANT#tenant-c#JOB' }, SK: { S: 'JOB#job-20261113-page-two' },
+        jobId: { S: 'job-20261113-page-two' }, fileKey: { S: 'batch/tenant-c/input/upload.txt' }, type: { S: 'FILE' },
+      }] });
+    }
+  } else
   if (process.env.FAKE_AWS_MODE === 'batch-found') {
     json({ Items: [{
       PK: { S: 'TENANT#tenant-c#JOB' }, SK: { S: 'JOB#job-20261113-0123456789ab' },
@@ -120,6 +130,22 @@ test('batch recovery query theo tenant/fileKey bằng consistent read trước k
   assert.ok(query.includes('--consistent-read'));
   assert.ok(query.some((arg) => arg.includes('TENANT#tenant-c#JOB')), JSON.stringify(query));
   assert.ok(query.some((arg) => arg.includes('batch/tenant-c/input/upload.txt')), JSON.stringify(query));
+});
+
+test('batch recovery tiếp tục phân trang khi trang đầu không khớp fileKey', async () => {
+  const log = setupFakeAws('batch-page-two');
+  process.env.TM_TABLE = 'translate-data';
+  process.env.TM_BATCH_RECOVERY_WAIT_S = '90';
+  const jobId = await recoverBatchJob('tenant-c', 'batch/tenant-c/input/upload.txt');
+  assert.equal(jobId, 'job-20261113-page-two');
+  const queries = calls(log);
+  assert.equal(queries.length, 2);
+  const pageTwo = queries[1];
+  const startKeyIndex = pageTwo.indexOf('--exclusive-start-key');
+  assert.ok(startKeyIndex >= 0, JSON.stringify(pageTwo));
+  assert.deepEqual(JSON.parse(pageTwo[startKeyIndex + 1]), {
+    PK: { S: 'TENANT#tenant-c#JOB' }, SK: { S: 'JOB#page-1' },
+  });
 });
 
 test('batch recovery từ chối tiếp tục nếu không thể đọc state để đối soát', async () => {
