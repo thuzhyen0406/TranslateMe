@@ -34,6 +34,9 @@ export interface ConsoleMenuItem {
 
 export type MemberStatus = 'ACTIVE' | 'PENDING_FIRST_LOGIN' | 'DISABLED';
 
+/** Trạng thái vận hành của tổ chức (ACTIVE: bình thường; LOCKED: tạm khóa chỉ xem; UNKNOWN: chưa xác minh -> fail-closed khóa ghi) */
+export type TenantStatus = 'ACTIVE' | 'LOCKED' | 'UNKNOWN';
+
 export interface TenantMember {
   id: string;
   tenantId: string;
@@ -55,6 +58,8 @@ export interface AuthenticatedSession {
   accessToken: string;
   refreshToken: string;
   tokenRefreshedAt: string;
+  /** Trạng thái tenant bắt buộc trên phiên: ACTIVE (được ghi), LOCKED (chỉ xem), hoặc UNKNOWN (chờ xác minh -> fail-closed khóa ghi) */
+  tenantStatus: TenantStatus;
 }
 
 export interface SignUpFormInput {

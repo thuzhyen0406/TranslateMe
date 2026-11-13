@@ -1,5 +1,4 @@
 /** Batch state machine tasks (F10): parse to bounded lots, translate idempotently and assemble results. */
-import { randomUUID } from 'node:crypto';
 import { ComprehendClient, DetectDominantLanguageCommand } from '@aws-sdk/client-comprehend';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -11,7 +10,7 @@ import { createDynamoGlossaryReader, postCheckGlossary, type GlossaryState } fro
 import { createJobStore, JOB_ID_RE, jobKey, type JobDb, type JobWarning } from '../../../libs/common/jobs.js';
 import { countChars, parse, rebuild, translatedFileName, type DocFormat } from '../../../libs/common/parsers.js';
 import { normalize_hash } from '../../../libs/common/text-utils.js';
-import { createDynamoTmDb, createTM, type SentenceWithHash } from '../../../libs/common/tm.js';
+import { createDynamoTmDb, createTM, type SentenceWithHash, type TmEntry } from '../../../libs/common/tm.js';
 import type { Ctx } from '../../../libs/common/types.js';
 import { UsageService, type UsageReservation, type UsageSource } from '../../../libs/common/usage/usage.js';
 import { createTranslator } from '../../../libs/common/translator.js';
@@ -19,6 +18,8 @@ import { createTranslator } from '../../../libs/common/translator.js';
 export const BATCH_BLOCK_BYTES = 10_000;
 export const BATCH_LOT_BLOCKS = 20;
 export const BATCH_RETRY_LIMIT = 3;
+const BATCH_LANGUAGE_CONFIDENCE_THRESHOLD = 0.70;
+const BATCH_SUPPORTED_LANGUAGES = new Set(['ar', 'de', 'en', 'es', 'fr', 'hi', 'id', 'it', 'ja', 'ko', 'nl', 'pl', 'pt', 'ru', 'sv', 'th', 'tr', 'vi', 'zh']);
 
 export interface BatchBlock { id: number; text: string; sourceId?: number; partIndex?: number }
 export interface BatchManifest {
@@ -30,12 +31,14 @@ export interface BatchManifest {
   targetLangs: string[];
 }
 export interface BatchTaskEvent {
-  mode: 'PARSE_AND_CHUNK' | 'TRANSLATE_LOT' | 'MERGE_AND_WRITE' | 'MARK_FAILED';
+  mode: 'PARSE_AND_CHUNK' | 'TRANSLATE_LOT' | 'MERGE_AND_WRITE' | 'MARK_FAILED' | 'SET_NOTIFICATION_STATUS';
   tenant_id: string;
   job_id: string;
   lot_key?: string;
   target_lang?: string;
   attempt?: number;
+  notification_status?: 'SUBMITTED' | 'FAILED';
+  notification_error?: { Error?: string; Cause?: string };
   error?: { Error?: string; Cause?: string };
 }
 export interface BatchWorkflowDeps {
@@ -49,9 +52,27 @@ export interface BatchWorkflowDeps {
   tm: ReturnType<typeof createTM>;
   getGlossaryState(ctx: Ctx): Promise<GlossaryState>;
   translate: (input: Parameters<ReturnType<typeof createTranslator>>[0]) => ReturnType<ReturnType<typeof createTranslator>>;
-  detectLanguage(text: string): Promise<string | undefined>;
+  detectLanguage(text: string): Promise<{ language?: string; confidence?: number }>;
   now?: () => Date;
-  uuid?: () => string;
+}
+
+interface BatchLotResult {
+  checkpointVersion: 1;
+  translations: Record<string, string>;
+  sources: Record<string, { sourceId: number; partIndex: number }>;
+  machineChars: number;
+  memoryChars: number;
+  warnings: JobWarning[];
+  sourceLang: string;
+  targetLang: string;
+  tmEntries: TmEntry[];
+  reservation: UsageReservation;
+  usage: {
+    machineChars: number;
+    memoryChars: number;
+    tmHits: number;
+    tmMisses: number;
+  };
 }
 
 const ctxOf = (tenantId: string, jobId: string): Ctx => ({ tenantId, via: 'KEYMAP', requestId: `batch-${jobId}` });
@@ -122,7 +143,6 @@ function assertTaskEvent(event: BatchTaskEvent): void {
 
 export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
   const now = deps.now ?? (() => new Date());
-  const random = deps.uuid ?? randomUUID;
   const jobs = createJobStore(deps.jobs, () => now().getTime());
 
   async function loadJob(ctx: Ctx, jobId: string): Promise<Record<string, any>> {
@@ -176,7 +196,30 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
     const previousOutput = await deps.objects.get(ctx.tenantId, outputKey);
     const progressId = `lot_${String(lotNo).padStart(4, '0')}_${event.target_lang}`;
     if (previousOutput) {
-      const result = jsonValue<{ translations: Record<string, string>; machineChars: number; memoryChars: number; warnings: JobWarning[] }>(previousOutput);
+      const result = jsonValue<Partial<BatchLotResult>>(previousOutput);
+      if (result.checkpointVersion === undefined) {
+        // Previous workflow versions wrote this object only after usage settlement succeeded.
+        if (!result.translations || typeof result.translations !== 'object' || Array.isArray(result.translations) ||
+            !result.sources || typeof result.sources !== 'object' || Array.isArray(result.sources) ||
+            typeof result.machineChars !== 'number' || !Number.isFinite(result.machineChars) ||
+            typeof result.memoryChars !== 'number' || !Number.isFinite(result.memoryChars) || !Array.isArray(result.warnings)) {
+          throw Object.assign(new Error('Legacy batch lot result is invalid.'), { name: 'InvalidBatchCheckpoint' });
+        }
+        await jobs.addProgress(ctx, event.job_id, 1, 0, progressId);
+        return { lot_key: event.lot_key, target_lang: event.target_lang, result_key: outputKey };
+      }
+      if (result.checkpointVersion !== 1 || !result.reservation || !result.usage || !Array.isArray(result.tmEntries) || !Array.isArray(result.warnings) ||
+          typeof result.sourceLang !== 'string' || result.targetLang !== event.target_lang) {
+        throw Object.assign(new Error('Batch lot checkpoint is invalid.'), { name: 'InvalidBatchCheckpoint' });
+      }
+      const writes = await deps.tm.putMachineTM(ctx, result.sourceLang, result.targetLang, result.tmEntries);
+      if (writes.failed.length) {
+        const warning = result.warnings.find((item) => item.code === 'TM_WRITE_FAILED' && item.where === `lot-${lotNo}`);
+        if (warning) warning.count = writes.failed.length;
+        else result.warnings.push({ code: 'TM_WRITE_FAILED', where: `lot-${lotNo}`, count: writes.failed.length, message: 'Một số câu dịch chưa ghi được vào TM.' });
+        await deps.objects.put(ctx.tenantId, outputKey, jsonBytes(result), 'application/json');
+      }
+      await deps.usage.settle(result.reservation, result.usage);
       await jobs.addProgress(ctx, event.job_id, 1, 0, progressId);
       return { lot_key: event.lot_key, target_lang: event.target_lang, result_key: outputKey };
     }
@@ -184,8 +227,15 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
     const file = job;
     const source = job.usageSource as UsageSource | undefined;
     if (!source) throw Object.assign(new Error('Job is missing usage source.'), { name: 'InvalidJob' });
-    const sourceLang = typeof file.sourceLang === 'string' ? file.sourceLang : await deps.detectLanguage(blocks.map((b) => b.text).join('\n').slice(0, 5000));
-    if (!sourceLang) throw Object.assign(new Error('Source language could not be detected.'), { name: 'LanguageNotDetected' });
+    let sourceLang = typeof file.sourceLang === 'string' ? file.sourceLang : undefined;
+    if (!sourceLang) {
+      const detected = await deps.detectLanguage(blocks.map((b) => b.text).join('\n').slice(0, 5000));
+      if (!detected.language || !BATCH_SUPPORTED_LANGUAGES.has(detected.language) ||
+          (detected.confidence ?? 0) < BATCH_LANGUAGE_CONFIDENCE_THRESHOLD) {
+        throw Object.assign(new Error('Source language could not be detected with confidence of at least 0.70.'), { name: 'LanguageNotDetected' });
+      }
+      sourceLang = detected.language;
+    }
     const glossary = await deps.getGlossaryState(ctx);
     const sentences: SentenceWithHash[] = blocks.map(({ id, text }) => {
       const normalized = normalize_hash(text);
@@ -208,43 +258,79 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
     let reservation: UsageReservation | undefined;
     let machineChars = 0;
     const warnings: JobWarning[] = [];
+    let checkpointPersisted = false;
     try {
       const attempt = Math.max(0, Number(event.attempt ?? 0));
-      reservation = await deps.usage.reserve({ tenantId: ctx.tenantId, requestId: `${event.job_id}-${event.target_lang}-${lotNo}-${attempt}-${random().slice(0, 8)}`, n: missChars, source, now: now() });
+      reservation = await deps.usage.reserve({ tenantId: ctx.tenantId, requestId: `${event.job_id}-${event.target_lang}-${lotNo}-${attempt}`, n: missChars, source, now: now() });
       if (missChars > 0) {
         const translated = await deps.translate({
           src: sourceLang, tgt: event.target_lang, sentences: lookup.misses.map(({ id, text }) => ({ id, text })),
           terminologyName: glossary.terminologyName, deadlineAt: now().getTime() + 240_000, concurrency: 4,
         });
-        for (const item of translated.translated) translations[String(item.id)] = item.tgt;
         if (translated.failed.length || translated.pending.length) {
-          const byId = new Map(lookup.misses.map((s) => [s.id, s]));
-          const successful = translated.translated.map((t) => ({
-            hash: byId.get(t.id)!.hash, sourceText: byId.get(t.id)!.text, tgt: t.tgt,
-            glossaryVersion: glossary.version, needsReview: t.needsReview || postCheckGlossary(byId.get(t.id)!.text, t.tgt, event.target_lang!, glossary).needsReview,
-          }));
-          if (successful.length) await deps.tm.putMachineTM(ctx, sourceLang, event.target_lang, successful);
-          machineChars = translated.translated.reduce((total, t) => total + countChars(byId.get(t.id)!.text), 0);
-          await deps.usage.settle(reservation, { machineChars, memoryChars, tmHits: lookup.hits.size, tmMisses: translated.translated.length });
-          reservation = undefined;
           throw Object.assign(new Error('Translation lot was incomplete.'), { name: 'BatchTranslationIncomplete' });
         }
         const byId = new Map(lookup.misses.map((s) => [s.id, s]));
-        const writes = await deps.tm.putMachineTM(ctx, sourceLang, event.target_lang, translated.translated.map((t) => ({
+        const tmEntries = translated.translated.map((t) => ({
           hash: byId.get(t.id)!.hash, sourceText: byId.get(t.id)!.text, tgt: t.tgt,
           glossaryVersion: glossary.version, needsReview: t.needsReview || postCheckGlossary(byId.get(t.id)!.text, t.tgt, event.target_lang!, glossary).needsReview,
-        })));
-        if (writes.failed.length) warnings.push({ code: 'TM_WRITE_FAILED', where: `lot-${lotNo}`, count: writes.failed.length, message: 'Một số câu dịch chưa ghi được vào TM.' });
+        }));
+        for (const item of translated.translated) translations[String(item.id)] = item.tgt;
         machineChars = translated.translated.reduce((total, t) => total + countChars(byId.get(t.id)!.text), 0);
+        const result: BatchLotResult = {
+          checkpointVersion: 1,
+          translations,
+          sources: Object.fromEntries(blocks.map((block) => [String(block.id), { sourceId: block.sourceId ?? block.id, partIndex: block.partIndex ?? 0 }])),
+          machineChars,
+          memoryChars,
+          warnings,
+          sourceLang,
+          targetLang: event.target_lang,
+          tmEntries,
+          reservation,
+          usage: { machineChars, memoryChars, tmHits: lookup.hits.size, tmMisses: lookup.misses.length },
+        };
+        await deps.objects.put(ctx.tenantId, outputKey, jsonBytes(result), 'application/json');
+        checkpointPersisted = true;
+        const writes = await deps.tm.putMachineTM(ctx, sourceLang, event.target_lang, tmEntries);
+        if (writes.failed.length) {
+          result.warnings.push({ code: 'TM_WRITE_FAILED', where: `lot-${lotNo}`, count: writes.failed.length, message: 'Một số câu dịch chưa ghi được vào TM.' });
+          await deps.objects.put(ctx.tenantId, outputKey, jsonBytes(result), 'application/json');
+        }
+        await deps.usage.settle(reservation, result.usage);
+        reservation = undefined;
+        await jobs.addProgress(ctx, event.job_id, 1, 0, progressId);
+        return { lot_key: event.lot_key, target_lang: event.target_lang, result_key: outputKey };
       }
-      await deps.usage.settle(reservation, { machineChars, memoryChars, tmHits: lookup.hits.size, tmMisses: lookup.misses.length });
+
+      const result: BatchLotResult = {
+        checkpointVersion: 1,
+        translations,
+        sources: Object.fromEntries(blocks.map((block) => [String(block.id), { sourceId: block.sourceId ?? block.id, partIndex: block.partIndex ?? 0 }])),
+        machineChars,
+        memoryChars,
+        warnings,
+        sourceLang,
+        targetLang: event.target_lang,
+        tmEntries: [],
+        reservation,
+        usage: { machineChars, memoryChars, tmHits: lookup.hits.size, tmMisses: lookup.misses.length },
+      };
+      await deps.objects.put(ctx.tenantId, outputKey, jsonBytes(result), 'application/json');
+      checkpointPersisted = true;
+      await deps.usage.settle(reservation, result.usage);
       reservation = undefined;
-      const sources = Object.fromEntries(blocks.map((block) => [String(block.id), { sourceId: block.sourceId ?? block.id, partIndex: block.partIndex ?? 0 }]));
-      await deps.objects.put(ctx.tenantId, outputKey, jsonBytes({ translations, sources, machineChars, memoryChars, warnings }), 'application/json');
       await jobs.addProgress(ctx, event.job_id, 1, 0, progressId);
       return { lot_key: event.lot_key, target_lang: event.target_lang, result_key: outputKey };
     } catch (error) {
-      if (reservation) await deps.usage.refund(reservation);
+      if (reservation && !checkpointPersisted) {
+        try {
+          checkpointPersisted = Boolean(await deps.objects.get(ctx.tenantId, outputKey));
+        } catch (verifyError) {
+          throw new AggregateError([error, verifyError], 'Unable to verify batch lot checkpoint after result write failure.');
+        }
+        if (!checkpointPersisted) await deps.usage.refund(reservation);
+      }
       throw error;
     }
   }
@@ -297,6 +383,45 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
     return { job_id: event.job_id, tenant_id: ctx.tenantId, status: 'SUCCEEDED', send_email: job.sendEmail === true, notification_email: job.notificationEmail, result_files: Object.keys(resultFiles), links };
   }
 
+  async function setNotificationStatus(event: BatchTaskEvent) {
+    const ctx = ctxOf(event.tenant_id, event.job_id);
+    const job = await loadJob(ctx, event.job_id);
+    const notificationStatus = event.notification_status === 'FAILED' ? 'FAILED' : 'SUBMITTED';
+    const message = typeof event.notification_error?.Cause === 'string' && event.notification_error.Cause.trim()
+      ? event.notification_error.Cause.trim()
+      : typeof event.notification_error?.Error === 'string' && event.notification_error.Error.trim()
+        ? event.notification_error.Error.trim()
+        : notificationStatus === 'FAILED'
+          ? 'NOTIFICATION_FAILED'
+          : 'NOTIFICATION_SUBMITTED';
+    const warnings = Array.isArray(job.warnings) ? [...(job.warnings as JobWarning[])] : [];
+    if (notificationStatus === 'FAILED') {
+      const exists = warnings.some((warning) => warning.code === 'NOTIFICATION_FAILED');
+      if (!exists) warnings.push({ code: 'NOTIFICATION_FAILED', where: 'batch-notify', count: 1, message });
+    }
+    await deps.jobs.update(ctx, {
+      Key: jobKey(ctx, event.job_id),
+      UpdateExpression: 'SET #notificationStatus = :notificationStatus, #updatedAt = :at' + (notificationStatus === 'FAILED' ? ', #warnings = :warnings' : '') + (message && notificationStatus === 'FAILED' ? ', #notificationError = :notificationError' : ''),
+      ConditionExpression: '#status IN (:queued, :running, :succeeded, :failed)',
+      ExpressionAttributeNames: {
+        '#notificationStatus': 'notificationStatus',
+        '#updatedAt': 'updatedAt',
+        '#status': 'status',
+        ...(notificationStatus === 'FAILED' ? { '#warnings': 'warnings', '#notificationError': 'notificationError' } : {}),
+      },
+      ExpressionAttributeValues: {
+        ':notificationStatus': notificationStatus,
+        ':at': now().toISOString(),
+        ':queued': 'QUEUED',
+        ':running': 'RUNNING',
+        ':succeeded': 'SUCCEEDED',
+        ':failed': 'FAILED',
+        ...(notificationStatus === 'FAILED' ? { ':warnings': warnings, ':notificationError': message } : {}),
+      },
+    });
+    return { job_id: event.job_id, tenant_id: ctx.tenantId, status: job.status, notification_status: notificationStatus, ...(notificationStatus === 'FAILED' ? { notification_error: message } : {}) };
+  }
+
   async function markFailed(event: BatchTaskEvent) {
     const ctx = ctxOf(event.tenant_id, event.job_id);
     let job = await loadJob(ctx, event.job_id);
@@ -321,6 +446,7 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
       case 'PARSE_AND_CHUNK': return parseAndChunk(event);
       case 'TRANSLATE_LOT': return translateLot(event);
       case 'MERGE_AND_WRITE': return mergeAndWrite(event);
+      case 'SET_NOTIFICATION_STATUS': return setNotificationStatus(event);
       case 'MARK_FAILED': return markFailed(event);
     }
   };
@@ -332,7 +458,7 @@ const batchBucketArn = process.env.TENANT_BATCH_UPLOAD_BUCKET_ARN;
 const batchKmsKeyArn = process.env.TENANT_BATCH_UPLOAD_KMS_KEY_ARN;
 const tableName = process.env.TABLE_NAME ?? 'translate-data';
 const bucket = process.env.BATCH_UPLOAD_BUCKET ?? '';
-  const routedDdb = createTenantDocumentClientRouter(baseDdb, { roleArn: tenantRoleArn, sessionName: 'batch-workflow' }) as DynamoDBDocumentClient;
+const routedDdb = createTenantDocumentClientRouter(baseDdb, { roleArn: tenantRoleArn, sessionName: 'batch-workflow' }) as DynamoDBDocumentClient;
 const usage = new UsageService(routedDdb, { tableName });
 const comprehend = new ComprehendClient({});
 const translator = createTranslator(new TranslateClient({}));
@@ -340,11 +466,18 @@ const clientCache = new Map<string, S3Client>();
 
 function tenantS3(tenantId: string): S3Client {
   if (!tenantRoleArn || !batchBucketArn || !batchKmsKeyArn) throw new Error('Tenant batch storage is not configured.');
-  let client = clientCache.get(tenantId);
-  if (!client) {
-    client = createTenantS3Client(tenantRoleArn, tenantId, batchBucketArn, 'batch', 'batch-workflow', batchKmsKeyArn);
-    clientCache.set(tenantId, client);
-  }
+  const cachedClient = clientCache.get(tenantId);
+  if (cachedClient) return cachedClient;
+
+  const client = createTenantS3Client(
+    tenantRoleArn,
+    tenantId,
+    batchBucketArn,
+    'batch',
+    'batch-workflow',
+    batchKmsKeyArn,
+  ) as unknown as S3Client;
+  clientCache.set(tenantId, client);
   return client;
 }
 
@@ -376,7 +509,8 @@ export const handler = async (event: BatchTaskEvent) => {
     translate: translator,
     async detectLanguage(text) {
       const result = await comprehend.send(new DetectDominantLanguageCommand({ Text: text }));
-      return result.Languages?.sort((a, b) => (b.Score ?? 0) - (a.Score ?? 0))[0]?.LanguageCode;
+      const top = result.Languages?.sort((a, b) => (b.Score ?? 0) - (a.Score ?? 0))[0];
+      return { language: top?.LanguageCode, confidence: top?.Score };
     },
   });
   return workflow(event);

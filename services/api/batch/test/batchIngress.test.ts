@@ -28,19 +28,24 @@ function setup(options: {
   missingConfig?: boolean;
   tenant?: Ctx | null;
   resolveTenantError?: Error;
+  startErrors?: Error[];
 } = {}) {
   const records = new Map<string, Record<string, any>>();
   const s3Calls: Array<{ operation: string; input: Record<string, unknown> }> = [];
   const reservations: Array<Parameters<BatchIngressDependencies['usage']['reserve']>[0]> = [];
   const refunds: unknown[] = [];
+  const startCalls: Array<{ name: string; input: string }> = [];
+  const executions = new Map<string, string>();
+  const startErrors = [...(options.startErrors ?? [])];
   const charLimit = options.charLimit ?? 1000;
   let reservedCharacters = 0;
   const bytes = new TextEncoder().encode(options.text ?? 'Xin chào. Đây là tệp thử nghiệm.');
   const downloadedBytes = options.objectBytes ?? bytes;
-  const configKey = keys.config(ctx);
+  const recordCtx = options.tenant && options.tenant !== null ? options.tenant : ctx;
+  const configKey = keys.config(recordCtx);
   if (!options.missingConfig) {
     records.set(`${configKey.PK}|${configKey.SK}`, { ...configKey, status: options.status ?? 'ACTIVE', charLimit: options.charLimit ?? 1000, ownerSub: 'owner-1' });
-    const ownerKey = keys.member(ctx, 'owner-1');
+    const ownerKey = keys.member(recordCtx, 'owner-1');
     records.set(`${ownerKey.PK}|${ownerKey.SK}`, { ...ownerKey, userSub: 'owner-1', email: 'owner@example.com' });
   }
   const s3: BatchObjectStore = {
@@ -63,15 +68,26 @@ function setup(options: {
       if (options.getError) throw options.getError;
       return downloadedBytes;
     },
+    async signGet(input) {
+      s3Calls.push({ operation: 'signGet', input });
+      return `https://s3.example/download/${input.key}`;
+    },
   };
   const db: BatchIngressDependencies['db'] = {
     async get(_ctx, key) { return records.get(`${key.PK}|${key.SK}`) ?? null; },
     async put(_ctx, item) {
       if (item.entityType === 'BATCH_UPLOAD' && options.failUploadWrite) throw new Error('DynamoDB unavailable');
       if (item.entityType === 'JOB' && options.failJobWrite) throw new Error('DynamoDB unavailable');
-      records.set(`${item.PK}|${item.SK}`, { ...item });
+      const storageKey = `${item.PK}|${item.SK}`;
+      if (records.has(storageKey)) throw Object.assign(new Error('conditional check failed'), { name: 'ConditionalCheckFailedException' });
+      records.set(storageKey, { ...item });
     },
-    async update() {},
+    async update(_ctx, params) {
+      const storageKey = `${params.Key.PK}|${params.Key.SK}`;
+      const item = records.get(storageKey);
+      if (!item) return;
+      if (params.ExpressionAttributeNames?.['#workflowStarted']) item.workflowStarted = params.ExpressionAttributeValues?.[':started'];
+    },
   };
   const usage: BatchIngressDependencies['usage'] = {
     async reserve(input) {
@@ -100,7 +116,19 @@ function setup(options: {
     usage,
     s3,
     bucket: 'translateme-batch-test',
-    startExecution: async ({ name, input }) => ({ executionArn: `arn:aws:states:test:execution:batch:${name}` }),
+    startExecution: async ({ name, input }) => {
+      startCalls.push({ name, input });
+      const error = startErrors.shift();
+      const executionArn = `arn:aws:states:test:execution:batch:${name}`;
+      if (error) {
+        // Model the ambiguous case where Step Functions accepted StartExecution but the reply timed out.
+        if (error.name === 'TimeoutError') executions.set(name, input);
+        throw error;
+      }
+      if (executions.has(name)) throw Object.assign(new Error('execution already exists'), { name: 'ExecutionAlreadyExists' });
+      executions.set(name, input);
+      return { executionArn };
+    },
     resolveTenant: async () => {
       if (options.resolveTenantError) throw options.resolveTenantError;
       return options.tenant === undefined ? ctx : options.tenant;
@@ -114,6 +142,8 @@ function setup(options: {
     bytes,
     reservations,
     refunds,
+    startCalls,
+    executions,
     getReservedCharacters: () => reservedCharacters,
   };
 }
@@ -199,9 +229,69 @@ describe('batch upload ingress', () => {
     assert.equal(job?.ttl, Math.floor(NOW.getTime() / 1000) + 7 * 86400);
     assert.equal(h.reservations.length, 1);
     assert.equal(h.reservations[0].tenantId, 'tenant-a');
+    assert.match(
+      h.reservations[0].requestId,
+      new RegExp(`^batch-preflight-${jobResponse.payload.job_id}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, 'u'),
+    );
     assert.equal(h.reservations[0].n, jobResponse.payload.estimated_characters);
     assert.deepEqual(h.reservations[0].source, { kind: 'API', keyId: 'key-a' });
     assert.equal(h.reservations[0].now?.toISOString(), NOW.toISOString());
+  });
+
+  it('reuses the same job and execution when the client retries the same file_key', async () => {
+    const h = setup();
+    const upload = await createUpload(h);
+    const payload = { file_key: upload.payload.file_key, target_langs: ['en'], source_lang: 'vi' };
+
+    const first = await request(h, 'POST', '/translate/batch', payload);
+    const retry = await request(h, 'POST', '/translate/batch', payload);
+
+    assert.equal(first.statusCode, 202);
+    assert.equal(retry.statusCode, 202);
+    assert.equal(retry.payload.job_id, first.payload.job_id);
+    assert.equal([...h.records.values()].filter((item) => item.entityType === 'JOB').length, 1);
+    assert.equal(h.startCalls.length, 1);
+    assert.equal(h.executions.size, 1);
+    assert.equal(h.reservations.length, 1);
+  });
+
+  it('keeps a queued job retryable after an ambiguous StartExecution timeout', async () => {
+    const h = setup({ startErrors: [Object.assign(new Error('request timed out'), { name: 'TimeoutError' })] });
+    const upload = await createUpload(h);
+    const payload = { file_key: upload.payload.file_key, target_langs: ['en'] };
+
+    const first = await request(h, 'POST', '/translate/batch', payload);
+    assert.equal(first.statusCode, 503);
+    assert.equal(first.payload.status, 'QUEUED');
+    assert.equal(first.payload.retryable, true);
+    const jobId = first.payload.job_id as string;
+    const jobKey = keys.job(ctx, jobId);
+    const jobBeforeRetry = h.records.get(`${jobKey.PK}|${jobKey.SK}`);
+    assert.equal(jobBeforeRetry?.status, 'QUEUED');
+    assert.equal(jobBeforeRetry?.workflowStarted, undefined);
+
+    const retry = await request(h, 'POST', '/translate/batch', payload);
+    const jobAfterRetry = h.records.get(`${jobKey.PK}|${jobKey.SK}`);
+    assert.equal(retry.statusCode, 202);
+    assert.equal(retry.payload.job_id, jobId);
+    assert.equal(jobAfterRetry?.status, 'QUEUED');
+    assert.equal(jobAfterRetry?.workflowStarted, true);
+    assert.equal([...h.records.values()].filter((item) => item.entityType === 'JOB').length, 1);
+    assert.equal(h.startCalls.length, 2);
+    assert.equal(h.executions.size, 1);
+  });
+
+  it('rejects retrying a file_key with different translation options', async () => {
+    const h = setup();
+    const upload = await createUpload(h);
+    const first = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
+    const conflicting = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['ko'] });
+
+    assert.equal(first.statusCode, 202);
+    assert.equal(conflicting.statusCode, 409);
+    assert.equal(conflicting.payload.error.code, 'IDEMPOTENCY_CONFLICT');
+    assert.equal([...h.records.values()].filter((item) => item.entityType === 'JOB').length, 1);
+    assert.equal(h.startCalls.length, 1);
   });
 
   it('rejects missing or invalid authentication and inactive tenant configuration before storage access', async () => {
@@ -236,6 +326,82 @@ describe('batch upload ingress', () => {
       assert.equal(denied.payload.error.code, 'TENANT_SUSPENDED');
       assert.equal(inactive.s3Calls.length, 0);
     }
+  });
+
+  it('allows job polling for a locked tenant and denies REVIEWER access to batch routes', async () => {
+    const admin: Ctx = { tenantId: 'tenant-a', via: 'JWT', sub: 'admin-1', role: 'TENANT_ADMIN', requestId: 'req-locked' };
+    const locked = setup({ tenant: admin, status: 'LOCKED' });
+    const jobId = 'job-20261102-012345abcdef';
+    const key = keys.job(admin, jobId);
+    locked.records.set(`${key.PK}|${key.SK}`, {
+      ...key,
+      entityType: 'JOB',
+      tenantId: admin.tenantId,
+      type: 'FILE',
+      status: 'SUCCEEDED',
+      total: 1,
+      done: 1,
+      failed: 0,
+      targetLangs: ['en'],
+      fileName: 'guide.txt',
+      resultFiles: { en: `batch/${admin.tenantId}/results/${jobId}/guide.en.txt` },
+      warnings: [],
+    });
+
+    const result = await request(locked, 'GET', `/translate/batch/${jobId}`, null);
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual(result.payload.job.results, [{
+      target_lang: 'en',
+      file_name: 'guide.en.txt',
+      download_url: `https://s3.example/download/batch/${admin.tenantId}/results/${jobId}/guide.en.txt`,
+      warnings: [],
+    }]);
+    assert.equal(locked.s3Calls.filter((call) => call.operation === 'signGet').length, 1);
+
+    const lockedWrite = await request(locked, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: 10 });
+    assert.equal(lockedWrite.statusCode, 403);
+    assert.equal(lockedWrite.payload.error.code, 'TENANT_SUSPENDED');
+
+    const reviewer: Ctx = { tenantId: 'tenant-a', via: 'JWT', sub: 'reviewer-1', role: 'REVIEWER', requestId: 'req-reviewer' };
+    const reviewerHarness = setup({ tenant: reviewer });
+    const denied = await request(reviewerHarness, 'GET', `/translate/batch/${jobId}`, null);
+    assert.equal(denied.statusCode, 403);
+    assert.equal(denied.payload.error.code, 'PERMISSION_DENIED');
+    assert.equal(reviewerHarness.s3Calls.length, 0);
+  });
+
+  it('returns the same NOT_FOUND response for missing and cross-tenant batch jobs (QC-17)', async () => {
+    const otherTenant: Ctx = {
+      tenantId: 'tenant-b',
+      via: 'JWT',
+      sub: 'admin-b',
+      role: 'TENANT_ADMIN',
+      requestId: 'req-qc17',
+    };
+    const h = setup({ tenant: otherTenant });
+    const foreignJobId = 'job-20261102-fedcba654321';
+    const foreignKey = keys.job(ctx, foreignJobId);
+    h.records.set(`${foreignKey.PK}|${foreignKey.SK}`, {
+      ...foreignKey,
+      entityType: 'JOB',
+      tenantId: ctx.tenantId,
+      type: 'FILE',
+      status: 'SUCCEEDED',
+      targetLangs: ['en'],
+      fileName: 'secret.txt',
+      resultFiles: { en: 'batch/tenant-a/results/private.txt' },
+    });
+
+    const foreign = await request(h, 'GET', `/translate/batch/${foreignJobId}`, null, { requestId: 'same-request' });
+    const missing = await request(h, 'GET', '/translate/batch/job-20261102-abcdef123456', null, { requestId: 'same-request' });
+    assert.equal(foreign.statusCode, 404);
+    assert.equal(missing.statusCode, 404);
+    assert.deepEqual(foreign.payload, missing.payload);
+    assert.deepEqual(foreign.payload.error, {
+      code: 'NOT_FOUND',
+      message: 'Không tìm thấy công việc batch.',
+    });
+    assert.equal(h.s3Calls.length, 0);
   });
 
   it('returns INVALID_REQUEST for malformed JSON and NOT_FOUND for unsupported method or route', async () => {

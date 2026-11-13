@@ -20,6 +20,8 @@ Parameters:
     Type: String
   PostConfirmationCodeKey:
     Type: String
+  WebsiteCodeKey:
+    Type: String
   TableName:
     Type: String
   PayloadBucketName:
@@ -27,6 +29,8 @@ Parameters:
   BatchUploadBucketName:
     Type: String
   PayloadBucketArn:
+    Type: String
+  KmsKeyArn:
     Type: String
   BatchUploadBucketArn:
     Type: String
@@ -45,6 +49,10 @@ Parameters:
     Description: Same ARN supplied to the IAM stack's WorkerFunctionArn parameter.
   TenantDataAccessRoleArn:
     Type: String
+  TenantWebsiteDataAccessRoleArn:
+    Type: String
+  TenantPayloadRoleArn:
+    Type: String
   ProxyRoleArn:
     Type: String
   WorkerRoleArn:
@@ -56,6 +64,8 @@ Parameters:
   PlatformRoleArn:
     Type: String
   PostConfirmationRoleArn:
+    Type: String
+  WebsiteRoleArn:
     Type: String
   ProxyHandler:
     Type: String
@@ -104,6 +114,8 @@ Resources:
           WORKER_FUNCTION_NAME: !Ref WorkerFunctionArn
           TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
           TENANT_PAYLOAD_BUCKET_ARN: !Ref PayloadBucketArn
+          TENANT_PAYLOAD_ROLE_ARN: !Ref TenantPayloadRoleArn
+          DATA_KMS_KEY_ARN: !Ref KmsKeyArn
 
   WorkerFunction:
     Type: AWS::Lambda::Function
@@ -121,6 +133,8 @@ Resources:
           WORKER_PAYLOAD_BUCKET: !Ref PayloadBucketName
           TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
           TENANT_PAYLOAD_BUCKET_ARN: !Ref PayloadBucketArn
+          TENANT_PAYLOAD_ROLE_ARN: !Ref TenantPayloadRoleArn
+          DATA_KMS_KEY_ARN: !Ref KmsKeyArn
 
   ConsoleFunction:
     Type: AWS::Lambda::Function
@@ -138,7 +152,29 @@ Resources:
           USER_POOL_ARN: !Ref UserPoolArn
           CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistributionId
           TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          BASIC_USAGE_PLAN_ID: !Ref BasicUsagePlanId
+          STANDARD_USAGE_PLAN_ID: !Ref StandardUsagePlanId
           PREWARM_STATE_MACHINE_ARN: !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:translateme-${StageName}-prewarm'
+          DATA_KMS_KEY_ARN: !Ref KmsKeyArn
+
+  WebsiteFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'translateme-${StageName}-website-api'
+      Runtime: nodejs22.x
+      Handler: services/api/sites/handler.handler
+      Role: !Ref WebsiteRoleArn
+      Timeout: 60
+      MemorySize: 512
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref WebsiteCodeKey }
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          TENANT_WEBSITE_DATA_ACCESS_ROLE_ARN: !Ref TenantWebsiteDataAccessRoleArn
+          ALLOW_PLATFORM_SLUG_RESERVATION: 'true'
+          CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistributionId
+          DATA_KMS_KEY_ARN: !Ref KmsKeyArn
 
   TranslateFunction:
     Type: AWS::Lambda::Function
@@ -157,8 +193,8 @@ Resources:
           TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
           TENANT_BATCH_UPLOAD_BUCKET_ARN: !Ref BatchUploadBucketArn
           TENANT_BATCH_UPLOAD_KMS_KEY_ARN: !Ref BatchUploadKmsKeyArn
+          DATA_KMS_KEY_ARN: !Ref KmsKeyArn
           BATCH_STATE_MACHINE_ARN: !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:translateme-${StageName}-batch'
-          TRANSLATE_CONCURRENCY: !Ref TranslateConcurrency
 
   BatchWorkflowFunction:
     Type: AWS::Lambda::Function
@@ -279,13 +315,13 @@ Resources:
                 "Type": "Task", "Resource": "arn:${AWS::Partition}:states:::aws-sdk:sns:createTopic",
                 "Parameters": { "Name.$": "States.Format('translateme-batch-${StageName}-{}', $.tenant_id)" },
                 "ResultPath": "$.sns_topic", "Next": "SubscribeTenantEmail",
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "FinishWorkflow" }]
+                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "RecordNotificationFailure" }]
               },
               "SubscribeTenantEmail": {
                 "Type": "Task", "Resource": "arn:${AWS::Partition}:states:::aws-sdk:sns:subscribe",
                 "Parameters": { "TopicArn.$": "$.sns_topic.TopicArn", "Protocol": "email", "Endpoint.$": "$.notification_email", "ReturnSubscriptionArn": true },
                 "ResultPath": "$.sns_subscription", "Next": "PublishResultEmail",
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "FinishWorkflow" }]
+                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "RecordNotificationFailure" }]
               },
               "PublishResultEmail": {
                 "Type": "Task", "Resource": "arn:${AWS::Partition}:states:::aws-sdk:sns:publish",
@@ -295,8 +331,29 @@ Resources:
                   "Message.$": "States.JsonToString($)",
                   "MessageAttributes": { "tenant_id": { "DataType": "String", "StringValue.$": "$.tenant_id" } }
                 },
-                "ResultPath": null, "Next": "FinishWorkflow",
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "FinishWorkflow" }]
+                "ResultPath": null, "Next": "RecordNotificationSuccess",
+                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "RecordNotificationFailure" }]
+              },
+              "RecordNotificationFailure": {
+                "Type": "Task", "Resource": "${BatchWorkflowArn}",
+                "Parameters": {
+                  "mode": "SET_NOTIFICATION_STATUS",
+                  "job_id.$": "$.job_id",
+                  "tenant_id.$": "$.tenant_id",
+                  "notification_status": "FAILED",
+                  "notification_error.$": "$.notification_error"
+                },
+                "Next": "FinishWorkflow"
+              },
+              "RecordNotificationSuccess": {
+                "Type": "Task", "Resource": "${BatchWorkflowArn}",
+                "Parameters": {
+                  "mode": "SET_NOTIFICATION_STATUS",
+                  "job_id.$": "$.job_id",
+                  "tenant_id.$": "$.tenant_id",
+                  "notification_status": "SUBMITTED"
+                },
+                "Next": "FinishWorkflow"
               },
               "FinishWorkflow": {
                 "Type": "Choice",
@@ -324,6 +381,7 @@ Resources:
           TABLE_NAME: !Ref TableName
           CLOUDFRONT_DISTRIBUTION_ID: !Ref CloudFrontDistributionId
           TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          DATA_KMS_KEY_ARN: !Ref KmsKeyArn
 
   PostConfirmationFunction:
     Type: AWS::Lambda::Function
@@ -339,6 +397,7 @@ Resources:
         Variables:
           TABLE_NAME: !Ref TableName
           TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          DATA_KMS_KEY_ARN: !Ref KmsKeyArn
 
   CognitoInvokePostConfirmation:
     Type: AWS::Lambda::Permission
@@ -365,4 +424,5 @@ Outputs:
     Value: !GetAtt PlatformFunction.Arn
   PostConfirmationFunctionArn:
     Value: !GetAtt PostConfirmationFunction.Arn
-
+  WebsiteFunctionArn:
+    Value: !GetAtt WebsiteFunction.Arn

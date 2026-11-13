@@ -7,6 +7,7 @@ import {
   pauseSite,
   resumeSite,
   verifySite,
+  updateSite,
   type CreateSiteInput,
   type SiteManagerDependencies,
 } from '../siteManager.js';
@@ -392,6 +393,10 @@ describe('siteManager', () => {
       pauseSite(tenantA, 'missing-site', harness.dependencies),
       (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
     );
+    await assert.rejects(
+      verifySite(tenantA, 'missing-site', 'META', harness.dependencies),
+      (error: unknown) => error instanceof AppError && error.code === 'NOT_FOUND',
+    );
   });
 
   it('cho phép thử lại invalidation sau khi trạng thái đã đổi', async () => {
@@ -441,6 +446,36 @@ describe('siteManager', () => {
     assert.equal(
       [...harness.records.keys()].filter((key) => key.endsWith('::HOST#site-example')).length,
       1,
+    );
+  });
+
+  it('updateSite cập nhật thông tin chung nhưng cấm đổi status', async () => {
+    const harness = createHarness();
+    const created = await createSite(tenantA, siteInput, harness.dependencies);
+
+    // Cập nhật hợp lệ
+    const updated = await updateSite(tenantA, created.slug, {
+      displayName: 'Tên mới',
+      targetLangs: ['en', 'fr'],
+      noTranslateSelectors: ['.code'],
+      cacheTTL: 7200,
+    }, harness.dependencies);
+
+    assert.equal(updated.displayName, 'Tên mới');
+    assert.deepEqual(updated.targetLangs, ['en', 'fr']);
+    assert.deepEqual(updated.noTranslateSelectors, ['.code']);
+    assert.equal(updated.cacheTTL, 7200);
+
+    // Cấm đổi status
+    await assert.rejects(
+      updateSite(tenantA, created.slug, { status: 'ACTIVE' }, harness.dependencies),
+      (err: unknown) => err instanceof AppError && err.code === 'INVALID_REQUEST',
+    );
+
+    // Báo NOT_FOUND khi không tồn tại slug
+    await assert.rejects(
+      updateSite(tenantA, 'khong-ton-tai', { displayName: 'X' }, harness.dependencies),
+      (err: unknown) => err instanceof AppError && err.code === 'NOT_FOUND',
     );
   });
 });

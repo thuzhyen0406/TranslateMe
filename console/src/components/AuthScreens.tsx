@@ -3,7 +3,6 @@ import {
   completeInvitedMemberPassword,
   confirmEmailAndRefreshSession,
   confirmForgotPasswordReset,
-  ConsoleAuthError,
   IS_DEMO_AUTH_MODE,
   mapCognitoErrorToVietnamese,
   registerAccount,
@@ -13,6 +12,7 @@ import {
   signInWithEmail,
   validatePasswordPolicy,
 } from '../services/cognitoAuth.js';
+import { ErrorAlert } from './ConsoleFeedback.js';
 import type {
   AuthenticatedSession,
   AuthScreenMode,
@@ -57,9 +57,13 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
 
   // Trạng thái xử lý & thông báo lỗi/thành công
   const [loading, setLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [rawError, setRawError] = useState<unknown | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+
+  const errorCode =
+    rawError && typeof rawError === 'object' && 'code' in rawError
+      ? String((rawError as { code?: unknown }).code ?? '')
+      : null;
 
   /**
    * Chuyển màn hình có kiểm soát thông báo (Mục 3 Review):
@@ -67,8 +71,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
    * - Khi tự động chuyển từ Đăng ký sang Xác nhận email (`keepInfo = true`), giữ nguyên `infoMessage` hiển thị mã demo.
    */
   const switchScreenMode = (nextMode: AuthScreenMode, keepInfo = false) => {
-    setErrorMessage(null);
-    setErrorCode(null);
+    setRawError(null);
     if (!keepInfo) {
       setInfoMessage(null);
     }
@@ -76,12 +79,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   };
 
   const applyError = (err: unknown) => {
-    setErrorMessage(mapCognitoErrorToVietnamese(err));
-    if (err instanceof ConsoleAuthError) {
-      setErrorCode(err.code);
-    } else {
-      setErrorCode(null);
-    }
+    setRawError(err);
   };
 
   useEffect(() => {
@@ -94,8 +92,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
 
   // Xử lý nhập từng ô mã xác nhận 6 chữ số
   const handleOtpChange = (index: number, rawVal: string) => {
-    setErrorMessage(null);
-    setErrorCode(null);
+    setRawError(null);
     const digitsOnly = rawVal.replace(/\D/g, '');
     if (digitsOnly.length > 1) {
       const next = [...otpDigits];
@@ -130,8 +127,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   // Submit: Đăng ký (`intro.jpg`)
   const handleSignUpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMessage(null);
-    setErrorCode(null);
+    setRawError(null);
     setInfoMessage(null);
     setLoading(true);
     try {
@@ -161,8 +157,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   // Submit: Xác nhận email + Refresh Token (`Xác nhận email.jpg`)
   const handleConfirmEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMessage(null);
-    setErrorCode(null);
+    setRawError(null);
     setInfoMessage(null);
     setLoading(true);
     try {
@@ -184,8 +179,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
 
   const handleResendCode = async () => {
     if (resendCooldown > 0) return;
-    setErrorMessage(null);
-    setErrorCode(null);
+    setRawError(null);
     const targetEmail = email || (IS_DEMO_AUTH_MODE ? 'lan@homestay-abc.example' : '');
     const res = await resendConfirmationCode(targetEmail);
     setResendCooldown(res.expiresInSeconds);
@@ -197,8 +191,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   // Submit: Đăng nhập (`log-in.jpg`)
   const handleSignInSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMessage(null);
-    setErrorCode(null);
+    setRawError(null);
     setInfoMessage(null);
     setLoading(true);
     try {
@@ -230,8 +223,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   // Submit: Đặt mật khẩu mới khi vào bằng lời mời (`Đặt lại mk.jpg`)
   const handleForceChangePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMessage(null);
-    setErrorCode(null);
+    setRawError(null);
     setInfoMessage(null);
     setLoading(true);
     try {
@@ -254,8 +246,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   // Submit Bước 1 Quên mật khẩu: Gửi mã khôi phục
   const handleRequestPasswordResetSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMessage(null);
-    setErrorCode(null);
+    setRawError(null);
     setInfoMessage(null);
     setLoading(true);
     try {
@@ -278,8 +269,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
   // Submit Bước 2 Quên mật khẩu: Xác nhận mã 6 số & mật khẩu mới
   const handleConfirmPasswordResetSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMessage(null);
-    setErrorCode(null);
+    setRawError(null);
     setInfoMessage(null);
     setLoading(true);
     try {
@@ -403,36 +393,37 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
 
         {/* Thẻ Form bên phải */}
         <div className="w-full max-w-[440px] bg-white rounded-xl shadow-[0_8px_30px_rgb(0,0,0,0.06)] border border-gray-100 p-8">
-          {errorMessage && (
-            <div
-              role="alert"
-              className="mb-5 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-xs text-red-700 leading-relaxed space-y-2"
-            >
-              <div>{errorMessage}</div>
-              {errorCode === 'UsernameExistsException' && mode === 'SIGN_UP' && (
-                <div className="flex items-center gap-3 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => switchScreenMode('SIGN_IN')}
-                    className="font-semibold text-[#146c54] underline hover:text-[#0f5945]"
-                  >
-                    Đăng nhập ngay
-                  </button>
-                  <span className="text-gray-300">•</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setResetStep('REQUEST_CODE');
-                      switchScreenMode('FORGOT_PASSWORD');
-                    }}
-                    className="font-semibold text-[#146c54] underline hover:text-[#0f5945]"
-                  >
-                    Quên mật khẩu?
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
+          <ErrorAlert
+            error={rawError}
+            scope="auth"
+            operation="write"
+            formatMessage={mapCognitoErrorToVietnamese}
+            compact
+            className="mb-5"
+          >
+            {errorCode === 'UsernameExistsException' && mode === 'SIGN_UP' && (
+              <div className="flex items-center gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => switchScreenMode('SIGN_IN')}
+                  className="font-semibold text-[#146c54] underline hover:text-[#0f5945]"
+                >
+                  Đăng nhập ngay
+                </button>
+                <span className="text-gray-300">•</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResetStep('REQUEST_CODE');
+                    switchScreenMode('FORGOT_PASSWORD');
+                  }}
+                  className="font-semibold text-[#146c54] underline hover:text-[#0f5945]"
+                >
+                  Quên mật khẩu?
+                </button>
+              </div>
+            )}
+          </ErrorAlert>
 
           {infoMessage && (
             <div className="mb-5 rounded-lg bg-[#e6f2ee] border border-[#b8dcd0] px-4 py-3 text-xs text-[#146c54] leading-relaxed">
@@ -817,7 +808,7 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setErrorMessage(null);
+                    setRawError(null);
                     setResetStep('REQUEST_CODE');
                   }}
                   className="text-gray-500 underline hover:text-gray-700"

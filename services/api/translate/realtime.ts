@@ -352,6 +352,7 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
 export const handler = (event: RealtimeEvent): Promise<RealtimeResponse> | ReturnType<typeof batchIngressHandler> => {
   const requestPath = event.path ?? event.rawPath ?? '';
   if (/(?:^|\/)translate\/batch(?:\/|$)/u.test(requestPath)) return batchIngressHandler(event);
+
   const tableName = process.env.TABLE_NAME;
   if (!tableName) return Promise.resolve(apiError(500, 'INTERNAL_ERROR', 'Thiếu cấu hình bảng dữ liệu.', event.requestContext?.requestId ?? 'unknown'));
   const ddb = createTenantDocumentClientRouter(

@@ -13,6 +13,13 @@ Parameters:
     Type: String
     Default: "false"          # dat "true" khi len moi truong that
     AllowedValues: ["true", "false"]
+  PayloadBucketName:
+    Type: String
+    Default: ''
+    Description: Optional globally unique name for the asynchronous worker payload bucket.
+
+Conditions:
+  HasPayloadBucketName: !Not [!Equals [!Ref PayloadBucketName, '']]
 
 Resources:
   DataKey:
@@ -47,6 +54,84 @@ Resources:
     Properties:
       AliasName: alias/translateme-data
       TargetKeyId: !Ref DataKey
+
+  WorkerPayloadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If [HasPayloadBucketName, !Ref PayloadBucketName, !Ref AWS::NoValue]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt DataKey.Arn
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireWorkerPayloads
+            Status: Enabled
+            Prefix: tenant/
+            ExpirationInDays: 1
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+      Tags:
+        - { Key: project, Value: translateme }
+
+  WorkerPayloadBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WorkerPayloadBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt WorkerPayloadBucket.Arn
+              - !Sub '${WorkerPayloadBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+          - Sid: DenyExplicitNonKmsEncryption
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${WorkerPayloadBucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: aws:kms
+          - Sid: DenyMissingKmsEncryptionHeader
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${WorkerPayloadBucket.Arn}/*'
+            Condition:
+              'Null':
+                s3:x-amz-server-side-encryption: true
+          - Sid: DenyUnapprovedKmsKey
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${WorkerPayloadBucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption-aws-kms-key-id: !GetAtt DataKey.Arn
+          - Sid: DenyMissingKmsKeyHeader
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${WorkerPayloadBucket.Arn}/*'
+            Condition:
+              'Null':
+                s3:x-amz-server-side-encryption-aws-kms-key-id: true
 
   Table:
     Type: AWS::DynamoDB::Table
@@ -128,8 +213,7 @@ Resources:
         Rules:
           - Id: ExpireTenantBatchFilesAfterSevenDays
             Status: Enabled
-            Filter:
-              Prefix: batch/
+            Prefix: batch/
             ExpirationInDays: 7
             NoncurrentVersionExpiration:
               NoncurrentDays: 7
@@ -175,3 +259,7 @@ Outputs:
   BatchFilesBucketArn:
     Description: Grant the API/worker roles object access only to this bucket and tenant prefixes.
     Value: !GetAtt BatchFilesBucket.Arn
+  PayloadBucketName:
+    Value: !Ref WorkerPayloadBucket
+  PayloadBucketArn:
+    Value: !GetAtt WorkerPayloadBucket.Arn

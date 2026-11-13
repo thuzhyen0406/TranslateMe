@@ -1,0 +1,151 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { createWebsiteHandler, type WebsiteHandlerDependencies } from '../handler.js';
+import type { Ctx } from '../../../../libs/common/types.js';
+
+const tenantCtx: Ctx = { tenantId: 't_aaaaaaaaaaaaaaaaaaaaaaaa', via: 'JWT', requestId: 'req-1', role: 'TENANT_ADMIN' };
+
+function setup(overrides: Partial<WebsiteHandlerDependencies> = {}) {
+  let createInput: Record<string, unknown> | undefined;
+  const dependencies: WebsiteHandlerDependencies = {
+    contextFromClaims: async () => tenantCtx,
+    listTenantSites: async () => [{ slug: 'example', status: 'ACTIVE' }],
+    getHost: async (_ctx, slug) => ({ slug, status: 'ACTIVE', homeUrl: 'https://example.test', displayName: 'Example' }),
+    create: async (_ctx, input) => {
+      createInput = input as unknown as Record<string, unknown>;
+      return { slug: 'example' } as never;
+    },
+    pause: async () => ({ status: 'PAUSED' }) as never,
+    resume: async () => ({ status: 'ACTIVE' }) as never,
+    verify: async () => ({ status: 'ACTIVE' as const }),
+    update: async () => ({ slug: 'example', status: 'ACTIVE' }) as never,
+    ...overrides,
+  };
+  return { handler: createWebsiteHandler(dependencies), getCreateInput: () => createInput };
+}
+
+const claims = { sub: 'member-1', 'custom:tenant_id': tenantCtx.tenantId, 'custom:role': 'TENANT_ADMIN' };
+
+describe('website HTTP handler', () => {
+  it('chặn role khác Tenant Admin', async () => {
+    const { handler } = setup({
+      contextFromClaims: async () => ({ ...tenantCtx, role: 'DEVELOPER' }),
+    });
+    const response = await handler({ httpMethod: 'GET', path: '/console/hosts', requestContext: { authorizer: { claims } } });
+    assert.equal(response.statusCode, 403);
+    assert.equal(JSON.parse(response.body).error.code, 'PERMISSION_DENIED');
+  });
+
+  it('từ chối tenant_id do client gửi trong body', async () => {
+    const { handler } = setup();
+    const response = await handler({
+      httpMethod: 'POST', path: '/console/hosts', body: JSON.stringify({ tenant_id: tenantCtx.tenantId }),
+      requestContext: { authorizer: { claims } },
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal(JSON.parse(response.body).error.code, 'INVALID_REQUEST');
+  });
+
+  it('chuyển snake_case của Console sang createSite và trả host đầy đủ với 201', async () => {
+    const { handler, getCreateInput } = setup();
+    const response = await handler({
+      httpMethod: 'POST', path: '/console/hosts', body: JSON.stringify({
+        home_url: 'https://example.test', display_name: 'Example', source_lang: 'en', target_langs: ['fr'],
+      }),
+      requestContext: { authorizer: { claims } },
+    });
+    const body = JSON.parse(response.body);
+    assert.equal(response.statusCode, 201);
+    assert.deepEqual(getCreateInput(), {
+      home_url: 'https://example.test', display_name: 'Example', source_lang: 'en', target_langs: ['fr'],
+      homeUrl: 'https://example.test', displayName: 'Example', sourceLang: 'en', targetLangs: ['fr'],
+    });
+    assert.deepEqual(body.host, { slug: 'example', status: 'ACTIVE', homeUrl: 'https://example.test', displayName: 'Example' });
+  });
+
+  it('chuẩn hóa path có tiền tố stage khi liệt kê hosts', async () => {
+    const { handler } = setup();
+    const response = await handler({
+      httpMethod: 'GET', path: '/dev/console/hosts', requestContext: { stage: 'dev', authorizer: { claims } },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(JSON.parse(response.body).hosts, [{ slug: 'example', status: 'ACTIVE' }]);
+  });
+
+  it('hỗ trợ cả POST và PATCH cho pause/resume website theo đúng quy ước và contract', async () => {
+    let paused = 0;
+    let resumed = 0;
+    const { handler } = setup({
+      pause: async () => { paused++; return { status: 'PAUSED' } as never; },
+      resume: async () => { resumed++; return { status: 'ACTIVE' } as never; },
+    });
+
+    const resPostPause = await handler({
+      httpMethod: 'POST', path: '/console/hosts/example/pause', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(resPostPause.statusCode, 200);
+
+    const resPatchPause = await handler({
+      httpMethod: 'PATCH', path: '/console/hosts/example/pause', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(resPatchPause.statusCode, 200);
+    assert.equal(paused, 2);
+
+    const resPostResume = await handler({
+      httpMethod: 'POST', path: '/console/hosts/example/resume', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(resPostResume.statusCode, 200);
+
+    const resPatchResume = await handler({
+      httpMethod: 'PATCH', path: '/console/hosts/example/resume', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(resPatchResume.statusCode, 200);
+    assert.equal(resumed, 2);
+  });
+
+  it('từ chối các route con sai định dạng cho verify/pause/resume và trả 404', async () => {
+    const { handler } = setup();
+
+    const badPause = await handler({
+      httpMethod: 'POST', path: '/console/hosts/example/other/pause', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(badPause.statusCode, 404);
+
+    const badResume = await handler({
+      httpMethod: 'PATCH', path: '/console/hosts/example/sub/resume', requestContext: { authorizer: { claims } },
+    });
+    assert.equal(badResume.statusCode, 404);
+
+    const badVerify = await handler({
+      httpMethod: 'POST', path: '/console/hosts/example/extra/verify', requestContext: { authorizer: { claims } },
+      body: JSON.stringify({ method: 'META' }),
+    });
+    assert.equal(badVerify.statusCode, 404);
+  });
+
+  it('từ chối đổi status qua PATCH /console/hosts/{slug} và trả 400 INVALID_REQUEST', async () => {
+    const { handler } = setup();
+    const res = await handler({
+      httpMethod: 'PATCH', path: '/console/hosts/example', requestContext: { authorizer: { claims } },
+      body: JSON.stringify({ status: 'ACTIVE' }),
+    });
+    assert.equal(res.statusCode, 400);
+    assert.equal(JSON.parse(res.body).error.code, 'INVALID_REQUEST');
+  });
+
+  it('cho phép cập nhật thông tin chung qua PATCH /console/hosts/{slug}', async () => {
+    let updatedInput: Record<string, unknown> | undefined;
+    const { handler } = setup({
+      update: async (_ctx, slug, input) => {
+        updatedInput = input;
+        return { slug, displayName: input.displayName } as never;
+      },
+    });
+    const res = await handler({
+      httpMethod: 'PATCH', path: '/console/hosts/example', requestContext: { authorizer: { claims } },
+      body: JSON.stringify({ display_name: 'New Name', target_langs: ['vi', 'ja'] }),
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(updatedInput?.displayName, 'New Name');
+  });
+});

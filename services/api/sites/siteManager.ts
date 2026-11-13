@@ -198,7 +198,8 @@ export async function verifySite(
   const host = await deps.db.get(ctx, hostKey);
 
   if (!host) {
-    throw new AppError('SITE_UNREACHABLE', 'Không tìm thấy thông tin website');
+    // Không phân biệt website của tenant khác với slug không tồn tại (QC-17).
+    throw new AppError('NOT_FOUND', 'Không tìm thấy website');
   }
 
   const verificationCode = host.verificationCode;
@@ -305,4 +306,44 @@ export async function resumeSite(
     slugs: [slug],
   });
   return { status: 'ACTIVE' as const, invalidation };
+}
+
+export async function updateSite(
+  ctx: Ctx,
+  slug: string,
+  input: Record<string, unknown>,
+  deps: SiteManagerDependencies = defaultDependencies,
+): Promise<Record<string, unknown>> {
+  requireRole(ctx, ['TENANT_ADMIN']);
+  await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
+
+  if ('status' in input && input.status !== undefined) {
+    throw new AppError('INVALID_REQUEST', 'Không được phép cập nhật trạng thái website qua endpoint này; vui lòng dùng verify, pause hoặc resume');
+  }
+
+  const site = await deps.db.get(ctx, keys.host(ctx, slug));
+  if (!site) {
+    throw new AppError('NOT_FOUND', 'Không tìm thấy website');
+  }
+
+  const updated: Record<string, unknown> = { ...site };
+  if (Array.isArray(input.targetLangs)) {
+    updated.targetLangs = input.targetLangs;
+  }
+  if (Array.isArray(input.noTranslateSelectors)) {
+    updated.noTranslateSelectors = input.noTranslateSelectors;
+  }
+  if (typeof input.displayName === 'string') {
+    updated.displayName = input.displayName;
+  }
+  if (typeof input.cacheTTL === 'number') {
+    updated.cacheTTL = input.cacheTTL;
+  }
+  if (typeof input.cacheTtlSec === 'number') {
+    updated.cacheTtlSec = input.cacheTtlSec;
+  }
+  updated.updatedAt = new Date().toISOString();
+
+  await deps.db.put(ctx, updated);
+  return updated;
 }
