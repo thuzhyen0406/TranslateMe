@@ -674,7 +674,7 @@ Resources:
                 Condition:
                   ForAllValues:StringEquals:
                     dynamodb:LeadingKeys: ['PLATFORM#TENANTS']
-                    dynamodb:Attributes: [PK, SK, GSI1PK, GSI1SK, tenantId, plan, status, createdAt, characterLimit, charLimit]
+                    dynamodb:Attributes: [PK, SK, GSI1PK, GSI1SK, tenantId, organizationName, plan, status, createdAt, characterLimit, charLimit]
                   StringEquals:
                     dynamodb:Select: SPECIFIC_ATTRIBUTES
                   'Null':

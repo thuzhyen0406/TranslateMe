@@ -9,6 +9,7 @@ interface FakeUser {
   password: string;
   status: 'UNCONFIRMED' | 'CONFIRMED' | 'FORCE_CHANGE_PASSWORD';
   attrs: Record<string, string>;
+  groups?: string[];
   code?: string;
 }
 
@@ -32,7 +33,7 @@ function fakeBackend(opts: { triggerFails?: boolean; meStatus?: number } = {}) {
     const rt = `rt-${++seq}`;
     refreshTokens.set(rt, email);
     return {
-      IdToken: createMockJwt({ sub: u.sub, email, ...u.attrs, jti: `j${seq}` } as never),
+      IdToken: createMockJwt({ sub: u.sub, email, ...u.attrs, 'cognito:groups': u.groups, jti: `j${seq}` } as never),
       AccessToken: `at-${seq}`,
       RefreshToken: rt,
       ExpiresIn: 3600,
@@ -292,6 +293,29 @@ describe('Web Console – chế độ Cognito thật (VITE_AUTH_MODE=cognito)', 
       cognitoLive.signIn('x@x.vn', 'Password123', live),
       (e: unknown) => e instanceof ConsoleAuthError && e.code === 'TENANT_NOT_LINKED',
     );
+  });
+
+  it('Platform Admin đăng nhập và làm mới phiên bằng nhóm Cognito, bỏ qua /console/me', async () => {
+    const { users, calls, live } = fakeBackend();
+    users.set('platform@x.vn', {
+      sub: 'platform-admin',
+      password: 'Password123',
+      status: 'CONFIRMED',
+      attrs: {},
+      groups: ['PlatformAdmins'],
+    });
+
+    const out = await cognitoLive.signIn('platform@x.vn', 'Password123', live);
+    assert.equal(out.status, 'AUTHENTICATED');
+    const refreshed = await cognitoLive.refreshSession(out.session, live);
+
+    for (const session of [out.session, refreshed]) {
+      assert.equal(session.role, 'PLATFORM_ADMIN');
+      assert.equal(session.tenantId, '');
+      assert.equal(session.tenantStatus, 'ACTIVE');
+    }
+    assert.notEqual(refreshed.idToken, out.session.idToken);
+    assert.equal(calls.some((call) => call.url.endsWith('/console/me')), false);
   });
 
   it('Làm mới token giữ refresh token cũ; đăng xuất thu hồi refresh token', async () => {

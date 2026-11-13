@@ -32,9 +32,13 @@ function zipDir(dir: string, out: string): void {
   rmSync(out, { force: true });
   const z = spawnSync('zip', ['-qr', '-X', out, '.'], { cwd: dir, stdio: 'inherit' });
   if (z.status === 0) return;
-  // Không có lệnh zip: dùng python3
-  const py = spawnSync('python3', ['-c', 'import shutil,sys; shutil.make_archive(sys.argv[1][:-4], "zip", sys.argv[2])', out, dir], { stdio: 'inherit' });
-  if (py.status !== 0) throw new Error('Cần lệnh zip hoặc python3 để đóng gói Lambda');
+  // Trên Windows, Python có thể chỉ được cài dưới tên python.exe.
+  const interpreters = process.platform === 'win32' ? ['python3', 'python'] : ['python3'];
+  const args = ['-c', 'import shutil,sys; shutil.make_archive(sys.argv[1][:-4], "zip", sys.argv[2])', out, dir];
+  for (const interpreter of interpreters) {
+    if (spawnSync(interpreter, args, { stdio: 'inherit' }).status === 0) return;
+  }
+  throw new Error('Cần lệnh zip hoặc Python 3 để đóng gói Lambda');
 }
 
 export const sha256File = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');

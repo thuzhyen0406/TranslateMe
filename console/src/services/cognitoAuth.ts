@@ -80,7 +80,7 @@ export const ROLE_DISPLAY_LABEL: Record<ConsoleRole, string> = Object.freeze({
 });
 
 /**
- * Chuẩn hóa chuỗi vai trò từ JWT (`custom:role` hoặc `cognito:groups`) về mã chuẩn `ConsoleRole`.
+ * Chuẩn hóa vai trò tenant từ claim `custom:role` về mã chuẩn `ConsoleRole`.
  * Claim Cognito tenant-role có giá trị lowercase; role lưu trong session là mã nội bộ uppercase.
  */
 export function normalizeRole(raw?: string | null): ConsoleRole | null {
@@ -1362,9 +1362,11 @@ async function liveSessionFromTokens(
   if (!claims) {
     throw new ConsoleAuthError('INVALID_AUTH_RESPONSE', 'Phản hồi đăng nhập từ Amazon Cognito không hợp lệ. Vui lòng thử lại.');
   }
-  const tenantId = String(claims['custom:tenant_id'] ?? '').trim();
-  const role = normalizeRole(claims['custom:role']);
-  if (!tenantId || !role) {
+  const groups = claims['cognito:groups'];
+  const isPlatformAdmin = Array.isArray(groups) && groups.includes('PlatformAdmins');
+  const tenantId = isPlatformAdmin ? '' : String(claims['custom:tenant_id'] ?? '').trim();
+  const role = isPlatformAdmin ? 'PLATFORM_ADMIN' : normalizeRole(claims['custom:role']);
+  if (!role || (!isPlatformAdmin && !tenantId)) {
     throw new ConsoleAuthError(
       'TENANT_NOT_LINKED',
       'Tài khoản chưa được gắn với tổ chức nào. Nếu bạn vừa xác nhận email, vui lòng đợi vài giây rồi đăng nhập lại.',
