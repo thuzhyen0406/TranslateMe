@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   release-gate:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -164,6 +164,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: e2e-evidence-${{ github.run_id }}
-          path: e2e/evidence/${{ github.run_id }}/
+          path: e2e/evidence/${{ github.run_id }}/summary.md
           if-no-files-found: warn
           retention-days: 7

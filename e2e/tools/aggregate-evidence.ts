@@ -63,7 +63,13 @@ for (const scenario of [4, 5, 6]) {
   for (let i = 0; i < ids.length; i++) {
     const row = rows[i];
     const result = row?.status === 'pass' ? 'ĐẠT' : row?.status === 'fail' ? 'LỖI' : row?.status === 'skip' ? 'BỎ QUA' : 'THIẾU';
-    const detail = row ? JSON.stringify(row.data ?? {}).replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ') : 'Chưa có bản ghi';
+    const detail = !row
+      ? 'Chưa có bản ghi'
+      : row.status === 'fail'
+        ? 'Chi tiết lỗi đã được lược khỏi artifact.'
+        : row.status === 'skip'
+          ? 'Chi tiết bỏ qua được giữ ngoài artifact.'
+          : 'Chi tiết phản hồi được giữ ngoài artifact.';
     md.push(`| ${ids[i]} | ${result} | ${(row?.title ?? '').replace(/\|/g, '\\|')} | ${detail} |`);
   }
   md.push('');

@@ -103,8 +103,8 @@ Summary phân biệt `ĐẠT`, `LỖI`, `BỎ QUA` và `THIẾU`; lỗi luôn l�
 
 ## GitHub Actions release gate
 
-`release-gate.yml` hiện chỉ chạy thủ công qua `workflow_dispatch`. Trigger sau deploy được tạm tắt cho tới khi các route, fixture SSRF, state demo và hạ tầng sản phẩm sẵn sàng. Sau khi các dependency này được cung cấp, có thể bật lại trigger deploy.
+`release-gate.yml` hiện chỉ chạy thủ công qua `workflow_dispatch` trên nhánh `main`; các dispatch từ nhánh khác bị từ chối trước khi cấp AWS credentials. Trigger sau deploy được tạm tắt cho tới khi các route, fixture SSRF, state demo và hạ tầng sản phẩm sẵn sàng. Sau khi các dependency này được cung cấp, có thể bật lại trigger deploy.
 
-Trước khi chạy test, workflow kiểm tra secrets `AWS_ROLE_ARN`, `TM_CI_ENV`, `TM_STATE_JSON`; Actions variables `TM_ACCOUNT` (12 chữ số) và `TM_REGION`; state tenant A/B/C; fixtures `TM_SSRF_REBIND_URL`, `TM_SSRF_REDIRECT_URL`, `TM_SSRF_HEADER_REPORT_URL`; và capability flags cho các route bắt buộc. Sau khi assume role, workflow xác nhận account bằng STS trước khi kiểm tra stack. Các capability route chỉ đặt `1` sau khi route đã deploy. Artifact evidence chỉ lưu 7 ngày.
+Trước khi chạy test, workflow kiểm tra secrets `AWS_ROLE_ARN`, `TM_CI_ENV`, `TM_STATE_JSON`; Actions variables `TM_ACCOUNT` (12 chữ số) và `TM_REGION`; state tenant A/B/C; fixtures `TM_SSRF_REBIND_URL`, `TM_SSRF_REDIRECT_URL`, `TM_SSRF_HEADER_REPORT_URL`; và capability flags cho các route bắt buộc. Sau khi assume role, workflow xác nhận account bằng STS trước khi kiểm tra stack. Các capability route chỉ đặt `1` sau khi route đã deploy. Artifact chỉ chứa `summary.md`, đã lược chi tiết lỗi/phản hồi, và được giữ 7 ngày; JSONL thô không được upload.
 
 Thiếu route, fixture hoặc seed state sẽ làm validation/evidence gate thất bại; không dùng kết quả đó làm tín hiệu release. Route/capability chưa sẵn sàng được liệt kê ở phần trên của README. Repo cũng chưa có bảy CloudFormation stack entry-point cho deploy demo.
