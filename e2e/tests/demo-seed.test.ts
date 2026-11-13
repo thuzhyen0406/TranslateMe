@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ensureUsagePlanKey } from '../demo/usagePlan';
-import { batchRecoveryWaitSeconds, recoverBatchJob } from '../demo/batchRecovery';
+import { batchRecoveryPollDelayMs, batchRecoveryWaitSeconds, recoverBatchJob } from '../demo/batchRecovery';
 
 const envBefore = {
   AWS_BIN: process.env.AWS_BIN,
@@ -159,4 +159,9 @@ test('batch recovery không cho cấu hình thời gian dò ngắn hơn Lambda t
   assert.equal(batchRecoveryWaitSeconds(undefined), 90);
   assert.equal(batchRecoveryWaitSeconds('120'), 120);
   assert.throws(() => batchRecoveryWaitSeconds('35'), /không được ngắn hơn timeout Lambda/u);
+});
+
+test('batch recovery tăng dần khoảng dò và giới hạn backoff ở 10 giây', () => {
+  assert.deepEqual([0, 1, 2, 3, 4, 8].map(batchRecoveryPollDelayMs), [1000, 2000, 4000, 8000, 10000, 10000]);
+  assert.throws(() => batchRecoveryPollDelayMs(-1), /số nguyên không âm/u);
 });
