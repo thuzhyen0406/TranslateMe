@@ -16,6 +16,8 @@ import { WebsitePage } from './WebsitePage.js';
 import { ApiKeysPage } from './ApiKeysPage.js';
 import { PlaygroundPage } from './PlaygroundPage.js';
 import { BatchTranslatePage } from './BatchTranslatePage.js';
+import { UsagePage } from './UsagePage.js';
+import { PlatformAdminPage } from './PlatformAdminPage.js';
 
 const PLAN_DISPLAY_LABEL: Readonly<Record<AuthenticatedSession['plan'], string>> = {
   FREE: 'Free',
@@ -29,8 +31,13 @@ interface ConsoleLayoutProps {
 }
 
 export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session, onUpdateSession }) => {
-  const [fallbackTenantStatus, setFallbackTenantStatus] = useState<TenantStatus>(session.tenantStatus);
-  const [checkingTenantStatus, setCheckingTenantStatus] = useState<boolean>(!IS_DEMO_AUTH_MODE);
+  const isPlatformAdmin = session.role === 'PLATFORM_ADMIN';
+  const [fallbackTenantStatus, setFallbackTenantStatus] = useState<TenantStatus>(
+    isPlatformAdmin ? 'ACTIVE' : session.tenantStatus,
+  );
+  const [checkingTenantStatus, setCheckingTenantStatus] = useState<boolean>(
+    !IS_DEMO_AUTH_MODE && !isPlatformAdmin,
+  );
   const [tenantStatusError, setTenantStatusError] = useState<unknown | null>(null);
   const [statusRefreshSeq, setStatusRefreshSeq] = useState<number>(0);
 
@@ -40,13 +47,17 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session, onUpdateS
   onUpdateSessionRef.current = onUpdateSession;
 
   useEffect(() => {
-    setFallbackTenantStatus(session.tenantStatus);
-  }, [session.tenantId, session.idToken, session.tenantStatus]);
+    setFallbackTenantStatus(session.role === 'PLATFORM_ADMIN' ? 'ACTIVE' : session.tenantStatus);
+  }, [session.tenantId, session.idToken, session.tenantStatus, session.role]);
 
   // Ở chế độ API thật, luôn truy vấn GET /console/me khi vào Console (hoặc khi người dùng yêu cầu kiểm tra lại)
   // để đồng bộ trạng thái ACTIVE / LOCKED; nếu không xác minh được thì giữ UNKNOWN (fail-closed khóa thao tác ghi).
+  // Riêng vai trò PLATFORM_ADMIN quản trị toàn nền tảng (/platform/tenants), không thuộc một tenant cụ thể nên bỏ qua /console/me.
   useEffect(() => {
-    if (IS_DEMO_AUTH_MODE) {
+    if (IS_DEMO_AUTH_MODE || session.role === 'PLATFORM_ADMIN') {
+      if (session.role === 'PLATFORM_ADMIN') {
+        setFallbackTenantStatus('ACTIVE');
+      }
       setCheckingTenantStatus(false);
       setTenantStatusError(null);
       return;
@@ -65,12 +76,14 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session, onUpdateS
         const nextOrg = profile.organizationName ?? cur.organizationName;
         const nextPlan = profile.plan ?? cur.plan;
         const nextTenantId = profile.tenantId || cur.tenantId;
+        const nextLimit = profile.characterLimit ?? cur.characterLimit;
         if (
           cur.tenantStatus !== profile.tenantStatus ||
           cur.role !== profile.role ||
           cur.organizationName !== nextOrg ||
           cur.plan !== nextPlan ||
-          cur.tenantId !== nextTenantId
+          cur.tenantId !== nextTenantId ||
+          cur.characterLimit !== nextLimit
         ) {
           onUpdateSessionRef.current?.({
             ...cur,
@@ -79,6 +92,7 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session, onUpdateS
             tenantStatus: profile.tenantStatus,
             organizationName: nextOrg,
             plan: nextPlan,
+            ...(nextLimit !== undefined ? { characterLimit: nextLimit } : {}),
           });
         }
       })
@@ -105,11 +119,13 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session, onUpdateS
     return () => {
       cancelled = true;
     };
-  }, [session.tenantId, session.idToken, statusRefreshSeq]);
+  }, [session.tenantId, session.idToken, session.role, statusRefreshSeq]);
 
-  const effectiveTenantStatus: TenantStatus = IS_DEMO_AUTH_MODE
-    ? session.tenantStatus
-    : fallbackTenantStatus;
+  const effectiveTenantStatus: TenantStatus = isPlatformAdmin
+    ? 'ACTIVE'
+    : IS_DEMO_AUTH_MODE
+      ? session.tenantStatus
+      : fallbackTenantStatus;
 
   const effectiveSession: AuthenticatedSession = useMemo(
     () =>
@@ -265,6 +281,12 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session, onUpdateS
             session={effectiveSession}
             onTenantStatusDetected={handleTenantStatusDetected}
           />
+        ) : activeMenu === 'usage' ? (
+          <UsagePage session={effectiveSession} />
+        ) : activeMenu === 'platform-tenants' ? (
+          <PlatformAdminPage session={effectiveSession} mode="tenants" />
+        ) : activeMenu === 'platform-pricing' ? (
+          <PlatformAdminPage session={effectiveSession} mode="pricing" />
         ) : (
           <div className="p-8 max-w-4xl">
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm">

@@ -21,6 +21,12 @@ batch web-session resources below.
 | `POST /console/api-keys/{keyId}/revoke` | Cognito ID token | Console Lambda | Revoke key |
 | `PATCH /console/api-keys/{keyId}` | Cognito ID token | Console Lambda | Change API key plan |
 
+The Console usage response reports settled machine-translated characters in
+`chars_machine_translated` and temporary reservations in `reserved_in_flight`.
+`chars_quota_used` includes both. `sources` lists settled usage for each website
+(`WEB`, identified by `slug`), each API key (`API`, identified by `key_id`), and
+the Web Console (`CONSOLE`). API key values are excluded from the report.
+
 The batch session routes use explicit API Gateway resources so they can use a
 Cognito authorizer while the greedy `/translate/{proxy+}` method continues to
 require API keys. The browser sends its Cognito ID token in `Authorization`;

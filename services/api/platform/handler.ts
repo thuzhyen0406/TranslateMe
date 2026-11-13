@@ -27,7 +27,7 @@ async function listTenantConfigs(after?: string) {
     IndexName: 'GSI1',
     KeyConditionExpression: 'GSI1PK = :directory',
     ExpressionAttributeValues: { ':directory': PLATFORM_TENANT_INDEX },
-    ProjectionExpression: 'PK, SK, GSI1PK, GSI1SK, tenantId, #plan, #status, createdAt, characterLimit, charLimit',
+    ProjectionExpression: 'PK, SK, GSI1PK, GSI1SK, tenantId, organizationName, #plan, #status, createdAt, characterLimit, charLimit',
     ExpressionAttributeNames: { '#plan': 'plan', '#status': 'status' },
     Select: 'SPECIFIC_ATTRIBUTES',
     Limit: 100,
@@ -46,8 +46,15 @@ const defaults: PlatformHandlerDeps = { db, setStatus: setTenantStatus, list: li
 
 function tenantSummary(tenantId: string, item: Record<string, unknown>) {
   const limit = item.characterLimit ?? item.charLimit;
+  const orgName =
+    typeof item.organizationName === 'string' && item.organizationName.trim()
+      ? item.organizationName.trim()
+      : typeof item.organization_name === 'string' && item.organization_name.trim()
+        ? item.organization_name.trim()
+        : undefined;
   return {
     tenant_id: tenantId,
+    ...(orgName ? { organization_name: orgName } : {}),
     ...(typeof item.plan === 'string' ? { plan: item.plan } : {}),
     ...(item.status === 'ACTIVE' || item.status === 'LOCKED' ? { status: item.status } : {}),
     ...(typeof item.createdAt === 'string' ? { created_at: item.createdAt } : {}),

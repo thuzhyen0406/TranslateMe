@@ -80,7 +80,7 @@ export const ROLE_DISPLAY_LABEL: Record<ConsoleRole, string> = Object.freeze({
 });
 
 /**
- * Chuẩn hóa chuỗi vai trò từ JWT (`custom:role` hoặc `cognito:groups`) về mã chuẩn `ConsoleRole`.
+ * Chuẩn hóa vai trò tenant từ claim `custom:role` về mã chuẩn `ConsoleRole`.
  * Claim Cognito tenant-role có giá trị lowercase; role lưu trong session là mã nội bộ uppercase.
  */
 export function normalizeRole(raw?: string | null): ConsoleRole | null {
@@ -469,6 +469,7 @@ export interface ConsoleTenantProfile {
   tenantLocked: boolean;
   organizationName?: string;
   plan?: AuthenticatedSession['plan'];
+  characterLimit?: number;
 }
 
 function parseTenantStatusFromProfilePayload(
@@ -501,7 +502,10 @@ function normalizeConsolePlan(raw: unknown): AuthenticatedSession['plan'] | unde
  * của tổ chức trước khi bật thao tác ghi trên Web Console.
  */
 export async function fetchConsoleTenantProfile(
-  session: Pick<AuthenticatedSession, 'tenantId' | 'role' | 'idToken' | 'organizationName' | 'plan'>,
+  session: Pick<
+    AuthenticatedSession,
+    'tenantId' | 'role' | 'idToken' | 'organizationName' | 'plan' | 'characterLimit'
+  >,
   opts: FetchConsoleTenantProfileOptions = {},
 ): Promise<ConsoleTenantProfile> {
   const demoMode = opts.demoMode ?? IS_DEMO_AUTH_MODE;
@@ -514,6 +518,9 @@ export async function fetchConsoleTenantProfile(
       tenantLocked: status === 'LOCKED',
       organizationName: session.organizationName,
       plan: session.plan,
+      ...(typeof session.characterLimit === 'number'
+        ? { characterLimit: session.characterLimit }
+        : {}),
     };
   }
 
@@ -586,6 +593,11 @@ export async function fetchConsoleTenantProfile(
       ? orgNameRaw.trim()
       : undefined;
   const plan = normalizeConsolePlan(data.plan);
+  const rawLimit = data.character_limit ?? data.characterLimit ?? data.charLimit;
+  const characterLimit =
+    typeof rawLimit === 'number' && Number.isSafeInteger(rawLimit) && rawLimit >= 0
+      ? rawLimit
+      : undefined;
 
   return {
     tenantId:
@@ -598,6 +610,7 @@ export async function fetchConsoleTenantProfile(
     tenantLocked: tenantStatus === 'LOCKED',
     ...(organizationName ? { organizationName } : {}),
     ...(plan ? { plan } : {}),
+    ...(characterLimit !== undefined ? { characterLimit } : {}),
   };
 }
 
@@ -609,6 +622,12 @@ export async function hydrateSessionTenantStatus(
   session: AuthenticatedSession,
   opts: FetchConsoleTenantProfileOptions = {},
 ): Promise<AuthenticatedSession> {
+  if (session.role === 'PLATFORM_ADMIN') {
+    return {
+      ...session,
+      tenantStatus: 'ACTIVE',
+    };
+  }
   try {
     const profile = await fetchConsoleTenantProfile(session, opts);
     return {
@@ -618,6 +637,7 @@ export async function hydrateSessionTenantStatus(
       tenantStatus: profile.tenantStatus,
       ...(profile.organizationName ? { organizationName: profile.organizationName } : {}),
       ...(profile.plan ? { plan: profile.plan } : {}),
+      ...(profile.characterLimit !== undefined ? { characterLimit: profile.characterLimit } : {}),
     };
   } catch (err) {
     if (err instanceof ConsoleAuthError && err.code === 'TENANT_SUSPENDED') {
@@ -1342,9 +1362,11 @@ async function liveSessionFromTokens(
   if (!claims) {
     throw new ConsoleAuthError('INVALID_AUTH_RESPONSE', 'Phản hồi đăng nhập từ Amazon Cognito không hợp lệ. Vui lòng thử lại.');
   }
-  const tenantId = String(claims['custom:tenant_id'] ?? '').trim();
-  const role = normalizeRole(claims['custom:role']);
-  if (!tenantId || !role) {
+  const groups = claims['cognito:groups'];
+  const isPlatformAdmin = Array.isArray(groups) && groups.includes('PlatformAdmins');
+  const tenantId = isPlatformAdmin ? '' : String(claims['custom:tenant_id'] ?? '').trim();
+  const role = isPlatformAdmin ? 'PLATFORM_ADMIN' : normalizeRole(claims['custom:role']);
+  if (!role || (!isPlatformAdmin && !tenantId)) {
     throw new ConsoleAuthError(
       'TENANT_NOT_LINKED',
       'Tài khoản chưa được gắn với tổ chức nào. Nếu bạn vừa xác nhận email, vui lòng đợi vài giây rồi đăng nhập lại.',

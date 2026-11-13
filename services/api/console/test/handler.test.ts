@@ -253,16 +253,38 @@ describe('Console Lambda router (/console/{proxy+})', () => {
 
   it('GET /console/usage reads only the authenticated tenant and separates quota holds from translated chars', async () => {
     let role: Ctx['role'] = 'DEVELOPER';
-    let reads = 0;
+    const reads: string[] = [];
+    const queries: Array<[string, string | undefined]> = [];
     const route = createConsoleHandler(undefined, {
       contextFromClaims: async () => ({ tenantId: 't_usage', via: 'JWT', requestId: 'usage', role }),
       db: {
         async get(ctx, key, options) {
-          reads++;
           assert.equal(ctx.tenantId, 't_usage');
-          assert.deepEqual(key, { PK: 'TENANT#t_usage#USAGE', SK: 'MONTH#2026-11' });
+          assert.equal(key.SK, 'MONTH#2026-11');
           assert.equal(options?.consistent, true);
-          return { machineChars: 60, sentTotal: 40, sentFromTM: 10, requests: 3 };
+          reads.push(key.PK);
+          if (key.PK === 'TENANT#t_usage#USAGE') return { machineChars: 60, sentTotal: 40, sentFromTM: 10, requests: 3, pagesServed: 1 };
+          if (key.PK === 'TENANT#t_usage#KEYUSAGE#key-old') return { sentTotal: 12, sentFromTM: 4, requests: 1 };
+          assert.equal(key.PK, 'TENANT#t_usage#KEYUSAGE#unused-key');
+          return null;
+        },
+        async query(ctx, pk, prefix, options) {
+          assert.equal(ctx.tenantId, 't_usage');
+          assert.equal(options?.consistent, true);
+          queries.push([pk, prefix]);
+          if (pk === 'TENANT#t_usage#USAGE') {
+            assert.equal(prefix, 'MONTH#2026-11#');
+            return [
+              { SK: 'MONTH#2026-11#CONSOLE', sentTotal: 10, sentFromTM: 4, requests: 1 },
+              { SK: 'MONTH#2026-11#WEB#hotel-a', sentTotal: 18, sentFromTM: 2, requests: 1, pagesServed: 1 },
+            ];
+          }
+          assert.equal(pk, 'TENANT#t_usage#APIKEY');
+          assert.equal(prefix, 'KEY#');
+          return [
+            { SK: 'KEY#key-old', name: 'Old key', status: 'REVOKED', private_field: 'hidden' },
+            { SK: 'KEY#unused-key' },
+          ];
         },
       },
     });
@@ -271,12 +293,41 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(response.statusCode, 200);
     assert.deepEqual(JSON.parse(response.body), {
       request_id: 'req-console', tenant_id: 't_usage', month: '2026-11',
-      chars_machine_translated: 30, chars_from_memory: 10, chars_quota_used: 60, requests: 3, pages_served: 0,
+      chars_machine_translated: 30, chars_from_memory: 10, chars_quota_used: 60, reserved_in_flight: 30,
+      requests: 3, pages_served: 1,
+      sources: [
+        { kind: 'CONSOLE', chars_machine_translated: 6, chars_from_memory: 4, requests: 1, pages_served: 0 },
+        { kind: 'WEB', slug: 'hotel-a', chars_machine_translated: 16, chars_from_memory: 2, requests: 1, pages_served: 1 },
+        { kind: 'API', key_id: 'key-old', name: 'Old key', chars_machine_translated: 8, chars_from_memory: 4, requests: 1, pages_served: 0 },
+      ],
     });
     assert.equal((await route({ ...request, queryStringParameters: { month: '2026-13' } })).statusCode, 400);
     role = 'REVIEWER';
     assert.equal((await route(request)).statusCode, 403);
-    assert.equal(reads, 1);
+    assert.deepEqual(reads, ['TENANT#t_usage#USAGE', 'TENANT#t_usage#KEYUSAGE#key-old', 'TENANT#t_usage#KEYUSAGE#unused-key']);
+    assert.deepEqual(queries, [['TENANT#t_usage#USAGE', 'MONTH#2026-11#'], ['TENANT#t_usage#APIKEY', 'KEY#']]);
+  });
+
+  it('GET /console/usage treats the first reservation of the month as pending, with no settled usage', async () => {
+    const route = createConsoleHandler(undefined, {
+      contextFromClaims: async () => ({ tenantId: 't_usage', via: 'JWT', requestId: 'usage', role: 'TENANT_ADMIN' }),
+      db: {
+        async get(_ctx, key) {
+          assert.deepEqual(key, { PK: 'TENANT#t_usage#USAGE', SK: 'MONTH#2026-11' });
+          return { machineChars: 60 };
+        },
+      },
+    });
+    const response = await route({ ...event('/console/usage'), queryStringParameters: { month: '2026-11' } });
+
+    assert.equal(response.statusCode, 200);
+    const body = JSON.parse(response.body);
+    assert.equal(body.chars_machine_translated, 0);
+    assert.equal(body.chars_from_memory, 0);
+    assert.equal(body.chars_quota_used, 60);
+    assert.equal(body.reserved_in_flight, 60);
+    assert.equal(body.requests, 0);
+    assert.deepEqual(body.sources, []);
   });
 
   it('GET /console/members chỉ cho phép TENANT_ADMIN; từ chối REVIEWER và DEVELOPER với 403 PERMISSION_DENIED', async () => {
@@ -648,12 +699,12 @@ describe('Console Lambda router (/console/{proxy+})', () => {
       assert.equal(body.plan, 'Pro');
     }
 
-    // CONFIG ACTIVE -> tenant_status = ACTIVE, tenant_locked = false
+    // CONFIG ACTIVE + characterLimit -> tenant_status = ACTIVE, tenant_locked = false, character_limit được trả kèm
     const activeHandler = createConsoleHandler(undefined, {
       db: {
         get: async (_c, key) => {
           if (key.SK.startsWith('MEMBER#')) return { status: 'ACTIVE', role: 'TENANT_ADMIN' };
-          if (key.SK === 'CONFIG') return { ...keys.config(adminCtx), status: 'ACTIVE' };
+          if (key.SK === 'CONFIG') return { ...keys.config(adminCtx), status: 'ACTIVE', characterLimit: 75000 };
           return null;
         },
       },
@@ -665,6 +716,7 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     const activeBody = JSON.parse(activeRes.body);
     assert.equal(activeBody.tenant_status, 'ACTIVE');
     assert.equal(activeBody.tenant_locked, false);
+    assert.equal(activeBody.character_limit, 75000);
 
     // Thiếu CONFIG -> 404 NOT_FOUND; trạng thái CONFIG không hợp lệ -> 500 INTERNAL_ERROR
     const missingRes = await handleConsoleMeApiGatewayRoute(

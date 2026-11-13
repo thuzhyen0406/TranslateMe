@@ -140,6 +140,20 @@ test('IAM: role đọc DynamoDB trực tiếp (không qua phiên tenant) có kms
   }
 });
 
+test('IAM: role Platform cho phép các thuộc tính mà truy vấn danh sách tenant yêu cầu', () => {
+  const resources = section(read(join(infra, 'modules', 'iam.yaml')), 'Resources');
+  const policy = resources.get('PlatformApiExecutionRole')!;
+  const allowed = /Sid: ReadTenantDirectory\n[\s\S]*?dynamodb:Attributes: \[([^\]]+)\]/.exec(policy)![1];
+  const handler = read(resolve(infra, '..', 'services', 'api', 'platform', 'handler.ts'));
+  const projection = /ProjectionExpression: '([^']+)'/.exec(handler)![1];
+  const names = new Map([...handler.matchAll(/'(#\w+)': '(\w+)'/g)].map(([, alias, name]) => [alias, name]));
+
+  const allowedAttributes = new Set(allowed.split(',').map((name) => name.trim()));
+  for (const attribute of projection.split(',').map((name) => name.trim())) {
+    assert.ok(allowedAttributes.has(names.get(attribute) ?? attribute), `IAM thiếu quyền đọc ${attribute}`);
+  }
+});
+
 test('IAM: dynamodb:LeadingKeys (khóa nhiều giá trị) luôn dùng ForAllValues kèm Null false', () => {
   for (const file of ['iam.yaml', 'data.yaml', 'lambdas.yaml', 'workflow.yaml']) {
     const path = join(infra, 'modules', file);

@@ -1,0 +1,47 @@
+name: Kiểm thử Console & API
+
+on:
+  push:
+    branches: [main, 'tung/**']
+    paths:
+      - 'console/**'
+      - 'services/api/**'
+      - 'libs/common/**'
+      - '.github/workflows/ci-console.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'console/**'
+      - 'services/api/**'
+      - 'libs/common/**'
+      - '.github/workflows/ci-console.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    name: Console & API Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cài đặt phụ thuộc (libs/common, services/api, console)
+        run: |
+          npm --prefix libs/common ci
+          npm --prefix services/api ci
+          npm --prefix console ci
+
+      - name: Kiểm thử đơn vị Backend API (Console & Platform)
+        working-directory: services/api
+        run: npm test
+
+      - name: Kiểm thử đơn vị & Build Web Console
+        working-directory: console
+        run: |
+          npm test
+          npm run build
