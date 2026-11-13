@@ -10,7 +10,7 @@
  * Mọi thao tác đi qua lớp data (`db` của libs/common/db.ts, hoặc bản giả cùng chữ ký khi kiểm thử) – QC-3.
  */
 import type { Ctx } from './types.js';
-import type { UsageReservation } from './usage/usage.js';
+import type { UsageReservation, UsageSource } from './usage/usage.js';
 
 export type JobType = 'FILE' | 'PREWARM';
 export type JobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
@@ -56,6 +56,8 @@ export interface JobSummary {
   target_langs: string[];
   warnings: JobWarning[];
   reason?: string;
+  notification_status?: 'PENDING' | 'SUBMITTED' | 'FAILED';
+  notification_error?: string;
   created_at: string;
   updated_at: string;
 }
@@ -76,6 +78,8 @@ export function toJobSummary(item: Record<string, unknown>): JobSummary {
   const failed = num(item.failed);
   const status = item.status as JobStatus;
   const progress = status === 'SUCCEEDED' ? 100 : total > 0 ? Math.min(100, Math.floor(((done + failed) * 100) / total)) : 0;
+  const notificationStatus = typeof item.notificationStatus === 'string' ? item.notificationStatus as JobSummary['notification_status'] : undefined;
+  const notificationError = typeof item.notificationError === 'string' ? item.notificationError : undefined;
   return {
     job_id: String(item.jobId ?? String(item.SK ?? '').slice(4)),
     type: item.type === 'FILE' ? 'FILE' : 'PREWARM',
@@ -88,6 +92,8 @@ export function toJobSummary(item: Record<string, unknown>): JobSummary {
     target_langs: Array.isArray(item.targetLangs) ? (item.targetLangs as string[]) : [],
     warnings: Array.isArray(item.warnings) ? (item.warnings as JobWarning[]) : [],
     ...(typeof item.reason === 'string' ? { reason: item.reason } : {}),
+    ...(notificationStatus ? { notification_status: notificationStatus } : {}),
+    ...(notificationError ? { notification_error: notificationError } : {}),
     created_at: String(item.createdAt ?? ''),
     updated_at: String(item.updatedAt ?? item.createdAt ?? ''),
   };
@@ -110,7 +116,10 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
       sourceLang?: string;
       sendEmail: boolean;
       estimatedCharacters: number;
-      usageReservation: UsageReservation;
+      usageReservation?: UsageReservation;
+      usageSource?: UsageSource;
+      ownerSub?: string;
+      notificationEmail?: string;
     };
   }): Promise<void> {
     const at = iso();
@@ -133,7 +142,10 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
           sendEmail: input.file.sendEmail,
           estimatedCharacters: input.file.estimatedCharacters,
           actualCharacters: 0,
-          usageReservation: input.file.usageReservation,
+          ...(input.file.usageReservation ? { usageReservation: input.file.usageReservation } : {}),
+          ...(input.file.usageSource ? { usageSource: input.file.usageSource } : {}),
+          ...(input.file.ownerSub ? { ownerSub: input.file.ownerSub } : {}),
+          ...(input.file.notificationEmail ? { notificationEmail: input.file.notificationEmail } : {}),
         } : {}),
         total: 0,
         done: 0,
@@ -207,16 +219,18 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
   }
 
   /** Kết thúc công việc. Chỉ đổi được từ QUEUED/RUNNING (không ghi đè kết quả đã chốt). */
-  async function finish(ctx: Ctx, jobId: string, result: { status: 'SUCCEEDED' | 'FAILED'; warnings?: JobWarning[]; reason?: string }): Promise<void> {
+  async function finish(ctx: Ctx, jobId: string, result: { status: 'SUCCEEDED' | 'FAILED'; warnings?: JobWarning[]; reason?: string; failedRemaining?: number }): Promise<void> {
+    const failedRemaining = result.failedRemaining ?? 0;
     await db.update(ctx, {
       Key: jobKey(ctx, jobId),
-      UpdateExpression: 'SET #status = :status, #warnings = :warnings, #updatedAt = :at, #finishedAt = :at' + (result.reason ? ', #reason = :reason' : ''),
+      UpdateExpression: 'SET #status = :status, #warnings = :warnings, #updatedAt = :at, #finishedAt = :at' + (result.reason ? ', #reason = :reason' : '') + (failedRemaining ? ' ADD #failed :failedRemaining' : ''),
       ConditionExpression: '#status IN (:queued, :running)',
       ExpressionAttributeNames: {
         '#status': 'status',
         '#warnings': 'warnings',
         '#updatedAt': 'updatedAt',
         '#finishedAt': 'finishedAt',
+        ...(failedRemaining ? { '#failed': 'failed' } : {}),
         ...(result.reason ? { '#reason': 'reason' } : {}),
       },
       ExpressionAttributeValues: {
@@ -225,6 +239,7 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
         ':at': iso(),
         ':queued': 'QUEUED',
         ':running': 'RUNNING',
+        ...(failedRemaining ? { ':failedRemaining': failedRemaining } : {}),
         ...(result.reason ? { ':reason': result.reason } : {}),
       },
     });

@@ -8,6 +8,7 @@ batch web-session resources below.
 | --- | --- | --- | --- |
 | `POST /translate/batch/upload-url` | API key | Translate Lambda | Existing machine-client flow |
 | `POST /translate/batch` | API key | Translate Lambda | Existing machine-client flow |
+| `GET /translate/batch/{job_id}` | API key | Translate Lambda | Tenant-scoped job polling; read-only polling is allowed while tenant is locked |
 | `POST /translate/batch/session/upload-url` | Cognito ID token | Translate Lambda | Browser session; no API key required |
 | `POST /translate/batch/session` | Cognito ID token | Translate Lambda | Browser session; no API key required |
 | `GET/POST /console/api-keys` | Cognito ID token | Console Lambda | Member must be active; role checked by key manager |

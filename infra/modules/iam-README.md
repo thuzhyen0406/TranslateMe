@@ -87,8 +87,9 @@ invocation permissions remain in `api-gateway.yaml`.
   public access blocked, default SSE-KMS encryption, a one-day payload lifecycle,
   and a TLS-only bucket policy. Worker payload keys use
   `tenant/<tenantId>/worker/<file>`. Batch uploads use
-  `batch/<tenantId>/input/<file>` and the batch bucket's KMS key.
-- `TenantDataAccessRole` supplies DynamoDB and batch-upload maximum permissions;
+  `batch/<tenantId>/input/<file>` and workflow intermediates/results under
+  `batch/<tenantId>/results/<jobId>/`, all using the batch bucket's KMS key.
+- `TenantDataAccessRole` supplies DynamoDB and tenant-scoped batch object/KMS maximum permissions;
   `TenantPayloadAccessRole` supplies worker-payload maximum permissions. The
   inline session policy narrows each assumed role to the current tenant.
 - `translate:TranslateText` and `comprehend:DetectDominantLanguage` require
