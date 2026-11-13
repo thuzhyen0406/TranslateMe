@@ -90,6 +90,11 @@ Parameters:
     Type: String
     Default: dev
     AllowedPattern: '[A-Za-z0-9_-]+'
+  TranslateConcurrency:
+    Type: Number
+    Default: 4
+    MinValue: 1
+    MaxValue: 10
 
 Resources:
   ProxyFunction:
@@ -190,6 +195,7 @@ Resources:
           TENANT_BATCH_UPLOAD_KMS_KEY_ARN: !Ref BatchUploadKmsKeyArn
           DATA_KMS_KEY_ARN: !Ref KmsKeyArn
           BATCH_STATE_MACHINE_ARN: !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:translateme-${StageName}-batch'
+          TRANSLATE_CONCURRENCY: !Ref TranslateConcurrency
 
   BatchWorkflowFunction:
     Type: AWS::Lambda::Function

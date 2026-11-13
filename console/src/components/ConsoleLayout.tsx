@@ -13,6 +13,9 @@ import { GlossaryPage } from './GlossaryPage.js';
 import { MembersPage } from './MembersPage.js';
 import { ReviewPage } from './ReviewPage.js';
 import { WebsitePage } from './WebsitePage.js';
+import { ApiKeysPage } from './ApiKeysPage.js';
+import { PlaygroundPage } from './PlaygroundPage.js';
+import { BatchTranslatePage } from './BatchTranslatePage.js';
 
 const PLAN_DISPLAY_LABEL: Readonly<Record<AuthenticatedSession['plan'], string>> = {
   FREE: 'Free',
@@ -246,6 +249,12 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session, onUpdateS
             session={effectiveSession}
             onTenantStatusDetected={handleTenantStatusDetected}
           />
+        ) : activeMenu === 'apikey' ? (
+          <ApiKeysPage session={effectiveSession} />
+        ) : activeMenu === 'playground' ? (
+          <PlaygroundPage session={effectiveSession} />
+        ) : activeMenu === 'doc-translate' ? (
+          <BatchTranslatePage session={effectiveSession} />
         ) : activeMenu === 'glossary' ? (
           <GlossaryPage
             session={effectiveSession}

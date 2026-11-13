@@ -36,6 +36,8 @@ function setup(options: {
   tmWriteFails?: boolean;
   keymapTenantId?: string;
   detected?: { language?: string; confidence?: number };
+  translateErrorName?: string;
+  translateConcurrency?: number;
 } = {}) {
   const calls: Array<{ name: string; input: Record<string, any> }> = [];
   const stored: Array<Record<string, any>> = [];
@@ -43,6 +45,7 @@ function setup(options: {
   const reservationInputs: Array<{ n: number }> = [];
   const settlements: Array<Record<string, any>> = [];
   let translateCalls = 0;
+  let refunds = 0;
   const ddb = {
     async send(command: any) {
       const name = command.constructor.name;
@@ -141,13 +144,14 @@ function setup(options: {
       return { tenantId: TENANT, requestId: 'req-test-001', month: '2026-10', reservedChars: input.n, limit: 50_000, source: { kind: 'API' as const, keyId: KEY_ID }, createdAt: '2026-10-01T00:00:00.000Z' };
     },
     async settle(_ticket: unknown, actual: unknown) { settlements.push(actual as Record<string, any>); },
-    async refund(_ticket: unknown) {},
+    async refund(_ticket: unknown) { refunds++; },
   };
   const translate = {
     async send(command: any) {
       translateCalls++;
       const input = command.input as Record<string, any>;
       translateInputs.push(input);
+      if (options.translateErrorName) throw Object.assign(new Error('Translate failed'), { name: options.translateErrorName });
       const text = String(input.Text);
       return { TranslatedText: text.replace(/(<[^>]+>)|([^<]+)/g, (_all, tag: string | undefined, plain: string | undefined) => tag ?? (plain ?? '').toUpperCase()) };
     },
@@ -157,6 +161,7 @@ function setup(options: {
     ddb: ddb as unknown as RealtimeDeps['ddb'],
     usage: usage as unknown as RealtimeDeps['usage'],
     translate,
+    translateConcurrency: options.translateConcurrency,
     getGlossaryState: options.getGlossaryState,
     detectLanguage: async () => options.detected ?? { language: 'vi', confidence: 0.99 },
     now: () => new Date('2026-10-29T00:00:00.000Z'),
@@ -169,6 +174,7 @@ function setup(options: {
     reservationInputs,
     settlements,
     get translateCalls() { return translateCalls; },
+    get refunds() { return refunds; },
   };
 }
 
@@ -178,6 +184,15 @@ function responseBody(response: { body: string }) {
 }
 
 describe('POST /translate/realtime', () => {
+  it('surfaces Translate throttling and refunds the failed request', async () => {
+    const test = setup({ translateErrorName: 'ThrottlingException', translateConcurrency: 2 });
+    const response = await test.handler(event({ text: 'Xin chào.', source_lang: 'vi', target_lang: 'en' }));
+    assert.equal(response.statusCode, 503);
+    assert.equal(responseBody(response).error.code, 'TRANSLATE_THROTTLED');
+    assert.equal(test.translateCalls, 1);
+    assert.equal(test.refunds, 1);
+  });
+
   it('lấy tenant từ KEYMAP và bỏ qua tenant_id giả mạo trong body', async () => {
     const mappedTenant = 't_aaaaaaaaaaaaaaaaaaaaaaaa';
     const test = setup({ keymapTenantId: mappedTenant });
@@ -445,5 +460,25 @@ describe('POST /translate/realtime', () => {
     assert.equal(test.translateCalls, 0, 'không được gọi Translate khi getGlossaryState lỗi');
     assert.equal(test.stored.length, 0, 'không được tạo bản ghi TM mới');
     assert.equal(test.calls.some((call) => call.name === 'UpdateCommand'), false, 'không được gọi UpdateCommand ghi TM');
+  });
+
+  it('từ chối vai trò REVIEWER khi gọi qua JWT session (PERMISSION_DENIED)', async () => {
+    const test = setup();
+    const response = await test.handler({
+      body: JSON.stringify({ text: 'Xin chào.', target_lang: 'en' }),
+      requestContext: {
+        requestId: 'req-reviewer-01',
+        authorizer: {
+          claims: {
+            sub: 'sub-reviewer-1',
+            'custom:tenant_id': TENANT,
+            'custom:role': 'REVIEWER',
+          },
+        },
+      },
+    });
+    const body = responseBody(response);
+    assert.equal(response.statusCode, 403);
+    assert.equal(body.error.code, 'PERMISSION_DENIED');
   });
 });

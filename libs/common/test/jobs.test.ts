@@ -83,6 +83,26 @@ describe('jobs – bản ghi JOB (QC-5, Hình 2.9)', () => {
     assert.equal(await jobs.get(ctxA, '../x'), null);
   });
 
+  it('khởi tạo notification ở trạng thái PENDING khi batch yêu cầu email', async () => {
+    const db = memoryDataDb();
+    const jobs = createJobStore(db, () => T0);
+    const id = 'job-20261101-ffffffffffff';
+    await jobs.create(ctxA, {
+      jobId: id,
+      type: 'FILE',
+      targetLangs: ['en'],
+      file: {
+        fileKey: `batch/${ctxA.tenantId}/input/source.txt`,
+        fileName: 'source.txt',
+        format: 'txt',
+        sendEmail: true,
+        estimatedCharacters: 10,
+      },
+    });
+    const job = await jobs.get(ctxA, id);
+    assert.equal(job?.notification_status, 'PENDING');
+  });
+
   it('tiến độ không vượt 100% khi lô chạy lại (Retry của Step Functions)', () => {
     const s = toJobSummary({ SK: 'JOB#job-20261101-dddddddddddd', status: 'RUNNING', total: 4, done: 6, failed: 0 });
     assert.equal(s.progress, 100);

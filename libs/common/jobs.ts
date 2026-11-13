@@ -146,6 +146,7 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
           ...(input.file.usageSource ? { usageSource: input.file.usageSource } : {}),
           ...(input.file.ownerSub ? { ownerSub: input.file.ownerSub } : {}),
           ...(input.file.notificationEmail ? { notificationEmail: input.file.notificationEmail } : {}),
+          ...(input.file.sendEmail ? { notificationStatus: 'PENDING' } : {}),
         } : {}),
         total: 0,
         done: 0,

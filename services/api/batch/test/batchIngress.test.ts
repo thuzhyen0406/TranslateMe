@@ -220,6 +220,7 @@ describe('batch upload ingress', () => {
     assert.deepEqual(job?.targetLangs, ['en', 'ko']);
     assert.equal(job?.sourceLang, 'fr');
     assert.equal(job?.sendEmail, true);
+    assert.equal(job?.notificationStatus, 'PENDING');
     assert.equal(job?.total, 0);
     assert.equal(job?.done, 0);
     assert.equal(job?.failed, 0);
@@ -236,6 +237,10 @@ describe('batch upload ingress', () => {
     assert.equal(h.reservations[0].n, jobResponse.payload.estimated_characters);
     assert.deepEqual(h.reservations[0].source, { kind: 'API', keyId: 'key-a' });
     assert.equal(h.reservations[0].now?.toISOString(), NOW.toISOString());
+
+    const polled = await request(h, 'GET', `/translate/batch/${jobResponse.payload.job_id}`, null);
+    assert.equal(polled.payload.job.send_email, true);
+    assert.equal(polled.payload.job.notification_status, 'PENDING');
   });
 
   it('reuses the same job and execution when the client retries the same file_key', async () => {
@@ -350,6 +355,9 @@ describe('batch upload ingress', () => {
 
     const result = await request(locked, 'GET', `/translate/batch/${jobId}`, null);
     assert.equal(result.statusCode, 200);
+    assert.deepEqual(result.payload.job.downloads, {
+      en: `https://s3.example/download/batch/${admin.tenantId}/results/${jobId}/guide.en.txt`,
+    });
     assert.deepEqual(result.payload.job.results, [{
       target_lang: 'en',
       file_name: 'guide.en.txt',
@@ -357,6 +365,12 @@ describe('batch upload ingress', () => {
       warnings: [],
     }]);
     assert.equal(locked.s3Calls.filter((call) => call.operation === 'signGet').length, 1);
+
+    const stageResult = await request(locked, 'GET', `/dev/translate/batch/session/${jobId}`, null);
+    assert.equal(stageResult.statusCode, 200);
+    assert.deepEqual(stageResult.payload.job.downloads, {
+      en: `https://s3.example/download/batch/${admin.tenantId}/results/${jobId}/guide.en.txt`,
+    });
 
     const lockedWrite = await request(locked, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: 10 });
     assert.equal(lockedWrite.statusCode, 403);

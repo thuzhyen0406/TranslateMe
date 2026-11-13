@@ -37,14 +37,14 @@ Parameters:
     Description: Example steady-state requests per second; adjust to TV1's real quota.
   BasicBurstLimit:
     Type: Number
-    Default: 4
+    Default: 5
     MinValue: 1
     Description: Example burst request limit; adjust to TV1's real quota.
-  BasicMonthlyQuota:
+  BasicDailyQuota:
     Type: Number
-    Default: 5000
+    Default: 1000
     MinValue: 1
-    Description: Example monthly request quota; adjust to TV1's real quota.
+    Description: Basic API requests allowed per day.
   StandardRateLimit:
     Type: Number
     Default: 10
@@ -171,6 +171,27 @@ Resources:
       RestApiId: !Ref RestApi
       ParentId: !Ref BatchSessionResource
       PathPart: upload-url
+
+  BatchSessionJobResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref BatchSessionResource
+      PathPart: '{jobId}'
+
+  TranslateSessionResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref TranslateResource
+      PathPart: session
+
+  TranslateSessionRealtimeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref TranslateSessionResource
+      PathPart: realtime
 
   PlatformResource:
     Type: AWS::ApiGateway::Resource
@@ -514,6 +535,84 @@ Resources:
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Origin: true
 
+  BatchSessionJobMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref BatchSessionJobResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ConsoleAuthorizer
+      ApiKeyRequired: false
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TranslateFunctionArn}/invocations'
+
+  BatchSessionJobOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref BatchSessionJobResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode":200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  TranslateSessionRealtimeMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref TranslateSessionRealtimeResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ConsoleAuthorizer
+      ApiKeyRequired: false
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TranslateFunctionArn}/invocations'
+
+  TranslateSessionRealtimeOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref TranslateSessionRealtimeResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode":200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
   ConsoleInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -546,7 +645,7 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/platform*'
 
-  ApiDeploymentV1:
+  ApiDeploymentV2:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - ConsoleMethod
@@ -567,22 +666,26 @@ Resources:
       - BatchSessionUploadUrlMethod
       - BatchSessionOptionsMethod
       - BatchSessionUploadUrlOptionsMethod
+      - BatchSessionJobMethod
+      - BatchSessionJobOptionsMethod
+      - TranslateSessionRealtimeMethod
+      - TranslateSessionRealtimeOptionsMethod
     Properties:
       RestApiId: !Ref RestApi
-      Description: Initial API deployment snapshot.
+      Description: API deployment including Console realtime and batch job session routes.
 
   ApiStage:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref RestApi
-      DeploymentId: !Ref ApiDeploymentV1
+      DeploymentId: !Ref ApiDeploymentV2
       StageName: !Ref StageName
 
   BasicUsagePlan:
     Type: AWS::ApiGateway::UsagePlan
     Properties:
       UsagePlanName: !Sub '${AWS::StackName}-basic'
-      Description: Example Basic plan; replace limits with values agreed with TV1.
+      Description: Basic plan for Console API keys.
       ApiStages:
         - ApiId: !Ref RestApi
           Stage: !Ref ApiStage
@@ -590,14 +693,14 @@ Resources:
         RateLimit: !Ref BasicRateLimit
         BurstLimit: !Ref BasicBurstLimit
       Quota:
-        Limit: !Ref BasicMonthlyQuota
-        Period: MONTH
+        Limit: !Ref BasicDailyQuota
+        Period: DAY
 
   StandardUsagePlan:
     Type: AWS::ApiGateway::UsagePlan
     Properties:
       UsagePlanName: !Sub '${AWS::StackName}-standard'
-      Description: Example Standard plan; replace limits with values agreed with TV1.
+      Description: Standard plan for Console API keys.
       ApiStages:
         - ApiId: !Ref RestApi
           Stage: !Ref ApiStage
