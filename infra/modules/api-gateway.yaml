@@ -652,29 +652,41 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/platform*'
 
-  # Lỗi do API Gateway tự trả (authorizer 401/403, throttle 429, 5XX) cũng cần header CORS,
-  # nếu không trình duyệt chỉ thấy "CORS error" thay vì mã lỗi để Console hiển thị đúng thông báo.
+  # DEFAULT_4XX/5XX đã có ở Default4xxGatewayResponse/Default5xxGatewayResponse (cuối tệp). Hai tài nguyên dưới
+  # đây là bản trùng thêm nhầm ở PR #53; giữ nội dung giống hệt bản gốc để thứ tự áp dụng không quan trọng.
+  # Retain: khi xóa khỏi template (PR sau), CloudFormation không gọi DeleteGatewayResponse, vốn sẽ đặt lại
+  # DEFAULT_4XX/5XX về mặc định của AWS và làm mất cấu hình của bản gốc.
   GatewayResponseDefault4xx:
     Type: AWS::ApiGateway::GatewayResponse
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       RestApiId: !Ref RestApi
       ResponseType: DEFAULT_4XX
       ResponseParameters:
+        gatewayresponse.header.Content-Type: "'application/json'"
         gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
         gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+      ResponseTemplates:
+        application/json: '{"request_id":"$context.requestId","error":{"code":"INVALID_REQUEST","message":"Yêu cầu không hợp lệ."}}'
 
   GatewayResponseDefault5xx:
     Type: AWS::ApiGateway::GatewayResponse
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       RestApiId: !Ref RestApi
       ResponseType: DEFAULT_5XX
       ResponseParameters:
+        gatewayresponse.header.Content-Type: "'application/json'"
         gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
         gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+      ResponseTemplates:
+        application/json: '{"request_id":"$context.requestId","error":{"code":"INTERNAL_ERROR","message":"Lỗi tạm thời phía hệ thống."}}'
 
-  # Đổi tên logical ID (V2 -> V3) mỗi khi method/gateway response thay đổi: CloudFormation chỉ tạo
+  # Đổi tên logical ID (V3 -> V4) mỗi khi method/gateway response thay đổi: CloudFormation chỉ tạo
   # Deployment mới khi tài nguyên này bị thay, nếu giữ tên cũ thay đổi không lên stage.
-  ApiDeploymentV3:
+  ApiDeploymentV4:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - ConsoleMethod
@@ -701,6 +713,13 @@ Resources:
       - TranslateSessionRealtimeOptionsMethod
       - GatewayResponseDefault4xx
       - GatewayResponseDefault5xx
+      - UnauthorizedGatewayResponse
+      - InvalidApiKeyGatewayResponse
+      - AccessDeniedGatewayResponse
+      - ThrottledGatewayResponse
+      - QuotaExceededGatewayResponse
+      - Default4xxGatewayResponse
+      - Default5xxGatewayResponse
     Properties:
       RestApiId: !Ref RestApi
       Description: API deployment including Console realtime and batch job session routes.
@@ -709,7 +728,7 @@ Resources:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref RestApi
-      DeploymentId: !Ref ApiDeploymentV3
+      DeploymentId: !Ref ApiDeploymentV4
       StageName: !Ref StageName
 
   BasicUsagePlan:
@@ -750,6 +769,8 @@ Resources:
       StatusCode: '401'
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
       ResponseTemplates:
         application/json: '{"request_id":"$context.requestId","error":{"code":"UNAUTHORIZED","message":"Thiếu hoặc không hợp lệ thông tin xác thực."}}'
 
@@ -761,6 +782,8 @@ Resources:
       StatusCode: '401'
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
       ResponseTemplates:
         application/json: '{"request_id":"$context.requestId","error":{"code":"UNAUTHORIZED","message":"API key không hợp lệ hoặc không được cung cấp."}}'
 
@@ -772,6 +795,8 @@ Resources:
       StatusCode: '403'
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
       ResponseTemplates:
         application/json: '{"request_id":"$context.requestId","error":{"code":"FORBIDDEN","message":"Yêu cầu bị từ chối."}}'
 
@@ -783,6 +808,8 @@ Resources:
       StatusCode: '429'
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
       ResponseTemplates:
         application/json: '{"request_id":"$context.requestId","error":{"code":"RATE_LIMITED","message":"Vượt tốc độ yêu cầu của gói API."}}'
 
@@ -794,6 +821,8 @@ Resources:
       StatusCode: '429'
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
       ResponseTemplates:
         application/json: '{"request_id":"$context.requestId","error":{"code":"REQUEST_QUOTA_EXCEEDED","message":"Hết hạn ngạch số yêu cầu của gói API trong kỳ."}}'
 
@@ -804,6 +833,8 @@ Resources:
       ResponseType: DEFAULT_4XX
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
       ResponseTemplates:
         application/json: '{"request_id":"$context.requestId","error":{"code":"INVALID_REQUEST","message":"Yêu cầu không hợp lệ."}}'
 
@@ -814,6 +845,8 @@ Resources:
       ResponseType: DEFAULT_5XX
       ResponseParameters:
         gatewayresponse.header.Content-Type: "'application/json'"
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
       ResponseTemplates:
         application/json: '{"request_id":"$context.requestId","error":{"code":"INTERNAL_ERROR","message":"Lỗi tạm thời phía hệ thống."}}'
 
