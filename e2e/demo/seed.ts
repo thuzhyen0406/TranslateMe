@@ -27,6 +27,13 @@ const stage = process.env.TM_STAGE ?? 'dev';
 const domain = process.env.TM_E2E_EMAIL_DOMAIN ?? 'example.com';
 const region = process.env.TM_REGION ? ['--region', process.env.TM_REGION] : [];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// API website trả bản ghi host dạng camelCase (verificationCode); hợp đồng 4.6 ghi snake_case. Đọc cả hai, như console.
+const verificationCodeOf = (h: any): string =>
+  typeof h?.verification_code === 'string' && h.verification_code
+    ? h.verification_code
+    : typeof h?.verificationCode === 'string' ? h.verificationCode : '';
+/** Website chưa xác minh được: các tenant khác vẫn seed tiếp để in đủ mã xác minh trong một lượt. */
+class WebsitePendingError extends Error {}
 
 function must(r: Resp, what: string): Resp {
   if (r.status < 200 || r.status >= 300) throw new Error(`${what}: HTTP ${r.status} ${r.text.slice(0, 300)}`);
@@ -135,15 +142,13 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
   const existingHosts = must(await call('GET', R.hosts, { token: tok }), 'GET /console/hosts');
   const priorHost = listOf(existingHosts.body).find((h: any) => h?.slug === expectedSlug);
   let slug = expectedSlug;
-  let verificationCode = typeof priorHost?.verification_code === 'string' ? priorHost.verification_code : '';
+  let verificationCode = verificationCodeOf(priorHost);
   if (priorHost) {
     slug = String(priorHost.slug);
   } else {
     const created = must(await call('POST', R.hosts, { token: tok, body: B.addHost(`e2e-${label}`, origin) }), 'POST /console/hosts');
     slug = created.body?.host?.slug;
-    verificationCode = typeof created.body?.host?.verification_code === 'string'
-      ? created.body.host.verification_code
-      : '';
+    verificationCode = verificationCodeOf(created.body?.host) || verificationCodeOf(created.body);
     if (typeof slug !== 'string' || slug !== expectedSlug) {
       throw new Error(`Tenant ${label}: API trả slug website không khớp hostname ${expectedSlug}`);
     }
@@ -159,7 +164,7 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
       const instructions = verificationCode
         ? verificationInstructions(method, verificationCode, origin)
         : 'API không trả verification_code; kiểm tra contract GET/POST /console/hosts trước khi tiếp tục.';
-      throw new Error(
+      throw new WebsitePendingError(
         `Tenant ${label}: website ${slug} chưa ACTIVE sau xác minh ` +
         `(HTTP ${ver.status}, status=${verifiedStatus ?? 'không có'}). Seed dừng tại đây; ` +
         `hoàn tất xác minh ${method} cho TM_DEMO_ORIGIN_${label}. ${instructions} ` +
@@ -269,7 +274,23 @@ async function main() {
   const st = loadOrNew();
   if (cmd === 'platform' || cmd === 'all') await seedPlatform(st);
   if (!dry) saveState(st);
-  if (cmd === 'tenants' || cmd === 'all') for (const l of ['A', 'B', 'C'] as const) await seedTenant(l, st);
+  if (cmd === 'tenants' || cmd === 'all') {
+    const pending: string[] = [];
+    for (const l of ['A', 'B', 'C'] as const) {
+      try {
+        await seedTenant(l, st);
+      } catch (e) {
+        if (!(e instanceof WebsitePendingError)) throw e;
+        pending.push(e.message);
+      }
+    }
+    if (pending.length) {
+      throw new Error(
+        `${pending.join('\n\n')}\n\nCòn ${pending.length} website chưa ACTIVE: build lại site với các mã trên ` +
+        '(TM_DEMO_VERIFY_CODE_A/B/C=… npm run sites:build), đăng lại rồi chạy lại seed.',
+      );
+    }
+  }
   if (cmd === 'tiny-plan' || cmd === 'all') seedTinyPlan(st);
   console.log(`\nTrạng thái: ${stateFile(stage)} (chứa mật khẩu và key, không commit)`);
 }
