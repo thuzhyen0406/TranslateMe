@@ -118,7 +118,7 @@ describe('tenant-scoped AWS sessions', () => {
     }));
     const payloadObjects = policy.Statement.find((statement: any) => statement.Resource === 'arn:aws:s3:::payloads/tenant/t_aaaaaaaaaaaaaaaaaaaaaaaa/worker/*');
     const payloadKms = policy.Statement.find((statement: any) => statement.Resource === 'arn:aws:kms:ap-southeast-1:123456789012:key/payload');
-    const batchObjects = policy.Statement.find((statement: any) => statement.Resource === 'arn:aws:s3:::uploads/batch/t_aaaaaaaaaaaaaaaaaaaaaaaa/input/*');
+    const batchObjects = policy.Statement.find((statement: any) => statement.Resource === 'arn:aws:s3:::uploads/batch/t_aaaaaaaaaaaaaaaaaaaaaaaa/*');
     const batchKms = policy.Statement.find((statement: any) => statement.Resource === 'arn:aws:kms:ap-southeast-1:123456789012:key/batch');
     assert.deepEqual(payloadObjects.Action, ['s3:GetObject', 's3:PutObject']);
     assert.deepEqual(payloadKms.Action, ['kms:Decrypt', 'kms:GenerateDataKey']);

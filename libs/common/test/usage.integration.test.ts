@@ -210,6 +210,22 @@ describe('TranslateMe monthly usage reservation (offline)', () => {
     assert.equal(total?.machineChars, undefined);
   });
 
+  it('stamps each reservation with a DynamoDB TTL so RESERVATION# items expire', async () => {
+    const tenantId = `ttl-${randomUUID()}`;
+    const { ddb, usage } = createUsage(1_000, tenantId);
+    const now = new Date('2026-11-14T00:00:00.000Z');
+    const requestId = randomUUID();
+    await usage.reserve({ tenantId, requestId, n: 10, source: { kind: 'CONSOLE' }, now });
+    const item = ddb.get({ PK: `TENANT#${tenantId}#USAGE`, SK: `RESERVATION#${encodeURIComponent(requestId)}` });
+    assert.equal(item?.ttl, Math.floor(now.getTime() / 1000) + 40 * 86_400);
+    const total = ddb.get(usageKeys(tenantId, monthUtc(now), { kind: 'CONSOLE' }).total);
+    assert.equal(total?.ttl, undefined, 'bộ đếm tháng không có TTL');
+    assert.throws(
+      () => new UsageService(ddb as unknown as DynamoDBDocumentClient, { tableName: 'x', reservationTtlDays: 0 }),
+      RangeError,
+    );
+  });
+
   it('refunds a reservation exactly once', async () => {
     const tenantId = `refund-${randomUUID()}`;
     const { ddb, usage } = createUsage(1_000, tenantId);
