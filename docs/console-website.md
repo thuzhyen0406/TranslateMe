@@ -18,18 +18,22 @@ Mã nguồn: `console/src/components/WebsitePage.tsx` (giao diện), `console/sr
 
 ## Cờ bật ở chế độ Cognito
 
-Các route `/console/hosts` phía C6 chưa được nối vào router, nên màn Website ở chế độ `cognito` **mặc định tắt**: chỉ hiện thông báo "Tính năng quản lý website chưa được bật trên môi trường này" và không gửi request nào. Khi C6 đã nối đủ các route trong bảng dưới, đặt `VITE_WEBSITE_API_ENABLED=true` khi build console để bật (`isWebsiteApiEnabled` trong `websiteApi.ts`). Chế độ `mock` luôn bật.
+`VITE_WEBSITE_API_ENABLED=true` khi build console thì màn Website ở chế độ `cognito` gọi API thật (`isWebsiteApiEnabled` trong `websiteApi.ts`); không đặt thì màn Website chỉ hiện "Tính năng quản lý website chưa được bật trên môi trường này" và không gửi request nào. Chế độ `mock` luôn bật.
 
-## Hợp đồng API cần ở C6 (TV1 – F1)
+Từ 14/11 các route đã sẵn sàng nên `console/.env.example` đặt `true`. `services/api/sites/test/consoleContract.test.ts` chạy client `createHttpWebsiteApi` thật trên handler thật để giữ hợp đồng.
 
-`services/api/sites/siteManager.ts` hiện có `createSite` và `verifySite`, chưa có route. Console gọi theo Bảng 2.9, JSON snake_case (QC-1):
+## Hợp đồng API (C6)
+
+API Gateway (`infra/modules/api-gateway.yaml`) gắn `/console/hosts`, `/console/hosts/{slug}`, `/console/hosts/{slug}/{proxy+}` cho `WebsiteFunction` (`services/api/sites/handler.ts`), còn `/console/hosts/{slug}/prewarm` cho `ConsoleFunction` (4.5). Request JSON snake_case (QC-1); phản hồi trả bản ghi HOST dạng camelCase, console đọc được cả hai dạng (`websiteFromJson`).
 
 | Route | Phản hồi |
 | :--- | :--- |
-| `GET /console/hosts` | `{ hosts: Host[] }` |
+| `GET /console/hosts` | `{ hosts: Host[] }` (kèm alias `websites`) |
 | `POST /console/hosts` (body `home_url`, `display_name`, `source_lang`, `target_langs`, `no_translate_selectors`) | `201 { host }` |
-| `GET /console/hosts/{slug}` | `{ host }` |
-| `POST /console/hosts/{slug}/verify` (body `{ method: 'META' \| 'FILE' }`) | `{ host }`; lỗi `400 VERIFICATION_FAILED` kèm `error.reason` ∈ `UNREACHABLE`, `TAG_OR_FILE_NOT_FOUND`, `CODE_MISMATCH`, `TOO_MANY_REDIRECTS` |
-| `POST` / `GET /console/hosts/{slug}/prewarm` | đã có ở 4.5 (`services/api/prewarm/prewarmManager.ts`) |
+| `GET /console/hosts/{slug}` | `{ host }`; không có hoặc thuộc tenant khác → `404 NOT_FOUND` |
+| `POST /console/hosts/{slug}/verify` (body `{ method: 'META' \| 'FILE' }`) | `{ host }`; lỗi `422 VERIFICATION_CODE_MISMATCH` hoặc `422 SITE_UNREACHABLE` (console có thông báo riêng cho từng mã) |
+| `POST` / `GET /console/hosts/{slug}/prewarm` | `services/api/prewarm/prewarmManager.ts` (4.5) |
+
+Lưu ý khi đặt thẻ xác minh META: `siteManager` so khớp nguyên chuỗi `<meta name="translateme-site-verification" content="<mã>"`, nên phải giữ đúng thứ tự thuộc tính `name` trước `content`.
 
 `Host` = `{ slug, display_name, home_url, source_lang, target_langs, status, verification_code, no_translate_selectors, created_at }`. Console cũng hiểu các mã lỗi hiện tại của `siteManager` (`SITE_UNREACHABLE`, `VERIFICATION_CODE_MISMATCH`, `DUPLICATE_SLUG`, `FORBIDDEN`) cho tới khi đổi sang mã của Bảng 2.10.
