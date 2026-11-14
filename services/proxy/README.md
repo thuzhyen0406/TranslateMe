@@ -85,7 +85,11 @@ Báo cáo (F2 bước 5) ghi "bọc câu bằng `<span data-i>`". Không dùng c
   - Marker hỏng: dịch lại dạng văn bản thuần, đánh dấu `needsReview`.
   - Lỗi Translate ở một khối: câu của khối đó vào `failed` kèm lý do; hết hạn chót: các khối chưa gọi vào `pending`.
 - `countChars` tạm dùng `countCharsStub` (`stubs.ts`): số code point sau chuẩn hoá NFC, không tính ký hiệu `{n}` (đề xuất mục 7.1 Phần A). Số ký tự AWS tính phí (gồm thẻ) ghi riêng ở log `charsSent`.
-- Hạn mức: tạm dùng `quotaStub` (`usage.ts`, B.14: luôn đủ, settle chỉ ghi log) cho tới khi có `reserveChars`/`releaseChars`/`settleUsage` của 2.7. Không có câu trượt thì không gọi `reserveChars`.
+- Hạn mức (QC-7): có `TABLE_NAME` thì `depsFromEnv` dùng `usageServiceQuota` (`usage.ts`) trên `UsageService` của 2.7 (`libs/common/usage/usage.ts`), qua client DynamoDB định tuyến theo tenant. Không có `TABLE_NAME` (chạy local) thì dùng `quotaStub` và ghi log `USAGE_STUB`.
+  - Mỗi lần đặt trước có requestId riêng `<ctx.requestId>:<uuid>`: worker nhận lại requestId của proxy, các trang prewarm dùng chung `prewarm-<jobId>`, nên dùng nguyên requestId sẽ đụng phiếu đã `SETTLED`.
+  - Không có câu trượt thì proxy không gọi `reserveChars` (B.11); khi `settleUsage`, adapter tự đặt phiếu 0 ký tự rồi quyết toán để vẫn ghi `memoryChars`, `requests`, `pagesServed`.
+  - Bộ đếm: proxy (Visitor) `requests = pagesServed = 1`; prewarm (`countRequests: false`) và worker `requests = pagesServed = 0`; câu trượt (`tmMisses`) chỉ proxy đếm.
+  - `CHAR_QUOTA_EXCEEDED` → trang `X-TranslateMe-Partial: quota`. Lỗi khác khi đặt trước (thiếu `CONFIG`, DynamoDB lỗi) → `302` về trang gốc. Lỗi quyết toán chỉ ghi log (`usageError`, `USAGE_ACCOUNTING_ERROR`), trang vẫn `200`.
 - Câu trong `pending` và `failed` (trừ `SENTENCE_TOO_LARGE`) được gửi worker qua `lambda:InvokeFunction` (InvocationType `Event`). Chỉ gửi khi bật TM, vì worker chỉ ghi kết quả vào TM. Lỗi gọi worker chỉ ghi log.
 
 Sự kiện `FINISH_PAGE` gửi worker (`workerEvents.ts`): mỗi sự kiện ≤ 200 KB. Danh sách câu dài thì chia nhiều sự kiện; quá 4 sự kiện, hoặc có câu mà riêng nó đã vượt 200 KB, thì ghi danh sách câu ra S3 và sự kiện chỉ mang `sentencesS3Key`. Không cấu hình `WORKER_PAYLOAD_BUCKET` mà có câu như vậy thì bỏ câu đó và ghi log `workerDropped`. Thực tế câu gửi worker luôn ≤ 10.000 byte, vì câu lớn hơn đã bị translator đánh `SENTENCE_TOO_LARGE`.
@@ -125,7 +129,7 @@ Worker kiểm tra lại sự kiện và tenant (B.1.1): slug thuộc đúng `ten
 
 ## Việc còn lại
 
-- Thay `quotaStub`, `countCharsStub`, `hashSentenceStub`, `getGlossaryStateStub` khi 2.7, 1.8, 2.8 xong.
+- Thay `countCharsStub`, `hashSentenceStub`, `getGlossaryStateStub` khi 1.8, 2.8 xong (hạn mức 2.7 đã nối, xem mục 2.5).
 - Khai báo Lambda worker và bucket tải trọng trong IaC (TV1).
 - Đo thời gian: lần tải đầu < 30 giây, lần hai trúng TM (mốc 4).
 - Xóa cache chọn lọc dựa trên SEG (3.5).
