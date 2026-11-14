@@ -36,7 +36,9 @@ check('Region thống nhất', () => {
 check('Amazon Translate truy cập được', () => {
   // API chỉ đọc, không tạo giao dịch dịch có tính phí trong bước preflight.
   const r = aws(['translate', 'list-terminologies', '--max-results', '1', ...rflag], { readonly: true });
-  return Array.isArray(r.TerminologyProperties) ? ['PASS', 'đọc được danh sách terminology'] : ['FAIL', 'phản hồi AWS không đúng định dạng'];
+  // ListTerminologies trả về TerminologyPropertiesList (không phải TerminologyProperties).
+  const list = r.TerminologyPropertiesList ?? [];
+  return Array.isArray(list) ? ['PASS', `đọc được danh sách terminology (${list.length})`] : ['FAIL', 'phản hồi AWS không đúng định dạng'];
 });
 
 check('Lambda đồng thời (Service Quotas)', () => {
