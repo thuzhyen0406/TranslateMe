@@ -69,7 +69,12 @@ describe('tenant-scoped AWS sessions', () => {
     const iamTemplate = readFileSync(resolve(repositoryRoot, 'infra/modules/iam.yaml'), 'utf8');
     const tenantRole = iamTemplate.match(/  TenantDataAccessRole:[\s\S]*?(?=\n  TenantPayloadAccessRole:)/);
     assert.ok(tenantRole, 'TenantDataAccessRole exists');
-    assert.match(tenantRole[0], /aws:RequestTag\/TenantId: '\$\{sts:SourceIdentity\}'/);
+    // AssumeRole/TagSession bắt buộc session tag TenantId dạng t_*; SetSourceIdentity bắt buộc source identity t_*.
+    assert.match(tenantRole[0], /Sid: AssumeWithTenantSessionTag[\s\S]*?- sts:TagSession[\s\S]*?aws:RequestTag\/TenantId: 't_\*'[\s\S]*?aws:TagKeys:\s*\n\s*- TenantId/);
+    assert.match(tenantRole[0], /Sid: SetTenantSourceIdentity[\s\S]*?Action: sts:SetSourceIdentity[\s\S]*?sts:SourceIdentity: 't_\*'/);
+    assert.match(tenantRole[0], /translateme-\$\{StageName\}-post-confirmation/);
+    // Biến ${sts:SourceIdentity} trong điều kiện làm STS trả AccessDenied trên AWS thật: không dùng lại.
+    assert.doesNotMatch(iamTemplate, /'\$\{sts:SourceIdentity\}'/);
     assert.match(tenantRole[0], /dynamodb:LeadingKeys:[\s\S]*?'TENANT#\$\{aws:PrincipalTag\/TenantId\}'/);
     // Khóa phải đặt trong ngoặc ('Null':) – không thì YAML hiểu là null và CloudFormation từ chối template
     assert.match(tenantRole[0], /'Null':\s*\n\s*dynamodb:LeadingKeys: 'false'/);

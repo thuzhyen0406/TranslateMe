@@ -69,12 +69,16 @@ Resources:
             Condition:
               StringLike:
                 aws:PrincipalTag/TenantId: '*'
-          - Effect: Allow
+          # Tách theo mẫu AWS khuyến nghị: điều kiện session tag cho AssumeRole/TagSession, điều kiện source identity
+          # cho SetSourceIdentity. Bản cũ so khớp aws:RequestTag/TenantId với biến ${sts:SourceIdentity} trong một câu lệnh
+          # gộp 3 action; trên AWS thật STS trả AccessDenied (deploy dev 14/11). Lambda luôn đặt SourceIdentity = tag
+          # TenantId (tenantAws.ts); phạm vi dữ liệu do session policy và aws:PrincipalTag/TenantId giới hạn.
+          - Sid: AssumeWithTenantSessionTag
+            Effect: Allow
             Principal:
               AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
             Action:
               - sts:AssumeRole
-              - sts:SetSourceIdentity
               - sts:TagSession
             Condition:
               ArnLike:
@@ -87,12 +91,27 @@ Resources:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-platform-api'
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-post-confirmation'
               StringLike:
-                sts:SourceIdentity: 't_*'
-              StringEquals:
-                aws:RequestTag/TenantId: '${sts:SourceIdentity}'
+                aws:RequestTag/TenantId: 't_*'
               ForAllValues:StringEquals:
                 aws:TagKeys:
                   - TenantId
+          - Sid: SetTenantSourceIdentity
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: sts:SetSourceIdentity
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-proxy'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-worker'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-console-api'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-website-api'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-translate-api'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-platform-api'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-post-confirmation'
+              StringLike:
+                sts:SourceIdentity: 't_*'
       Policies:
         - PolicyName: tenant-data-session-maximum
           PolicyDocument:
@@ -173,13 +192,32 @@ Resources:
             Condition:
               StringLike:
                 aws:PrincipalTag/TenantId: '*'
-          - Effect: Allow
+          # Tách theo mẫu AWS khuyến nghị: điều kiện session tag cho AssumeRole/TagSession, điều kiện source identity
+          # cho SetSourceIdentity. Bản cũ so khớp aws:RequestTag/TenantId với biến ${sts:SourceIdentity} trong một câu lệnh
+          # gộp 3 action; trên AWS thật STS trả AccessDenied (deploy dev 14/11). Lambda luôn đặt SourceIdentity = tag
+          # TenantId (tenantAws.ts); phạm vi dữ liệu do session policy và aws:PrincipalTag/TenantId giới hạn.
+          - Sid: AssumeWithTenantSessionTag
+            Effect: Allow
             Principal:
               AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
             Action:
               - sts:AssumeRole
               - sts:TagSession
-              - sts:SetSourceIdentity
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-proxy'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-worker'
+              StringLike:
+                aws:RequestTag/TenantId: 't_*'
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - TenantId
+          - Sid: SetTenantSourceIdentity
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: sts:SetSourceIdentity
             Condition:
               ArnLike:
                 aws:PrincipalArn:
@@ -187,11 +225,6 @@ Resources:
                   - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-worker'
               StringLike:
                 sts:SourceIdentity: 't_*'
-              StringEquals:
-                aws:RequestTag/TenantId: '${sts:SourceIdentity}'
-              ForAllValues:StringEquals:
-                aws:TagKeys:
-                  - TenantId
       Policies:
         - PolicyName: tenant-worker-payload-maximum
           PolicyDocument:
@@ -232,23 +265,35 @@ Resources:
             Condition:
               StringLike:
                 aws:PrincipalTag/TenantId: '*'
-          - Effect: Allow
+          # Tách theo mẫu AWS khuyến nghị: điều kiện session tag cho AssumeRole/TagSession, điều kiện source identity
+          # cho SetSourceIdentity. Bản cũ so khớp aws:RequestTag/TenantId với biến ${sts:SourceIdentity} trong một câu lệnh
+          # gộp 3 action; trên AWS thật STS trả AccessDenied (deploy dev 14/11). Lambda luôn đặt SourceIdentity = tag
+          # TenantId (tenantAws.ts); phạm vi dữ liệu do session policy và aws:PrincipalTag/TenantId giới hạn.
+          - Sid: AssumeWithTenantSessionTag
+            Effect: Allow
             Principal:
               AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
             Action:
               - sts:AssumeRole
               - sts:TagSession
-              - sts:SetSourceIdentity
+            Condition:
+              ArnLike:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-website-api'
+              StringLike:
+                aws:RequestTag/TenantId: 't_*'
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - TenantId
+          - Sid: SetTenantSourceIdentity
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: sts:SetSourceIdentity
             Condition:
               ArnLike:
                 aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/translateme-${StageName}-website-api'
               StringLike:
                 sts:SourceIdentity: 't_*'
-              StringEquals:
-                aws:RequestTag/TenantId: '${sts:SourceIdentity}'
-              ForAllValues:StringEquals:
-                aws:TagKeys:
-                  - TenantId
       Policies:
         - PolicyName: website-tenant-slug-transaction
           PolicyDocument:
