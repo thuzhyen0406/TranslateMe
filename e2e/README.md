@@ -79,12 +79,29 @@ Tenant Cognito được tạo bằng `SignUp` rồi `AdminConfirmSignUp` để k
 
 State lưu `fileKey` và trạng thái batch trước khi POST. Khi kết quả request chưa rõ, lần chạy sau query DynamoDB theo tenant và file key để khôi phục job trước khi gửi lại. Cần `TM_TABLE`, quyền `dynamodb:Query`, và thời gian dò ít nhất 90 giây (`TM_BATCH_RECOVERY_WAIT_S`, timeout Lambda 60 giây cộng 30 giây đệm). `npm run test:demo` dùng `AWS_BIN` giả để kiểm tra thao tác usage plan và batch recovery offline.
 
+## 5.4, 5.5, kịch bản 8 (TV2)
+
+Ba website mẫu và cách đăng: `sites/README.md`. Mỗi lệnh đọc `.state/<stage>.json` (slug của tenant A/B/C) và `TM_PUBLIC_BASE`, rồi ghi bằng chứng vào `evidence/<TM_RUN_ID>/` dưới dạng `.md` và `.json`.
+
+| Lệnh | Hạng mục | Kiểm tra | Bằng chứng |
+| :--- | :--- | :--- | :--- |
+| `npm run rehearsal:proxy` | 5.4 (offline) | Cùng các kiểm tra của `demo:proxy-check`, chạy trên lõi proxy thật với Translate và CloudFront giả; cần `npm run build` trong `services/proxy` trước | stdout |
+| `npm run demo:proxy-check` | 5.4 | Site A: lang, canonical/hreflang theo `PUBLIC_BASE_URL`, `{n}`, `translate="no"`, iframe, ảnh, biểu mẫu (placeholder, option, textarea), bảng, trang > 3 MB → 302, origin 404 → 404, ngôn ngữ chưa bật → 404, HEAD, trang dịch dở + worker | `proxy-check.md` (có mục "Danh sách lỗi") |
+| `npm run demo:latency` | 5.5 / KB3 | Site B, 10 lần × (a) TM rỗng < 30 s, không 5xx; (b) trúng TM sau khi xóa cache, trung vị ≤ 2 s; (c) `x-cache: Hit`, trung vị ≤ 300 ms | `kb3-latency.md` |
+| `npm run demo:kb8 -- --prepare` | KB8 | Site C: sửa câu X ở `en` → `CreateInvalidation` đúng 2 đường dẫn; `en/trang-3/` và cả 3 trang `ko` vẫn `Hit`; bản HUMAN không bị ghi đè | `kb8-invalidation.md` |
+
+- (b) xóa cache bằng `CreateInvalidation` khi có `TM_CF_DISTRIBUTION_ID` (cần quyền `cloudfront:CreateInvalidation` / `GetInvalidation`), ngược lại thêm query ngẫu nhiên (`--bust query`, chỉ đúng khi cache key của CloudFront gồm query string). Lượt nào không phải `Miss` bị đánh dấu không hợp lệ và tiêu chí không đạt.
+- (a) cần TM rỗng: muốn đo lại thì build site B với `TM_LATENCY_ROUND=<n mới>`, đăng lại rồi chạy lại.
+- `--prepare` của KB8 bật thêm ngôn ngữ đối chứng (`--other-lang`, mặc định `ko`) cho website C nếu chưa bật, rồi chờ 65 s cho bộ đệm trạng thái của proxy.
+- Muốn thử nhánh trang dịch dở trên stack thật: tạm đặt `TRANSLATE_BUDGET_MS` thấp (ví dụ `1500`) cho Lambda proxy dev. Nếu không, mục PARTIAL chỉ là cảnh báo.
+
 ## Cấu trúc
 
 - `lib/`: cấu hình, Cognito JWT, HTTP retry, API contract, so sánh lỗi và evidence.
 - `tests/`: isolation (kịch bản 4), limits (kịch bản 5), SSRF (kịch bản 6) và helper/demo tests.
 - `mock/`, `scripts/selftest.ts`: mock và tự kiểm tra offline.
-- `demo/`: AWS preflight, deploy bảy stack theo thứ tự và seed dữ liệu demo.
+- `demo/`: AWS preflight, deploy bảy stack theo thứ tự, seed dữ liệu demo; `proxyCheck.ts`, `latency.ts`, `kb8.ts` cho 5.4, 5.5, KB8.
+- `sites/`, `tools/build-sites.ts`, `lib/sampleSites.ts`: ba website mẫu.
 
 ## Evidence report (hạng mục 5.2)
 
