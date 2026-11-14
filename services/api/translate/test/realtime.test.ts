@@ -38,6 +38,8 @@ function setup(options: {
   detected?: { language?: string; confidence?: number };
   translateErrorName?: string;
   translateConcurrency?: number;
+  /** MEMBER trả về khi gọi qua JWT; không truyền = không có MEMBER */
+  member?: Record<string, unknown>;
 } = {}) {
   const calls: Array<{ name: string; input: Record<string, any> }> = [];
   const stored: Array<Record<string, any>> = [];
@@ -165,6 +167,7 @@ function setup(options: {
     getGlossaryState: options.getGlossaryState,
     detectLanguage: async () => options.detected ?? { language: 'vi', confidence: 0.99 },
     now: () => new Date('2026-10-29T00:00:00.000Z'),
+    memberDb: { async get() { return options.member ?? null; } },
   } satisfies RealtimeDeps;
   return {
     handler: createRealtimeHandler(deps),
@@ -463,7 +466,7 @@ describe('POST /translate/realtime', () => {
   });
 
   it('từ chối vai trò REVIEWER khi gọi qua JWT session (PERMISSION_DENIED)', async () => {
-    const test = setup();
+    const test = setup({ member: { status: 'ACTIVE', role: 'REVIEWER', tenantId: TENANT, userSub: 'sub-reviewer-1' } });
     const response = await test.handler({
       body: JSON.stringify({ text: 'Xin chào.', target_lang: 'en' }),
       requestContext: {
@@ -480,5 +483,20 @@ describe('POST /translate/realtime', () => {
     const body = responseBody(response);
     assert.equal(response.statusCode, 403);
     assert.equal(body.error.code, 'PERMISSION_DENIED');
+    assert.equal(test.translateCalls, 0);
+  });
+
+  it('JWT của thành viên đã bị thu hồi (không còn MEMBER ACTIVE) -> 403, không dịch', async () => {
+    const test = setup();
+    const response = await test.handler({
+      body: JSON.stringify({ text: 'Xin chào.', target_lang: 'en' }),
+      requestContext: {
+        requestId: 'req-revoked-01',
+        authorizer: { claims: { sub: 'sub-dev-1', 'custom:tenant_id': TENANT, 'custom:role': 'DEVELOPER' } },
+      },
+    });
+    assert.equal(response.statusCode, 403);
+    assert.equal(responseBody(response).error.code, 'PERMISSION_DENIED');
+    assert.equal(test.translateCalls, 0);
   });
 });

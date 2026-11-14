@@ -44,6 +44,8 @@ export interface RealtimeDeps {
   detectLanguage: (text: string) => Promise<{ language?: string; confidence?: number }>;
   getGlossaryState?: (ctx: Ctx) => Promise<GlossaryState>;
   now?: () => Date;
+  /** Đọc MEMBER khi gọi qua JWT (requireActiveMember). Không truyền = db của libs/common (production). */
+  memberDb?: NonNullable<Parameters<typeof contextFromIdTokenClaims>[2]>['db'];
 }
 /**
  * Tạo phản hồi JSON thống nhất, thiết lập header nội dung và chính sách không lưu cache.
@@ -95,7 +97,7 @@ async function resolveTenant(event: RealtimeEvent, deps: RealtimeDeps): Promise<
   const context = event.requestContext?.authorizer;
   if (context?.claims) {
     const requestId = event.requestContext?.requestId ?? `req-${randomUUID()}`;
-    const ctx = await contextFromIdTokenClaims(context.claims, requestId);
+    const ctx = await contextFromIdTokenClaims(context.claims, requestId, deps.memberDb ? { db: deps.memberDb } : undefined);
     return { tenantId: ctx.tenantId, ctx };
   }
   if (context?.tenantId && context.keyId) return { tenantId: context.tenantId, keyId: context.keyId };
