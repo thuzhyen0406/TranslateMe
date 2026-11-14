@@ -165,6 +165,81 @@ describe('tenant-scoped AWS sessions', () => {
     ]);
   });
 
+  it('session policy chỉ thêm đúng một KEYMAP khi được yêu cầu, từ chối wildcard', () => {
+    const policy = JSON.parse(tenantSessionPolicy('t_aaaaaaaaaaaaaaaaaaaaaaaa', {
+      allowPlatformKeyMapping: true,
+      platformKeyMappingKey: 'TENANT#PLATFORM#KEY#bnmg6djftd',
+    }));
+    assert.deepEqual(policy.Statement[0].Condition['ForAllValues:StringLike']['dynamodb:LeadingKeys'], [
+      'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa',
+      'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa#*',
+      'TENANT#PLATFORM#KEY#bnmg6djftd',
+    ]);
+    for (const bad of ['TENANT#PLATFORM#KEY#*', 'TENANT#PLATFORM#KEY#', 'TENANT#PLATFORM#SLUG#site-a', undefined]) {
+      assert.throws(() => tenantSessionPolicy('t_aaaaaaaaaaaaaaaaaaaaaaaa', {
+        allowPlatformKeyMapping: true,
+        platformKeyMappingKey: bad,
+      }), /Invalid platform key mapping key/);
+    }
+  });
+
+  it('giao dịch APIKEY + KEYMAP: chỉ khi bật allowPlatformKeyMappings mới kèm KEYMAP vào session policy', async () => {
+    const transact = { input: { TransactItems: [
+      { Put: { Item: { PK: 'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa#APIKEY', SK: 'KEY#bnmg6djftd' } } },
+      { Put: { Item: { PK: 'TENANT#PLATFORM#KEY#bnmg6djftd', SK: 'META', tenantId: 't_aaaaaaaaaaaaaaaaaaaaaaaa' } } },
+    ] } };
+    const leadingKeysFor = async (allowPlatformKeyMappings: boolean) => {
+      const policies: string[] = [];
+      const router = createTenantDocumentClientRouter({ async send() { assert.fail('không được dùng role thực thi'); } }, {
+        roleArn: 'arn:aws:iam::123456789012:role/tenant-data',
+        allowPlatformKeyMappings,
+        sts: {
+          async send(command: never) {
+            policies.push(String((command as any).input.Policy));
+            return { Credentials: { AccessKeyId: 'a', SecretAccessKey: 's', SessionToken: 't', Expiration: new Date(Date.now() + 60_000) } } as never;
+          },
+        } as never,
+        createClient: (credentials) => ({ async send(command: never) { await credentials(); return command; } }),
+      });
+      await router.send(transact as never);
+      return JSON.parse(policies[0]).Statement[0].Condition['ForAllValues:StringLike']['dynamodb:LeadingKeys'];
+    };
+    assert.deepEqual(await leadingKeysFor(true), [
+      'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa',
+      'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa#*',
+      'TENANT#PLATFORM#KEY#bnmg6djftd',
+    ]);
+    assert.deepEqual(await leadingKeysFor(false), [
+      'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa',
+      'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa#*',
+    ]);
+
+    const router = createTenantDocumentClientRouter({ async send() { assert.fail('không được gửi lệnh'); } }, {
+      roleArn: 'arn:aws:iam::123456789012:role/tenant-data',
+      allowPlatformKeyMappings: true,
+      sts: { async send() { assert.fail('không được assume role'); } } as never,
+      createClient: () => ({ async send() { assert.fail('không được gửi lệnh'); } }),
+    });
+    await assert.rejects(router.send({ input: { TransactItems: [
+      { Put: { Item: { PK: 'TENANT#t_aaaaaaaaaaaaaaaaaaaaaaaa#APIKEY', SK: 'KEY#k1' } } },
+      { Put: { Item: { PK: 'TENANT#PLATFORM#KEY#k1', SK: 'META' } } },
+      { Put: { Item: { PK: 'TENANT#PLATFORM#KEY#k2', SK: 'META' } } },
+    ] } } as never), /cannot span platform key mappings/);
+  });
+
+  it('IAM: role tenant-data cho phép KEYMAP, Lambda Console bật ALLOW_PLATFORM_KEY_MAPPING', () => {
+    const repositoryRoot = findRepositoryRoot();
+    const iamTemplate = readFileSync(resolve(repositoryRoot, 'infra/modules/iam.yaml'), 'utf8');
+    const tenantRole = iamTemplate.match(/  TenantDataAccessRole:[\s\S]*?(?=\n  TenantPayloadAccessRole:)/);
+    assert.ok(tenantRole);
+    assert.match(tenantRole[0], /dynamodb:LeadingKeys:[\s\S]*?- 'TENANT#PLATFORM#KEY#\*'/);
+    const lambdas = readFileSync(resolve(repositoryRoot, 'infra/modules/lambdas.yaml'), 'utf8');
+    const consoleFn = lambdas.match(/  ConsoleFunction:[\s\S]*?(?=\n  [A-Z][A-Za-z]+:\n)/);
+    assert.ok(consoleFn);
+    assert.match(consoleFn[0], /ALLOW_PLATFORM_KEY_MAPPING: 'true'/);
+    assert.equal((lambdas.match(/ALLOW_PLATFORM_KEY_MAPPING/g) ?? []).length, 1, 'chỉ Lambda Console bật');
+  });
+
   it('từ chối giao dịch có partition key của nhiều tenant', async () => {
     const router = createTenantDocumentClientRouter({ async send() { assert.fail('không được gửi lệnh'); } }, {
       roleArn: 'arn:aws:iam::123456789012:role/tenant-data',

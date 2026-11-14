@@ -17,6 +17,8 @@ const docClient = createTenantDocumentClientRouter(DynamoDBDocumentClient.from(c
   roleArn: process.env.TENANT_DATA_ACCESS_ROLE_ARN,
   sessionName: 'common-db',
   allowPlatformSlugReservations: process.env.ALLOW_PLATFORM_SLUG_RESERVATION === 'true',
+  // Lambda Console ghi APIKEY + KEYMAP trong một giao dịch (transactApiKey).
+  allowPlatformKeyMappings: process.env.ALLOW_PLATFORM_KEY_MAPPING === 'true',
 });
 const websiteSlugReservationClient = createTenantDocumentClientRouter(DynamoDBDocumentClient.from(client), {
   roleArn: process.env.TENANT_WEBSITE_DATA_ACCESS_ROLE_ARN,

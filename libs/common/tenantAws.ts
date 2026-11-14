@@ -26,10 +26,17 @@ function tenantFromPartitionKey(value: unknown): string | undefined {
   return /^t_[A-Za-z0-9_-]{1,64}$/.test(id) ? id : undefined;
 }
 
-function collectPartitionKeys(value: unknown, keys: Set<string>, platformSlugKeys: Set<string>): void {
+const PLATFORM_KEY_MAPPING_RE = /^TENANT#PLATFORM#KEY#[A-Za-z0-9]{1,64}$/;
+
+function collectPartitionKeys(
+  value: unknown,
+  keys: Set<string>,
+  platformSlugKeys: Set<string>,
+  platformKeyMappings: Set<string> = new Set(),
+): void {
   if (!value || typeof value !== 'object') return;
   if (Array.isArray(value)) {
-    for (const item of value) collectPartitionKeys(item, keys, platformSlugKeys);
+    for (const item of value) collectPartitionKeys(item, keys, platformSlugKeys, platformKeyMappings);
     return;
   }
   for (const [name, child] of Object.entries(value as Record<string, unknown>)) {
@@ -42,8 +49,11 @@ function collectPartitionKeys(value: unknown, keys: Set<string>, platformSlugKey
       if (typeof partitionKey === 'string' && /^TENANT#PLATFORM#SLUG#[a-z0-9-]{1,253}$/.test(partitionKey)) {
         platformSlugKeys.add(partitionKey);
       }
+      if (typeof partitionKey === 'string' && PLATFORM_KEY_MAPPING_RE.test(partitionKey)) {
+        platformKeyMappings.add(partitionKey);
+      }
     }
-    collectPartitionKeys(child, keys, platformSlugKeys);
+    collectPartitionKeys(child, keys, platformSlugKeys, platformKeyMappings);
   }
 }
 
@@ -59,6 +69,9 @@ export function tenantSessionPolicy(
     dataTableName?: string;
     allowPlatformSlugReservation?: boolean;
     platformSlugReservationKey?: string;
+    /** Cho phép đúng một bản ghi KEYMAP `TENANT#PLATFORM#KEY#<keyId>` (giao dịch APIKEY + KEYMAP của Console). */
+    allowPlatformKeyMapping?: boolean;
+    platformKeyMappingKey?: string;
   } = {},
 ): string {
   if (!/^t_[A-Za-z0-9_-]{1,64}$/.test(tenantId)) throw new TypeError('Invalid tenant ID');
@@ -69,6 +82,12 @@ export function tenantSessionPolicy(
       throw new TypeError('Invalid platform slug reservation key');
     }
     leadingKeys.push(buckets.platformSlugReservationKey);
+  }
+  if (buckets.allowPlatformKeyMapping) {
+    if (!buckets.platformKeyMappingKey || !PLATFORM_KEY_MAPPING_RE.test(buckets.platformKeyMappingKey)) {
+      throw new TypeError('Invalid platform key mapping key');
+    }
+    leadingKeys.push(buckets.platformKeyMappingKey);
   }
   const statements: Array<Record<string, unknown>> = [{
     Effect: 'Allow',
@@ -215,6 +234,8 @@ export function createTenantDocumentClientRouter(
     dataTableName?: string;
     allowPlatformSlugReservation?: boolean;
     allowPlatformSlugReservations?: boolean;
+    /** Chỉ Lambda Console (tạo/thu hồi API key) bật: giao dịch tenant được kèm đúng một KEYMAP. */
+    allowPlatformKeyMappings?: boolean;
     sts?: Pick<STSClient, 'send'>;
     createClient?: (credentials: TenantCredentialsProvider) => SendClient;
     logger?: (message: Record<string, unknown>) => void;
@@ -226,8 +247,12 @@ export function createTenantDocumentClientRouter(
   const sts = options.sts ?? new STSClient({});
   const clients = new Map<string, Promise<SendClient>>();
 
-  const clientFor = (tenantId: string, platformSlugReservationKey?: string): Promise<SendClient> => {
-    const clientKey = `${tenantId}:${platformSlugReservationKey ?? ''}`;
+  const clientFor = (
+    tenantId: string,
+    platformSlugReservationKey?: string,
+    platformKeyMappingKey?: string,
+  ): Promise<SendClient> => {
+    const clientKey = `${tenantId}:${platformSlugReservationKey ?? ''}:${platformKeyMappingKey ?? ''}`;
     let pending = clients.get(clientKey);
     if (!pending) {
       pending = (async () => {
@@ -239,6 +264,8 @@ export function createTenantDocumentClientRouter(
           batchUploadKmsKeyArn: options.batchUploadKmsKeyArn,
           allowPlatformSlugReservation: Boolean(platformSlugReservationKey && (options.allowPlatformSlugReservation || options.allowPlatformSlugReservations)),
           platformSlugReservationKey,
+          allowPlatformKeyMapping: Boolean(platformKeyMappingKey && options.allowPlatformKeyMappings),
+          platformKeyMappingKey,
         };
         const credentials = createTenantCredentialsProvider(
           roleArn,
@@ -264,16 +291,23 @@ export function createTenantDocumentClientRouter(
     async send(command: never): Promise<never> {
       const keys = new Set<string>();
       const platformSlugKeys = new Set<string>();
-      collectPartitionKeys((command as AwsCommand).input, keys, platformSlugKeys);
+      const platformKeyMappings = new Set<string>();
+      collectPartitionKeys((command as AwsCommand).input, keys, platformSlugKeys, platformKeyMappings);
       if (keys.size > 1) throw new Error('DynamoDB request cannot span tenant partitions');
       if (platformSlugKeys.size > 1) throw new Error('DynamoDB request cannot span platform slug reservations');
+      if (options.allowPlatformKeyMappings && platformKeyMappings.size > 1) {
+        throw new Error('DynamoDB request cannot span platform key mappings');
+      }
       const tenantId = keys.values().next().value as string | undefined;
       if (!tenantId) return base.send(command);
       if (!roleArn && localFallback) return base.send(command);
       const platformSlugReservationKey = (options.allowPlatformSlugReservation || options.allowPlatformSlugReservations)
         ? platformSlugKeys.values().next().value as string | undefined
         : undefined;
-      return (await clientFor(tenantId, platformSlugReservationKey)).send(command);
+      const platformKeyMappingKey = options.allowPlatformKeyMappings
+        ? platformKeyMappings.values().next().value as string | undefined
+        : undefined;
+      return (await clientFor(tenantId, platformSlugReservationKey, platformKeyMappingKey)).send(command);
     },
   } as SendClient;
 }
