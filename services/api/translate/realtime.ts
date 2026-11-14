@@ -344,6 +344,14 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
           : 400;
         return apiError(status, error.code, error.message, requestId);
       }
+      // Ghi tên và thông điệp lỗi (không có nội dung bản dịch hay khóa) để lần ra nguyên nhân 500 từ CloudWatch.
+      console.error(JSON.stringify({
+        level: 'ERROR',
+        action: 'REALTIME_UNHANDLED_ERROR',
+        request_id: requestId,
+        errorName: (error as { name?: string })?.name ?? 'UnknownError',
+        errorMessage: String((error as { message?: unknown })?.message ?? error).slice(0, 300),
+      }));
       return apiError(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
     }
   };
