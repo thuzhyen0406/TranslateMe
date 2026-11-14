@@ -30,6 +30,11 @@ export interface ActualUsage {
   tmMisses?: number;
   /** Số trang được phục vụ bởi yêu cầu proxy; mặc định là 1 với WEB. */
   pagesServed?: number;
+  /**
+   * Số lượt yêu cầu cộng vào bộ đếm requests; mặc định là 1.
+   * Proxy đặt 0 cho phần dịch nền (worker) và dịch trước (prewarm) vì đó không phải lượt truy cập.
+   */
+  requests?: number;
 }
 
 export interface UsageServiceOptions {
@@ -191,10 +196,12 @@ export class UsageService {
       TableName: this.options.tableName,
       Key: { PK: `TENANT#${tenantId}`, SK: "CONFIG" },
       ConsistentRead: true,
-      ProjectionExpression: "#plan, #limit",
+      // PostConfirmation và Platform ghi hạn mức vào charLimit; characterLimit được giữ để tương thích.
+      ProjectionExpression: "#plan, #limit, #charLimit",
       ExpressionAttributeNames: {
         "#plan": "plan",
         "#limit": "characterLimit",
+        "#charLimit": "charLimit",
       },
     }));
 
@@ -362,12 +369,14 @@ export class UsageService {
     assertNonNegativeInteger(tmMisses, "actual.tmMisses");
     const pagesServed = actual.pagesServed ?? (ticket.source.kind === "WEB" ? 1 : 0);
     assertNonNegativeInteger(pagesServed, "actual.pagesServed");
+    const requests = actual.requests ?? 1;
+    assertNonNegativeInteger(requests, "actual.requests");
 
     const existing = await this.getReservation(ticket.tenantId, ticket.requestId);
     if (!existing) throw new ReservationStateError("Reservation not found.");
     this.assertTicketMatches(existing, ticket);
     if (existing.status === STATUS_SETTLED) {
-      this.assertSameSettlement(existing, actual.machineChars, memoryChars, pagesServed, tmHits, tmMisses);
+      this.assertSameSettlement(existing, actual.machineChars, memoryChars, pagesServed, tmHits, tmMisses, requests);
       return;
     }
     if (existing.status !== STATUS_RESERVED) {
@@ -381,7 +390,7 @@ export class UsageService {
       ":memoryChars": memoryChars,
       ":sentTotal": totalCharacters,
       ":sentFromTM": memoryChars,
-      ":requests": 1,
+      ":requests": requests,
       ":pagesServed": pagesServed,
       ":tmHits": tmHits,
       ":tmMisses": tmMisses,
@@ -419,7 +428,7 @@ export class UsageService {
     const stateUpdate = {
       TableName: this.options.tableName,
       Key: reservationKey(ticket.tenantId, ticket.requestId),
-      UpdateExpression: "SET #status = :settled, #actualMachineChars = :actualMachineChars, #actualMemoryChars = :actualMemoryChars, #pagesServed = :pagesServed, #tmHits = :tmHits, #tmMisses = :tmMisses",
+      UpdateExpression: "SET #status = :settled, #actualMachineChars = :actualMachineChars, #actualMemoryChars = :actualMemoryChars, #pagesServed = :pagesServed, #tmHits = :tmHits, #tmMisses = :tmMisses, #requestsCounted = :requestsCounted",
       ConditionExpression: "#status = :reserved",
       ExpressionAttributeNames: {
         "#status": "status",
@@ -428,6 +437,7 @@ export class UsageService {
         "#pagesServed": "pagesServed",
         "#tmHits": "tmHits",
         "#tmMisses": "tmMisses",
+        "#requestsCounted": "requestsCounted",
       },
       ExpressionAttributeValues: {
         ":settled": STATUS_SETTLED,
@@ -437,6 +447,7 @@ export class UsageService {
         ":pagesServed": pagesServed,
         ":tmHits": tmHits,
         ":tmMisses": tmMisses,
+        ":requestsCounted": requests,
       },
     };
 
@@ -452,7 +463,7 @@ export class UsageService {
     } catch (error) {
       const latest = await this.getReservation(ticket.tenantId, ticket.requestId);
       if (latest?.status === STATUS_SETTLED) {
-        this.assertSameSettlement(latest, actual.machineChars, memoryChars, pagesServed, tmHits, tmMisses);
+        this.assertSameSettlement(latest, actual.machineChars, memoryChars, pagesServed, tmHits, tmMisses, requests);
         return;
       }
       this.options.onAccountingError?.({ operation: "settle", tenantId: ticket.tenantId, requestId: ticket.requestId, error });
@@ -531,9 +542,9 @@ export class UsageService {
   }
 
   private assertSameSettlement(
-    item: Record<string, any>, machineChars: number, memoryChars: number, pagesServed: number, tmHits: number, tmMisses: number,
+    item: Record<string, any>, machineChars: number, memoryChars: number, pagesServed: number, tmHits: number, tmMisses: number, requests: number,
   ): void {
-    if (item.actualMachineChars !== machineChars || item.actualMemoryChars !== memoryChars || item.pagesServed !== pagesServed || (item.tmHits ?? 0) !== tmHits || (item.tmMisses ?? 0) !== tmMisses) {
+    if (item.actualMachineChars !== machineChars || item.actualMemoryChars !== memoryChars || item.pagesServed !== pagesServed || (item.tmHits ?? 0) !== tmHits || (item.tmMisses ?? 0) !== tmMisses || (item.requestsCounted ?? 1) !== requests) {
       throw new ReservationStateError("requestId was already settled with different counters.");
     }
   }
