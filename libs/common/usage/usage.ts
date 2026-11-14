@@ -41,6 +41,11 @@ export interface UsageServiceOptions {
   tableName: string;
   /** Số lần thử lại khi giao dịch DynamoDB gặp xung đột tạm thời. */
   maxTransactionAttempts?: number;
+  /**
+   * Số ngày giữ phiếu RESERVATION# trước khi DynamoDB TTL (thuộc tính `ttl`) xoá; mặc định 40.
+   * Mỗi lượt dịch tạo một phiếu, nên không có TTL thì bảng phình theo số lượt. Bộ đếm MONTH# không bị xoá.
+   */
+  reservationTtlDays?: number;
   /** Hàm ghi log tùy chọn khi thao tác quyết toán/hoàn tiền thất bại. */
   onAccountingError?: (event: {
     operation: "settle" | "refund";
@@ -75,6 +80,9 @@ export class ReservationStateError extends Error {
   }
 }
 
+
+/** Phiếu chỉ cần cho tới khi quyết toán/hoàn (vài giây tới vài giờ với batch); giữ thêm để đối soát trong tháng. */
+export const DEFAULT_RESERVATION_TTL_DAYS = 40;
 
 const STATUS_RESERVED = "RESERVED";
 const STATUS_SETTLED = "SETTLED";
@@ -177,6 +185,7 @@ function sleep(ms: number): Promise<void> {
 
 export class UsageService {
   private readonly maxAttempts: number;
+  private readonly reservationTtlSeconds: number;
 
   constructor(
     private readonly ddb: DynamoDBDocumentClient,
@@ -184,6 +193,9 @@ export class UsageService {
   ) {
     if (!options.tableName) throw new TypeError("tableName is required.");
     this.maxAttempts = options.maxTransactionAttempts ?? 18;
+    const ttlDays = options.reservationTtlDays ?? DEFAULT_RESERVATION_TTL_DAYS;
+    if (!Number.isSafeInteger(ttlDays) || ttlDays < 1) throw new RangeError("reservationTtlDays must be a positive integer.");
+    this.reservationTtlSeconds = ttlDays * 86_400;
   }
 
   /**
@@ -318,6 +330,7 @@ export class UsageService {
                 source: input.source,
                 status: STATUS_RESERVED,
                 createdAt,
+                ttl: Math.floor(reservationTime.getTime() / 1000) + this.reservationTtlSeconds,
               },
               ConditionExpression: "attribute_not_exists(PK) AND attribute_not_exists(SK)",
             },

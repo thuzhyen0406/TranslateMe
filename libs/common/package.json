@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node --test dist/test/isBlockedIp.test.js dist/test/safeFetch.test.js dist/test/ssrfScenario6.test.js dist/test/safeFetch.stub.test.js dist/test/experiments.test.js dist/test/markers.test.js dist/test/segmenter.test.js dist/test/extract.test.js dist/test/rebuild.test.js dist/test/types-db.test.js dist/test/tm.test.js dist/test/translator.test.js dist/test/seg.test.js dist/test/invalidation.test.js dist/test/parsers.test.js dist/test/tenant-isolation.test.js dist/test/access-control.test.js dist/test/roles.test.js dist/test/tenantAws.test.js dist/test/jobs.test.js",
+    "test": "tsc -p tsconfig.json && node --test dist/test/isBlockedIp.test.js dist/test/safeFetch.test.js dist/test/ssrfScenario6.test.js dist/test/safeFetch.stub.test.js dist/test/experiments.test.js dist/test/markers.test.js dist/test/segmenter.test.js dist/test/extract.test.js dist/test/rebuild.test.js dist/test/types-db.test.js dist/test/tm.test.js dist/test/translator.test.js dist/test/seg.test.js dist/test/invalidation.test.js dist/test/parsers.test.js dist/test/tenant-isolation.test.js dist/test/access-control.test.js dist/test/roles.test.js dist/test/tenantAws.test.js dist/test/jobs.test.js dist/test/usage.integration.test.js",
     "test:ssrf": "tsc -p tsconfig.json && node dist/test/ssrfScenario6.runner.js",
     "exp:template": "tsc -p tsconfig.json && node dist/experiments/runExperiments.js --template",
     "exp:run": "tsc -p tsconfig.json && node dist/experiments/runExperiments.js --exp=all",
