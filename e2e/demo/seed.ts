@@ -187,7 +187,14 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
     t.tmHash = hashSentence(t.tmText);
     saveState(st);
   }
-  must(await call('POST', R.translate, { apiKey: t.apiKey, body: B.translate(t.tmText) }), 'POST /translate/realtime');
+  // API Gateway cần một lúc mới áp dụng key vừa tạo/gắn usage plan: trong thời gian đó trả 401 INVALID_API_KEY.
+  let translated = await call('POST', R.translate, { apiKey: t.apiKey, body: B.translate(t.tmText) });
+  for (let i = 0; i < 18 && translated.status === 401; i++) {
+    if (i === 0) console.log(`Tenant ${label}: chờ API Gateway áp dụng API key mới (tối đa 3 phút)...`);
+    await sleep(10_000);
+    translated = await call('POST', R.translate, { apiKey: t.apiKey, body: B.translate(t.tmText) });
+  }
+  must(translated, 'POST /translate/realtime');
 
   if (!t.jobId || !t.fileKey || force || t.batchSubmissionState === 'SUBMITTING' || t.batchSubmissionState === 'UPLOADING') {
     const contents = 'Xin chào\n';

@@ -357,6 +357,19 @@ Resources:
                   StringLike:
                     dynamodb:LeadingKeys:
                       - 'TENANT#PLATFORM#SLUG#*'
+              # Bảng dùng KMS key tự quản lý: đọc trực tiếp bằng role thực thi (không qua phiên tenant) cũng cần
+              # kms:Decrypt; thiếu quyền này GetItem trả AccessDeniedException (deploy dev 14/11).
+              - Sid: ReadPlatformMappingsKms
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !Ref KmsKeyArn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'dynamodb.${AWS::Region}.amazonaws.com'
+                    kms:EncryptionContext:aws:dynamodb:tableName: !Select [1, !Split ['/', !Ref TableArn]]
+                    kms:EncryptionContext:aws:dynamodb:subscriberId: !Ref AWS::AccountId
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
                 Action:
@@ -406,6 +419,19 @@ Resources:
                 Condition:
                   StringLike:
                     dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
+              # Bảng dùng KMS key tự quản lý: đọc trực tiếp bằng role thực thi (không qua phiên tenant) cũng cần
+              # kms:Decrypt; thiếu quyền này GetItem trả AccessDeniedException (deploy dev 14/11).
+              - Sid: ReadPlatformSlugMappingKms
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !Ref KmsKeyArn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'dynamodb.${AWS::Region}.amazonaws.com'
+                    kms:EncryptionContext:aws:dynamodb:tableName: !Select [1, !Split ['/', !Ref TableArn]]
+                    kms:EncryptionContext:aws:dynamodb:subscriberId: !Ref AWS::AccountId
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
                 Action:
@@ -548,6 +574,19 @@ Resources:
                 Condition:
                   StringLike:
                     dynamodb:LeadingKeys: 'TENANT#PLATFORM#KEY#*'
+              # Bảng dùng KMS key tự quản lý: đọc trực tiếp bằng role thực thi (không qua phiên tenant) cũng cần
+              # kms:Decrypt; thiếu quyền này GetItem trả AccessDeniedException (deploy dev 14/11).
+              - Sid: ReadPlatformKeyMappingKms
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !Ref KmsKeyArn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'dynamodb.${AWS::Region}.amazonaws.com'
+                    kms:EncryptionContext:aws:dynamodb:tableName: !Select [1, !Split ['/', !Ref TableArn]]
+                    kms:EncryptionContext:aws:dynamodb:subscriberId: !Ref AWS::AccountId
               - Sid: AssumeTenantDataAccessRole
                 Effect: Allow
                 Action:

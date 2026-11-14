@@ -129,3 +129,13 @@ test('API Gateway: mọi gateway response có CORS; response type trùng phải 
     assert.equal(new Set(variants).size, 1, `${type} khai báo nhiều lần với nội dung khác nhau`);
   }
 });
+
+test('IAM: role đọc DynamoDB trực tiếp (không qua phiên tenant) có kms:Decrypt cho bảng mã hóa KMS', () => {
+  const resources = section(read(join(infra, 'modules', 'iam.yaml')), 'Resources');
+  const direct = [...resources].filter(([, body]) =>
+    /Type: AWS::IAM::Role/.test(body) && /Action: dynamodb:GetItem\s*\n\s*Resource: !Ref TableArn/.test(body));
+  assert.deepEqual(direct.map(([n]) => n).sort(), ['ProxyExecutionRole', 'TranslateApiExecutionRole', 'WorkerExecutionRole']);
+  for (const [name, body] of direct) {
+    assert.match(body, /- kms:Decrypt[\s\S]*?Resource: !Ref KmsKeyArn[\s\S]*?kms:ViaService: !Sub 'dynamodb\./, `${name} thiếu kms:Decrypt`);
+  }
+});
