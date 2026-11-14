@@ -269,7 +269,7 @@ Resources:
           - StatusCode: '200'
             ResponseParameters:
               method.response.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
-              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PATCH,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,PATCH,DELETE,OPTIONS'"
               method.response.header.Access-Control-Allow-Origin: "'*'"
       MethodResponses:
         - StatusCode: '200'
@@ -652,7 +652,29 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/platform*'
 
-  ApiDeploymentV2:
+  # Lỗi do API Gateway tự trả (authorizer 401/403, throttle 429, 5XX) cũng cần header CORS,
+  # nếu không trình duyệt chỉ thấy "CORS error" thay vì mã lỗi để Console hiển thị đúng thông báo.
+  GatewayResponseDefault4xx:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: DEFAULT_4XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+
+  GatewayResponseDefault5xx:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      RestApiId: !Ref RestApi
+      ResponseType: DEFAULT_5XX
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+
+  # Đổi tên logical ID (V2 -> V3) mỗi khi method/gateway response thay đổi: CloudFormation chỉ tạo
+  # Deployment mới khi tài nguyên này bị thay, nếu giữ tên cũ thay đổi không lên stage.
+  ApiDeploymentV3:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - ConsoleMethod
@@ -677,6 +699,8 @@ Resources:
       - BatchSessionJobOptionsMethod
       - TranslateSessionRealtimeMethod
       - TranslateSessionRealtimeOptionsMethod
+      - GatewayResponseDefault4xx
+      - GatewayResponseDefault5xx
     Properties:
       RestApiId: !Ref RestApi
       Description: API deployment including Console realtime and batch job session routes.
@@ -685,7 +709,7 @@ Resources:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref RestApi
-      DeploymentId: !Ref ApiDeploymentV2
+      DeploymentId: !Ref ApiDeploymentV3
       StageName: !Ref StageName
 
   BasicUsagePlan:

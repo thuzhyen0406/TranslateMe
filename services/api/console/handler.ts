@@ -36,6 +36,7 @@ import {
 import { inviteMember, type InviteMemberDeps } from '../auth/inviteMember.js';
 import { contextFromIdTokenClaims } from '../auth/context.js';
 import { db, requireRole } from '../../../libs/common/db.js';
+import { withCors } from '../../../libs/common/cors.js';
 import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
 
 export type ConsoleEvent = ReviewApiGatewayEvent;
@@ -669,5 +670,8 @@ export function createConsoleHandler(
   };
 }
 
-/** Điểm vào Lambda: `services/api/console/handler.handler` (tham số ConsoleHandler trong infra/modules/lambdas.yaml). */
-export const handler = createConsoleHandler();
+/**
+ * Điểm vào Lambda: `services/api/console/handler.handler` (tham số ConsoleHandler trong infra/modules/lambdas.yaml).
+ * Bọc CORS vì Web Console gọi từ origin khác (CloudFront của console → execute-api).
+ */
+export const handler = withCors(createConsoleHandler());

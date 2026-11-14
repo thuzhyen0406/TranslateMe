@@ -31,6 +31,7 @@
     "prewarm/**/*.ts",
     "platform/**/*.ts",
     "../../libs/common/roles.ts",
+    "../../libs/common/cors.ts",
     "../../libs/common/types.ts",
     "../../libs/common/db.ts",
     "../../libs/common/api-key-transaction.ts",
