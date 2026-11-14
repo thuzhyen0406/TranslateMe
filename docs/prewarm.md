@@ -28,7 +28,7 @@ Console --GET /console/hosts/{slug}/prewarm hoặc GET /console/jobs/{jobId}--> 
 
 ## Hạ tầng (IaC)
 
-Đã khai báo trong `infra/modules/lambdas.yaml` (cfn-lint sạch). `services/proxy/test/prewarm.test.ts` kiểm tra `DefinitionString` nhúng trong template giống hệt `infra/statemachines/prewarm.asl.json`, handler trỏ tới hàm export có thật, và timeout Lambda nhỏ hơn `TimeoutSeconds` của bước tương ứng. Sửa ASL thì sửa cả hai nơi.
+Bốn Lambda khai báo trong `infra/modules/lambdas.yaml`, state machine trong `infra/modules/workflow.yaml` (stack `workflow`, C8); cfn-lint sạch. `services/proxy/test/prewarm.test.ts` kiểm tra `DefinitionString` nhúng trong template giống hệt `infra/statemachines/prewarm.asl.json`, handler trỏ tới hàm export có thật, và timeout Lambda nhỏ hơn `TimeoutSeconds` của bước tương ứng. Sửa ASL thì sửa cả hai nơi.
 
 Dữ liệu tenant (JOB, TM, SEG, usage) và S3 đều đi qua phiên STS theo tenant (`TenantDataAccessRole` + session policy `TENANT#<t>…`; `TenantPayloadAccessRole` + S3 `tenant/<t>/worker/*`). Bốn hàm dùng chung gói mã proxy (`ProxyCodeKey`) và role của worker C13 (`WorkerRoleArn`): `dynamodb:GetItem` trên `TENANT#PLATFORM#SLUG#*`, assume hai role tenant, `translate:TranslateText`. Role này đã nằm trong trust policy của `TenantDataAccessRole`.
 

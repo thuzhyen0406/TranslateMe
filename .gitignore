@@ -9,3 +9,6 @@ __pycache__/
 /node_modules
 nhiệm vụ theo tuần.md
 report 2.md
+
+# Gói Lambda, template đã package và cấu hình sinh bởi e2e/demo/deploy.ts
+.build/

@@ -232,163 +232,10 @@ Resources:
           TENANT_BATCH_UPLOAD_BUCKET_ARN: !Ref BatchUploadBucketArn
           TENANT_BATCH_UPLOAD_KMS_KEY_ARN: !Ref BatchUploadKmsKeyArn
 
-  BatchStateMachineRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub 'translateme-${StageName}-batch-sfn'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: states.amazonaws.com }
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: invoke-batch-workflow
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: lambda:InvokeFunction
-                Resource: !GetAtt BatchWorkflowFunction.Arn
-              - Effect: Allow
-                Action: sns:CreateTopic
-                Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:translateme-batch-${StageName}-*'
-              - Effect: Allow
-                Action: sns:Subscribe
-                Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:translateme-batch-${StageName}-*'
-                Condition:
-                  StringEquals:
-                    sns:Protocol: email
-              - Effect: Allow
-                Action: sns:Publish
-                Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:translateme-batch-${StageName}-*'
-
-  BatchStateMachine:
-    Type: AWS::StepFunctions::StateMachine
-    Properties:
-      StateMachineName: !Sub 'translateme-${StageName}-batch'
-      StateMachineType: STANDARD
-      RoleArn: !GetAtt BatchStateMachineRole.Arn
-      DefinitionString: !Sub
-        - |-
-          {
-            "Comment": "TranslateMe F10 batch: parse, translate bounded lots and assemble results.",
-            "StartAt": "ParseAndChunk",
-            "States": {
-              "ParseAndChunk": {
-                "Type": "Task", "Resource": "${BatchWorkflowArn}", "TimeoutSeconds": 300,
-                "Parameters": { "mode": "PARSE_AND_CHUNK", "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id" },
-                "Retry": [{ "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 3 }],
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
-                "Next": "TranslateLots"
-              },
-              "TranslateLots": {
-                "Type": "Map", "ItemsPath": "$.lot_keys", "MaxConcurrency": 5,
-                "ItemSelector": { "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id", "target_langs.$": "$.target_langs", "lot_key.$": "$$.Map.Item.Value" },
-                "ItemProcessor": {
-                  "ProcessorConfig": { "Mode": "INLINE" }, "StartAt": "TranslateLanguages",
-                  "States": {
-                    "TranslateLanguages": {
-                      "Type": "Map", "ItemsPath": "$.target_langs", "MaxConcurrency": 1,
-                      "ItemSelector": { "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id", "lot_key.$": "$.lot_key", "target_lang.$": "$$.Map.Item.Value" },
-                      "ItemProcessor": {
-                        "ProcessorConfig": { "Mode": "INLINE" }, "StartAt": "TranslateLot",
-                        "States": {
-                          "TranslateLot": {
-                            "Type": "Task", "Resource": "${BatchWorkflowArn}", "TimeoutSeconds": 300,
-                            "Parameters": { "mode": "TRANSLATE_LOT", "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id", "lot_key.$": "$.lot_key", "target_lang.$": "$.target_lang", "attempt.$": "$$.State.RetryCount" },
-                            "Retry": [{ "ErrorEquals": ["ThrottlingException", "TooManyRequestsException", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "BatchTranslationIncomplete"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 3 }],
-                            "End": true
-                          }
-                        }
-                      },
-                      "ResultPath": null,
-                      "End": true
-                    }
-                  }
-                },
-                "ResultPath": null,
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
-                "Next": "MergeAndWrite"
-              },
-              "MergeAndWrite": {
-                "Type": "Task", "Resource": "${BatchWorkflowArn}", "TimeoutSeconds": 300,
-                "Parameters": { "mode": "MERGE_AND_WRITE", "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id" },
-                "Retry": [{ "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 3 }],
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
-                "Next": "NotifyResult"
-              },
-              "MarkFailed": {
-                "Type": "Task", "Resource": "${BatchWorkflowArn}", "TimeoutSeconds": 60,
-                "Parameters": { "mode": "MARK_FAILED", "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id", "error.$": "$.error" },
-                "Retry": [{ "ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 3 }],
-                "Next": "NotifyResult"
-              },
-              "NotifyResult": {
-                "Type": "Choice",
-                "Choices": [{ "Variable": "$.send_email", "BooleanEquals": true, "Next": "CreateTenantResultTopic" }],
-                "Default": "FinishWorkflow"
-              },
-              "CreateTenantResultTopic": {
-                "Type": "Task", "Resource": "arn:${AWS::Partition}:states:::aws-sdk:sns:createTopic",
-                "Parameters": { "Name.$": "States.Format('translateme-batch-${StageName}-{}', $.tenant_id)" },
-                "ResultPath": "$.sns_topic", "Next": "SubscribeTenantEmail",
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "RecordNotificationFailure" }]
-              },
-              "SubscribeTenantEmail": {
-                "Type": "Task", "Resource": "arn:${AWS::Partition}:states:::aws-sdk:sns:subscribe",
-                "Parameters": { "TopicArn.$": "$.sns_topic.TopicArn", "Protocol": "email", "Endpoint.$": "$.notification_email", "ReturnSubscriptionArn": true },
-                "ResultPath": "$.sns_subscription", "Next": "PublishResultEmail",
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "RecordNotificationFailure" }]
-              },
-              "PublishResultEmail": {
-                "Type": "Task", "Resource": "arn:${AWS::Partition}:states:::aws-sdk:sns:publish",
-                "Parameters": {
-                  "TopicArn.$": "$.sns_topic.TopicArn",
-                  "Subject.$": "States.Format('TranslateMe batch {}', $.status)",
-                  "Message.$": "States.JsonToString($)",
-                  "MessageAttributes": { "tenant_id": { "DataType": "String", "StringValue.$": "$.tenant_id" } }
-                },
-                "ResultPath": null, "Next": "RecordNotificationSuccess",
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.notification_error", "Next": "RecordNotificationFailure" }]
-              },
-              "RecordNotificationFailure": {
-                "Type": "Task", "Resource": "${BatchWorkflowArn}",
-                "Parameters": {
-                  "mode": "SET_NOTIFICATION_STATUS",
-                  "job_id.$": "$.job_id",
-                  "tenant_id.$": "$.tenant_id",
-                  "notification_status": "FAILED",
-                  "notification_error.$": "$.notification_error"
-                },
-                "Next": "FinishWorkflow"
-              },
-              "RecordNotificationSuccess": {
-                "Type": "Task", "Resource": "${BatchWorkflowArn}",
-                "Parameters": {
-                  "mode": "SET_NOTIFICATION_STATUS",
-                  "job_id.$": "$.job_id",
-                  "tenant_id.$": "$.tenant_id",
-                  "notification_status": "SUBMITTED"
-                },
-                "Next": "FinishWorkflow"
-              },
-              "FinishWorkflow": {
-                "Type": "Choice",
-                "Choices": [{ "Variable": "$.status", "StringEquals": "FAILED", "Next": "Failed" }],
-                "Default": "Succeeded"
-              },
-              "Succeeded": { "Type": "Succeed" },
-              "Failed": { "Type": "Fail", "Error": "BatchFailed", "Cause": "Xem lý do trong bản ghi JOB" }
-            }
-          }
-        - BatchWorkflowArn: !GetAtt BatchWorkflowFunction.Arn
-
   # ---------------------------------------------------------------------------
   # F6 – Dịch trước (PREWARM, Task 4.5). Bốn bước chạy cùng gói mã proxy (prewarm.ts dùng lõi F2) với vai trò
   # của worker C13: tra website qua TENANT#PLATFORM#SLUG#, assume TenantDataAccessRole / TenantPayloadAccessRole,
-  # gọi Translate. Định nghĩa state machine giống hệt infra/statemachines/prewarm.asl.json
-  # (services/proxy/test/prewarm.test.ts kiểm tra hai bản khớp nhau).
+  # gọi Translate. State machine PREWARM (và BATCH) nằm ở modules/workflow.yaml (stack workflow, C8).
   # ---------------------------------------------------------------------------
   ReadSitemapFunction:
     Type: AWS::Lambda::Function
@@ -479,137 +326,6 @@ Resources:
           TENANT_PAYLOAD_ROLE_ARN: !Ref TenantPayloadRoleArn
           DATA_KMS_KEY_ARN: !Ref KmsKeyArn
 
-  PrewarmStateMachineRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub 'translateme-${StageName}-prewarm-sfn'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: states.amazonaws.com }
-            Action: sts:AssumeRole
-            Condition:
-              StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
-      Policies:
-        - PolicyName: invoke-prewarm-steps
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: lambda:InvokeFunction
-                Resource:
-                  - !GetAtt ReadSitemapFunction.Arn
-                  - !GetAtt PrewarmPagesFunction.Arn
-                  - !GetAtt FinishPrewarmFunction.Arn
-                  - !GetAtt MarkPrewarmFailedFunction.Arn
-
-  PrewarmStateMachine:
-    Type: AWS::StepFunctions::StateMachine
-    Properties:
-      # Tên cố định: ConsoleFunction dựng PREWARM_STATE_MACHINE_ARN và iam.yaml cấp states:StartExecution theo tên này.
-      StateMachineName: !Sub 'translateme-${StageName}-prewarm'
-      StateMachineType: STANDARD
-      RoleArn: !GetAtt PrewarmStateMachineRole.Arn
-      DefinitionSubstitutions:
-        ReadSitemapFunctionArn: !GetAtt ReadSitemapFunction.Arn
-        PrewarmPagesFunctionArn: !GetAtt PrewarmPagesFunction.Arn
-        FinishPrewarmFunctionArn: !GetAtt FinishPrewarmFunction.Arn
-        MarkPrewarmFailedFunctionArn: !GetAtt MarkPrewarmFailedFunction.Arn
-      DefinitionString: |-
-        {
-          "Comment": "TranslateMe PREWARM (F6, Task 4.5): đọc sitemap, Map thường qua các lô URL, worker C13 chế độ trang. Đầu vào M2: {job_id, tenant_id, slug, target_langs}. DefinitionSubstitutions: ReadSitemapFunctionArn, PrewarmPagesFunctionArn, FinishPrewarmFunctionArn, MarkPrewarmFailedFunctionArn.",
-          "StartAt": "ReadSitemap",
-          "States": {
-            "ReadSitemap": {
-              "Type": "Task",
-              "Resource": "${ReadSitemapFunctionArn}",
-              "TimeoutSeconds": 120,
-              "Retry": [
-                {
-                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
-                  "IntervalSeconds": 2,
-                  "MaxAttempts": 3,
-                  "BackoffRate": 2
-                }
-              ],
-              "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
-              "Next": "PrewarmLots"
-            },
-            "PrewarmLots": {
-              "Type": "Map",
-              "ItemsPath": "$.lots",
-              "MaxConcurrency": 2,
-              "ItemSelector": {
-                "mode": "PREWARM_PAGES",
-                "job_id.$": "$.job_id",
-                "tenant_id.$": "$.tenant_id",
-                "slug.$": "$.slug",
-                "target_langs.$": "$.target_langs",
-                "urls_key.$": "$$.Map.Item.Value"
-              },
-              "ItemProcessor": {
-                "ProcessorConfig": { "Mode": "INLINE" },
-                "StartAt": "PrewarmPages",
-                "States": {
-                  "PrewarmPages": {
-                    "Type": "Task",
-                    "Resource": "${PrewarmPagesFunctionArn}",
-                    "TimeoutSeconds": 300,
-                    "Retry": [
-                      {
-                        "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
-                        "IntervalSeconds": 5,
-                        "MaxAttempts": 3,
-                        "BackoffRate": 2
-                      }
-                    ],
-                    "End": true
-                  }
-                }
-              },
-              "ResultPath": "$.results",
-              "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
-              "Next": "FinishPrewarm"
-            },
-            "FinishPrewarm": {
-              "Type": "Task",
-              "Resource": "${FinishPrewarmFunctionArn}",
-              "TimeoutSeconds": 60,
-              "Retry": [
-                {
-                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
-                  "IntervalSeconds": 2,
-                  "MaxAttempts": 3,
-                  "BackoffRate": 2
-                }
-              ],
-              "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
-              "End": true
-            },
-            "MarkFailed": {
-              "Type": "Task",
-              "Resource": "${MarkPrewarmFailedFunctionArn}",
-              "TimeoutSeconds": 60,
-              "Retry": [
-                {
-                  "ErrorEquals": ["States.ALL"],
-                  "IntervalSeconds": 2,
-                  "MaxAttempts": 3,
-                  "BackoffRate": 2
-                }
-              ],
-              "Next": "Failed"
-            },
-            "Failed": {
-              "Type": "Fail",
-              "Error": "PrewarmFailed",
-              "Cause": "Xem lý do trong bản ghi JOB"
-            }
-          }
-        }
-
   PlatformFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -662,10 +378,14 @@ Outputs:
     Value: !GetAtt TranslateFunction.Arn
   BatchWorkflowFunctionArn:
     Value: !GetAtt BatchWorkflowFunction.Arn
-  BatchStateMachineArn:
-    Value: !Ref BatchStateMachine
-  PrewarmStateMachineArn:
-    Value: !Ref PrewarmStateMachine
+  ReadSitemapFunctionArn:
+    Value: !GetAtt ReadSitemapFunction.Arn
+  PrewarmPagesFunctionArn:
+    Value: !GetAtt PrewarmPagesFunction.Arn
+  FinishPrewarmFunctionArn:
+    Value: !GetAtt FinishPrewarmFunction.Arn
+  MarkPrewarmFailedFunctionArn:
+    Value: !GetAtt MarkPrewarmFailedFunction.Arn
   PlatformFunctionArn:
     Value: !GetAtt PlatformFunction.Arn
   PostConfirmationFunctionArn:

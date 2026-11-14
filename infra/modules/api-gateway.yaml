@@ -60,12 +60,19 @@ Parameters:
     Default: 50000
     MinValue: 1
     Description: Example monthly request quota; adjust to TV1's real quota.
+  ApiName:
+    Type: String
+    Default: ''
+    Description: Tên REST API (dimension ApiName của alarm CloudWatch). Để trống thì dùng <tên stack>-api.
+
+Conditions:
+  HasApiName: !Not [!Equals [!Ref ApiName, '']]
 
 Resources:
   RestApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
-      Name: !Sub '${AWS::StackName}-api'
+      Name: !If [HasApiName, !Ref ApiName, !Sub '${AWS::StackName}-api']
       Description: TranslateMe REST API for console and translation endpoints.
       EndpointConfiguration:
         Types:

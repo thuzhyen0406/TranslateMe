@@ -17,6 +17,11 @@ Parameters:
     Type: String
     Default: ''
     Description: Optional globally unique name for the asynchronous worker payload bucket.
+  KeyAliasName:
+    Type: String
+    Default: alias/translateme-data
+    AllowedPattern: 'alias/[A-Za-z0-9/_-]+'
+    Description: Alias của khóa KMS; stack data đặt alias/translateme-<stage>-data để dev và demo cùng account không trùng.
 
 Conditions:
   HasPayloadBucketName: !Not [!Equals [!Ref PayloadBucketName, '']]
@@ -52,7 +57,7 @@ Resources:
   DataKeyAlias:
     Type: AWS::KMS::Alias
     Properties:
-      AliasName: alias/translateme-data
+      AliasName: !Ref KeyAliasName
       TargetKeyId: !Ref DataKey
 
   WorkerPayloadBucket:

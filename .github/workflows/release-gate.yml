@@ -25,7 +25,7 @@ jobs:
       AWS_REGION: ${{ vars.TM_REGION }}
       TM_REGION: ${{ vars.TM_REGION }}
       TM_ACCOUNT: ${{ vars.TM_ACCOUNT }}
-      TM_DEPLOY_STACK_NAME: ${{ vars.TM_DEPLOY_STACK_NAME || 'translateme-dev-stack' }}
+      TM_DEPLOY_STACK_NAME: ${{ vars.TM_DEPLOY_STACK_NAME || 'translateme-dev-api' }}
       TM_RUN_ID: ${{ github.run_id }}
       TM_ALLOW_MUTATION: ${{ inputs.run_limits == true && '1' || '0' }}
       TM_EVIDENCE_REQUIRED_SCENARIOS: ${{ inputs.run_limits == true && '4,5,6' || '4,6' }}
