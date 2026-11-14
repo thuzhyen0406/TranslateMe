@@ -103,8 +103,11 @@ describe('markersToSpanHtml <-> spanHtmlToMarkers', () => {
 
   it('phần tử rỗng {n/} đi được hai chiều', () => {
     const html = markersToSpanHtml('Logo {1/} đây.');
-    assert.equal(html, 'Logo <span data-i="1" data-v></span> đây.');
+    assert.equal(html, 'Logo <span data-i="1" data-v translate="no">x</span> đây.');
     assert.equal(spanHtmlToMarkers(html).text, 'Logo {1/} đây.');
+    // Dạng cũ (span rỗng) vẫn đọc được; nội dung giữ chỗ không lọt vào bản dịch.
+    assert.equal(spanHtmlToMarkers('Logo <span data-i="1" data-v></span> here.').text, 'Logo {1/} here.');
+    assert.equal(spanHtmlToMarkers('Logo <span translate="no" data-v data-i="1">x</span> here.').text, 'Logo {1/} here.');
   });
 
   it('chịu được đầu ra kiểu Translate: đảo thứ tự, nháy đơn, thuộc tính thừa, entity, khoảng trắng', () => {

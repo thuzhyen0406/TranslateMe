@@ -9,7 +9,10 @@
  *
  * Khi gửi Amazon Translate (ContentType = text/html) chuỗi được đổi sang:
  *  - `{n}…{/n}` -> `<span data-i="n">…</span>`
- *  - `{n/}`     -> `<span data-i="n" data-v></span>`   (CHƯA kiểm chứng trên AWS thật)
+ *  - `{n/}`     -> `<span data-i="n" data-v translate="no">x</span>`
+ *    Span rỗng `<span data-v></span>` bị Amazon Translate thật bỏ mất (deploy dev 14/11: `<span translate="no">`
+ *    giữa câu biến mất khỏi trang). Span có nội dung + translate="no" được Translate giữ nguyên; nội dung
+ *    giữ chỗ "x" bị bỏ khi đổi ngược.
  * và đổi ngược lại bằng spanHtmlToMarkers() sau khi dịch.
  *
  * Nguyên tắc (theo docs/Quy ước trước khi code.md, mục 3.2):
@@ -265,7 +268,7 @@ export function markersToSpanHtml(text: string): string {
         case 'close':
           return '</span>';
         case 'void':
-          return `<span data-i="${t.id}" data-v></span>`;
+          return `<span data-i="${t.id}" data-v translate="no">x</span>`;
       }
     })
     .join('');
@@ -296,7 +299,8 @@ export function spanHtmlToMarkers(html: string): SpanParseResult {
   let last = 0;
 
   const pushText = (raw: string): void => {
-    if (raw) out += escapeMarkerText(decodeHtmlEntities(raw));
+    // Nội dung giữ chỗ bên trong span của {n/} không phải văn bản dịch.
+    if (raw && !stack.some((s) => s.isVoid)) out += escapeMarkerText(decodeHtmlEntities(raw));
   };
 
   TAG_RE.lastIndex = 0;

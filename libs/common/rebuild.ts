@@ -39,7 +39,7 @@ import {
   type Document,
 } from './htmlDom.js';
 import type { RebuildOptions, rebuild as ContractRebuild } from './interfaces.js';
-import { compareMarkers, escapeHtmlText, restoreInlineHtml, stripMarkers, validateMarkers } from './markers.js';
+import { compareMarkers, escapeHtmlText, restoreInlineHtml, stripMarkers, tokenizeMarkers, validateMarkers } from './markers.js';
 
 export type BaseMode = 'path' | 'host';
 export const DEFAULT_BASE_MODE: BaseMode = 'path';
@@ -266,14 +266,14 @@ function fillSlots(
     const i = Number(num);
     const p = pick(i);
     if (!p) return '';
-    if (!p.fromSource && !compareMarkers(p.src, p.text).restorable) {
-      stats.tagFallback++;
-      return escapeHtmlText(stripMarkers(p.text));
-    }
     const tags: Record<string, string> = {};
     for (const id of validateMarkers(p.src).ids) {
       const t = placeholders[tagKey(i, id)];
       if (t !== undefined) tags[id] = t;
+    }
+    if (!p.fromSource && !compareMarkers(p.src, p.text).restorable) {
+      stats.tagFallback++;
+      return plainKeepingAtomic(p.src, p.text, tags);
     }
     return restoreInlineHtml(p.text, tags).html;
   });
@@ -283,6 +283,39 @@ function fillSlots(
     const p = pick(Number(num));
     return p ? escapeAttr(stripMarkers(p.text)) : '';
   });
+}
+
+/**
+ * Bản dịch lệch marker: dùng văn bản thuần của bản dịch nhưng KHÔNG làm mất phần tử nguyên khối `{n/}` của câu gốc
+ * (ảnh, phần tử translate="no", <br>, <code>…): nội dung này không được dịch nên bỏ đi là mất dữ liệu trang.
+ * Marker `{n/}` còn trong bản dịch thì đặt đúng chỗ; marker bị Translate làm mất thì nối vào cuối câu, trước dấu
+ * kết câu, giữ khoảng trắng như câu gốc.
+ */
+function plainKeepingAtomic(src: string, translated: string, tags: Readonly<Record<string, string>>): string {
+  const voidIds = tokenizeMarkers(src).filter((t) => t.type === 'void').map((t) => t.id);
+  if (!voidIds.length) return escapeHtmlText(stripMarkers(translated));
+  const atomicHtml = (id: string) => restoreInlineHtml(`{${id}/}`, { [id]: tags[id] }).html;
+  const placed = new Set<string>();
+  let html = '';
+  for (const t of tokenizeMarkers(translated)) {
+    if (t.type === 'text') html += escapeHtmlText(t.value);
+    else if (t.type === 'void' && voidIds.includes(t.id) && !placed.has(t.id) && tags[t.id] !== undefined) {
+      html += atomicHtml(t.id);
+      placed.add(t.id);
+    }
+  }
+  for (const id of voidIds) {
+    if (placed.has(id) || tags[id] === undefined) continue;
+    const marker = `{${id}/}`;
+    const at = src.indexOf(marker);
+    const spaceBefore = at > 0 && /\s/.test(src[at - 1]);
+    const tail = /[.!?…。！？]+\s*$/.exec(html)?.[0] ?? '';
+    const head = html.slice(0, html.length - tail.length);
+    const sep = spaceBefore && head && !/\s$/.test(head) ? ' ' : '';
+    html = head + sep + atomicHtml(id) + tail;
+    placed.add(id);
+  }
+  return html;
 }
 
 function buildSwitcherHtml(

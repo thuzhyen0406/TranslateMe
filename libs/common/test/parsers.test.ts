@@ -134,6 +134,17 @@ describe('HTML – dùng lại extract của F2, bỏ việc riêng của websit
     assert.ok(html.includes('<p>مرحبا</p>'));
   });
 
+  it('bản dịch mất marker {n/} (Translate bỏ span) -> vẫn giữ phần tử translate="no" và ảnh của câu gốc', () => {
+    const doc = parse('HTML', enc('<h1>Chào mừng đến với <span translate="no">Phố Cổ Homestay</span></h1>'
+      + '<p>Ảnh <img src="/a.png" alt=""> và <a href="/x">liên kết</a> ở đây.</p>'));
+    // Đúng đầu ra Translate thật trên dev 14/11: "Welcome to" (mất marker); câu 2 mất cả {2}{/2} lẫn {1/}.
+    const { bytes, stats } = rebuildDetailed(doc.skeleton, ['Welcome to', 'Picture and link here.'], { targetLang: 'en' });
+    const html = dec(bytes);
+    assert.ok(html.includes('<h1>Welcome to <span translate="no">Phố Cổ Homestay</span></h1>'), html);
+    assert.ok(/<p>Picture and link here <img [^>]*src="[^"]*a\.png"[^>]*>\.<\/p>/.test(html), html);
+    assert.equal(stats.tagFallback, 2);
+  });
+
   it('bản dịch lệch ký hiệu {n} -> dùng văn bản thuần, báo tagFallback', () => {
     const doc = parse('HTML', enc('<p>Xem <a href="/x">bảng giá</a> nhé.</p>'));
     const { bytes, stats } = rebuildDetailed(doc.skeleton, ['See the price list.'], { targetLang: 'en' });
