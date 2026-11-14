@@ -110,3 +110,22 @@ test('YAML không có khóa Null chưa đặt trong ngoặc (YAML hiểu là nul
     assert.ok(!/^\s+Null:/m.test(read(join(infra, f))), f);
   }
 });
+
+test('API Gateway: mọi gateway response có CORS; response type trùng phải giống hệt nhau', () => {
+  const resources = section(read(join(infra, 'modules', 'api-gateway.yaml')), 'Resources');
+  const byType = new Map<string, string[]>();
+  for (const [name, body] of resources) {
+    if (!/Type: AWS::ApiGateway::GatewayResponse/.test(body)) continue;
+    // Lỗi do API Gateway tự trả (401/403/429/4XX/5XX) cũng phải đọc được từ Web Console khác origin.
+    assert.match(body, /gatewayresponse\.header\.Access-Control-Allow-Origin: "'\*'"/, `${name} thiếu CORS`);
+    const type = /ResponseType: (\S+)/.exec(body)?.[1] ?? '';
+    // So nội dung Properties, bỏ dòng chú thích và dòng trống (section() gom cả chú thích của tài nguyên kế tiếp).
+    const props = body.slice(body.indexOf('Properties:')).split('\n')
+      .filter((l) => l.trim() && !l.trim().startsWith('#')).join('\n');
+    byType.set(type, [...(byType.get(type) ?? []), props]);
+  }
+  assert.ok(byType.has('UNAUTHORIZED') && byType.has('INVALID_API_KEY') && byType.has('DEFAULT_4XX'));
+  for (const [type, variants] of byType) {
+    assert.equal(new Set(variants).size, 1, `${type} khai báo nhiều lần với nội dung khác nhau`);
+  }
+});
