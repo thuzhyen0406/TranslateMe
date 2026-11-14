@@ -337,3 +337,63 @@ describe('state machine PREWARM (ASL)', () => {
     assert.equal(await store.get(key), '["a/"]');
   });
 });
+
+describe('IaC PREWARM trong infra/modules/lambdas.yaml (F6)', () => {
+  const read = (rel: string) => readFileSync(fileURLToPath(new URL(`../../../../../../${rel}`, import.meta.url)), 'utf8');
+  const template = read('infra/modules/lambdas.yaml');
+  const lines = template.split('\n');
+
+  /** Khối tài nguyên `  <name>:` tới tài nguyên kế tiếp (cùng thụt lề 2). */
+  const resource = (name: string): string[] => {
+    const start = lines.indexOf(`  ${name}:`);
+    assert.ok(start >= 0, `thiếu tài nguyên ${name}`);
+    const end = lines.findIndex((l, i) => i > start && /^ {2}[A-Za-z]\w*:$|^\S/.test(l));
+    return lines.slice(start, end < 0 ? undefined : end);
+  };
+  const prop = (block: string[], key: string) => block.map((l) => new RegExp(`^ {6}${key}: (.+)$`).exec(l)?.[1]).find(Boolean);
+
+  it('DefinitionString của PrewarmStateMachine giống hệt prewarm.asl.json, đủ 4 DefinitionSubstitutions', () => {
+    const block = resource('PrewarmStateMachine');
+    const at = block.indexOf('      DefinitionString: |-');
+    assert.ok(at >= 0);
+    const body = block.slice(at + 1).filter((l) => l.startsWith('        ') || l === '').map((l) => l.slice(8)).join('\n');
+    assert.deepEqual(JSON.parse(body), JSON.parse(read('infra/statemachines/prewarm.asl.json')));
+    for (const key of ['ReadSitemapFunctionArn', 'PrewarmPagesFunctionArn', 'FinishPrewarmFunctionArn', 'MarkPrewarmFailedFunctionArn']) {
+      assert.ok(block.some((l) => l.startsWith(`        ${key}: !GetAtt `)), key);
+    }
+    assert.equal(prop(block, 'StateMachineName'), "!Sub 'translateme-${StageName}-prewarm'", 'khớp PREWARM_STATE_MACHINE_ARN của Console');
+  });
+
+  it('bốn Lambda trỏ tới hàm export có thật trong prewarm.ts; timeout Lambda < TimeoutSeconds của bước ASL', async () => {
+    const mod = await import('../prewarm.js');
+    const asl = JSON.parse(read('infra/statemachines/prewarm.asl.json'));
+    const aslTimeout: Record<string, number> = {
+      ReadSitemapFunction: asl.States.ReadSitemap.TimeoutSeconds,
+      PrewarmPagesFunction: asl.States.PrewarmLots.ItemProcessor.States.PrewarmPages.TimeoutSeconds,
+      FinishPrewarmFunction: asl.States.FinishPrewarm.TimeoutSeconds,
+      MarkPrewarmFailedFunction: asl.States.MarkFailed.TimeoutSeconds,
+    };
+    for (const [name, stepTimeout] of Object.entries(aslTimeout)) {
+      const block = resource(name);
+      const handler = prop(block, 'Handler')!;
+      assert.match(handler, /^services\/proxy\/prewarm\.\w+$/, name);
+      assert.equal(typeof (mod as Record<string, unknown>)[handler.split('.')[1]], 'function', handler);
+      const timeout = Number(prop(block, 'Timeout'));
+      assert.ok(timeout > 0 && timeout < stepTimeout, `${name}: Lambda ${timeout}s phải < ASL ${stepTimeout}s`);
+      assert.ok(block.some((l) => l.trim() === 'TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn'), `${name} cần TENANT_DATA_ACCESS_ROLE_ARN`);
+    }
+    // PrewarmPages: ngân sách 240 s của lô phải nằm trong timeout Lambda
+    assert.ok(Number(prop(resource('PrewarmPagesFunction'), 'Timeout')) * 1000 > mod.PREWARM_WORKER_BUDGET_MS);
+  });
+
+  it('QC-10: Lambda proxy dừng trước 30 s của CloudFront và dài hơn ngân sách dịch; có STATE_CACHE_S ≤ 60', () => {
+    const block = resource('ProxyFunction');
+    const timeout = Number(prop(block, 'Timeout'));
+    assert.ok(timeout <= 25, `proxy Timeout ${timeout}s`);
+    assert.ok(timeout * 1000 > 20_000);
+    assert.ok(block.some((l) => l.trim() === 'STATE_CACHE_S: !Ref StateCacheSeconds'));
+    assert.ok(block.some((l) => l.trim() === 'PUBLIC_BASE_URL: !Ref PublicBaseUrl'));
+    const param = resource('StateCacheSeconds');
+    assert.ok(param.some((l) => l.trim() === 'MaxValue: 60'));
+  });
+});
