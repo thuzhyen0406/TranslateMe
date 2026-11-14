@@ -338,17 +338,19 @@ describe('state machine PREWARM (ASL)', () => {
   });
 });
 
-describe('IaC PREWARM trong infra/modules/lambdas.yaml (F6)', () => {
+describe('IaC PREWARM: Lambda trong infra/modules/lambdas.yaml, state machine trong infra/modules/workflow.yaml (F6)', () => {
   const read = (rel: string) => readFileSync(fileURLToPath(new URL(`../../../../../../${rel}`, import.meta.url)), 'utf8');
-  const template = read('infra/modules/lambdas.yaml');
-  const lines = template.split('\n');
+  const templates = ['infra/modules/lambdas.yaml', 'infra/modules/workflow.yaml'].map((f) => read(f).split('\n'));
 
-  /** Khối tài nguyên `  <name>:` tới tài nguyên kế tiếp (cùng thụt lề 2). */
+  /** Khối tài nguyên `  <name>:` tới tài nguyên kế tiếp (cùng thụt lề 2), tìm trong cả hai template. */
   const resource = (name: string): string[] => {
-    const start = lines.indexOf(`  ${name}:`);
-    assert.ok(start >= 0, `thiếu tài nguyên ${name}`);
-    const end = lines.findIndex((l, i) => i > start && /^ {2}[A-Za-z]\w*:$|^\S/.test(l));
-    return lines.slice(start, end < 0 ? undefined : end);
+    for (const lines of templates) {
+      const start = lines.indexOf(`  ${name}:`);
+      if (start < 0) continue;
+      const end = lines.findIndex((l, i) => i > start && /^ {2}[A-Za-z]\w*:$|^\S/.test(l));
+      return lines.slice(start, end < 0 ? undefined : end);
+    }
+    assert.fail(`thiếu tài nguyên ${name}`);
   };
   const prop = (block: string[], key: string) => block.map((l) => new RegExp(`^ {6}${key}: (.+)$`).exec(l)?.[1]).find(Boolean);
 
@@ -359,7 +361,9 @@ describe('IaC PREWARM trong infra/modules/lambdas.yaml (F6)', () => {
     const body = block.slice(at + 1).filter((l) => l.startsWith('        ') || l === '').map((l) => l.slice(8)).join('\n');
     assert.deepEqual(JSON.parse(body), JSON.parse(read('infra/statemachines/prewarm.asl.json')));
     for (const key of ['ReadSitemapFunctionArn', 'PrewarmPagesFunctionArn', 'FinishPrewarmFunctionArn', 'MarkPrewarmFailedFunctionArn']) {
-      assert.ok(block.some((l) => l.startsWith(`        ${key}: !GetAtt `)), key);
+      assert.ok(block.some((l) => l === `        ${key}: !Ref ${key}`), key);
+      // stack workflow nhận ARN từ output của lambdas.yaml
+      assert.ok(templates[0].some((l) => l === `  ${key}:`), `lambdas.yaml thiếu output ${key}`);
     }
     assert.equal(prop(block, 'StateMachineName'), "!Sub 'translateme-${StageName}-prewarm'", 'khớp PREWARM_STATE_MACHINE_ARN của Console');
   });
