@@ -1,5 +1,6 @@
 import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
 import { db } from '../../../libs/common/db.js';
+import { withCors } from '../../../libs/common/cors.js';
 import { contextFromIdTokenClaims } from '../auth/context.js';
 import { createSite, pauseSite, resumeSite, verifySite, updateSite } from './siteManager.js';
 
@@ -150,7 +151,8 @@ return async function handler(event: WebsiteEvent) {
 };
 }
 
-export const handler = createWebsiteHandler();
+// Bọc CORS: Web Console gọi /console/hosts* từ origin khác.
+export const handler = withCors(createWebsiteHandler());
 
 async function loadHost(
   ctx: Awaited<ReturnType<typeof contextFromIdTokenClaims>>,
