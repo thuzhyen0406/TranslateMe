@@ -181,11 +181,15 @@ export const AuthScreens: React.FC<AuthScreensProps> = ({
     if (resendCooldown > 0) return;
     setRawError(null);
     const targetEmail = email || (IS_DEMO_AUTH_MODE ? 'lan@homestay-abc.example' : '');
-    const res = await resendConfirmationCode(targetEmail);
-    setResendCooldown(res.expiresInSeconds);
-    setOtpDigits(['', '', '', '', '', '']);
-    const demoHint = IS_DEMO_AUTH_MODE ? ' (Mã demo: 481926)' : '';
-    setInfoMessage(`Đã gửi lại mã xác nhận mới tới ${targetEmail}${demoHint}.`);
+    try {
+      const res = await resendConfirmationCode(targetEmail);
+      setResendCooldown(res.expiresInSeconds);
+      setOtpDigits(['', '', '', '', '', '']);
+      const demoHint = IS_DEMO_AUTH_MODE ? ' (Mã demo: 481926)' : '';
+      setInfoMessage(`Đã gửi lại mã xác nhận mới tới ${targetEmail}${demoHint}.`);
+    } catch (err) {
+      applyError(err);
+    }
   };
 
   // Submit: Đăng nhập (`log-in.jpg`)

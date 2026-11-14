@@ -59,7 +59,7 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session, onTenantStatu
     setLoading(true);
     setLoadError(null);
     try {
-      const list = await listTenantMembers(session.tenantId);
+      const list = await listTenantMembers(session.tenantId, session.idToken);
       setMembers(list);
     } catch (err) {
       if (resolveConsoleError(err).code === 'TENANT_SUSPENDED') {
@@ -72,7 +72,7 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session, onTenantStatu
     } finally {
       setLoading(false);
     }
-  }, [session.tenantId, onTenantStatusDetected]);
+  }, [session.tenantId, session.idToken, onTenantStatusDetected]);
 
   useEffect(() => {
     void loadMembers();
@@ -98,8 +98,9 @@ export const MembersPage: React.FC<MembersPageProps> = ({ session, onTenantStatu
         inviteRole,
         session.organizationName,
         session.tenantId,
+        session.idToken,
       );
-      const updated = await listTenantMembers(session.tenantId);
+      const updated = await listTenantMembers(session.tenantId, session.idToken);
       setMembers(updated);
       setIsModalOpen(false);
       setInviteEmail('');

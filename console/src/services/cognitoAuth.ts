@@ -1,13 +1,14 @@
 /**
  * Dịch vụ Xác thực, Làm mới Token (B.13), Phân quyền Menu và Quản lý Thành viên cho Màn Q1.
  *
- * Phạm vi trong PR hiện tại:
- *  - Chỉ cài đặt **chế độ giả lập (Local Mock Mode)** tại trình duyệt (bật khi `VITE_AUTH_MODE=mock`, mặc định),
+ * Hai chế độ:
+ *  - `VITE_AUTH_MODE=cognito`: gọi Amazon Cognito thật (Mục 7, lớp HTTP ở `cognitoIdp.ts`) và REST API Console.
+ *  - **Chế độ giả lập (Local Mock Mode)** tại trình duyệt (bật khi `VITE_AUTH_MODE=mock`, mặc định),
  *    tái hiện đầy đủ các bước nghiệp vụ của Màn Q1:
  *    SignUp -> Mã xác nhận 6 chữ số -> Mô phỏng Trigger PostConfirmation tạo Tenant -> Làm mới JWT
  *    chứa `custom:tenant_id` & `custom:role` -> ForceChangePassword cho lời mời -> Mời thành viên theo từng Tenant.
  *
- * Phần việc còn lại của Hạng mục 2.9 sẽ thực hiện ở bước nối hệ thống thật:
+ * Chế độ Cognito thật (Mục 7):
  *  - Gọi trực tiếp Amazon Cognito IDP (`SignUp`, `ConfirmSignUp`, `InitiateAuth`, `RespondToAuthChallenge`,
  *    `ForgotPassword`, `ConfirmForgotPassword`) sử dụng `VITE_AWS_REGION`, `VITE_COGNITO_USER_POOL_ID`, `VITE_COGNITO_CLIENT_ID`.
  *  - Làm mới token thật (`REFRESH_TOKEN_AUTH`) ngay sau khi Lambda `PostConfirmation_ConfirmSignUp` tạo tenant.
@@ -24,6 +25,14 @@ import {
   sanitizeClientSafeMessage,
   type ResolveConsoleErrorOptions,
 } from './errorMapping.js';
+import {
+  callCognito,
+  CognitoIdpError,
+  type CognitoAuthenticationResult,
+  type CognitoIdpConfig,
+  type CognitoInitiateAuthResponse,
+  type CognitoOperation,
+} from './cognitoIdp.js';
 import type {
   AuthenticatedSession,
   ConfirmEmailInput,
@@ -699,6 +708,10 @@ export async function registerAccount(input: SignUpFormInput): Promise<{
     );
   }
 
+  if (!IS_DEMO_AUTH_MODE) {
+    return cognitoLive.registerAccount(fullName, email, input.password, orgName);
+  }
+
   if (simulatedUsers.has(email)) {
     throw new ConsoleAuthError(
       'UsernameExistsException',
@@ -743,6 +756,10 @@ export async function confirmEmailAndRefreshSession(
 
   if (!/^\d{6}$/.test(code)) {
     throw new ConsoleAuthError('CodeMismatchException', 'Vui lòng nhập đủ 6 chữ số của mã xác nhận.');
+  }
+
+  if (!IS_DEMO_AUTH_MODE) {
+    return cognitoLive.confirmEmail(email, code, input, opts);
   }
 
   if (code === '000000') {
@@ -829,6 +846,9 @@ export async function refreshTokenForTenantClaims(
   session: AuthenticatedSession,
   opts: FetchConsoleTenantProfileOptions = {},
 ): Promise<AuthenticatedSession> {
+  if (!IS_DEMO_AUTH_MODE) {
+    return cognitoLive.refreshSession(session, opts);
+  }
   const claims = decodeJwtClaims(session.idToken);
   const tenantId = claims?.['custom:tenant_id'] || session.tenantId || DEFAULT_DEMO_TENANT_ID;
   const claimRole = normalizeRole(claims?.['custom:role']);
@@ -866,6 +886,9 @@ export async function refreshTokenForTenantClaims(
  */
 export async function resendConfirmationCode(email: string): Promise<{ expiresInSeconds: number }> {
   const normalized = email.trim().toLowerCase();
+  if (!IS_DEMO_AUTH_MODE) {
+    return cognitoLive.resendConfirmationCode(normalized);
+  }
   const user = simulatedUsers.get(normalized);
   if (user) {
     user.confirmationCode = '481926';
@@ -885,6 +908,10 @@ export async function requestPasswordResetCode(emailInput: string): Promise<{
   const email = emailInput.trim().toLowerCase();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new ConsoleAuthError('ValidationError', 'Vui lòng nhập địa chỉ email công việc hợp lệ.');
+  }
+
+  if (!IS_DEMO_AUTH_MODE) {
+    return cognitoLive.requestPasswordReset(email);
   }
 
   const demoResetCode = '481926';
@@ -914,7 +941,7 @@ export async function confirmForgotPasswordReset(
     throw new ConsoleAuthError('CodeMismatchException', 'Vui lòng nhập đủ 6 chữ số của mã khôi phục.');
   }
 
-  if (code === '000000') {
+  if (IS_DEMO_AUTH_MODE && code === '000000') {
     throw new ConsoleAuthError(
       'ExpiredCodeException',
       mapCognitoErrorToVietnamese({ code: 'ExpiredCodeException' }),
@@ -931,6 +958,10 @@ export async function confirmForgotPasswordReset(
 
   if (input.newPassword !== input.confirmNewPassword) {
     throw new ConsoleAuthError('ValidationError', 'Mật khẩu nhập lại không khớp với mật khẩu mới.');
+  }
+
+  if (!IS_DEMO_AUTH_MODE) {
+    return cognitoLive.confirmPasswordReset(email, code, input.newPassword);
   }
 
   const user = simulatedUsers.get(email);
@@ -966,6 +997,10 @@ export async function signInWithEmail(
 
   if (!email || !password) {
     throw new ConsoleAuthError('ValidationError', 'Vui lòng nhập đầy đủ email và mật khẩu.');
+  }
+
+  if (!IS_DEMO_AUTH_MODE) {
+    return cognitoLive.signIn(email, password, opts);
   }
 
   const user = simulatedUsers.get(email);
@@ -1048,6 +1083,10 @@ export async function completeInvitedMemberPassword(
     throw new ConsoleAuthError('ValidationError', 'Mật khẩu nhập lại không khớp với mật khẩu mới.');
   }
 
+  if (!IS_DEMO_AUTH_MODE) {
+    return cognitoLive.completeInvitedPassword(email, input, opts);
+  }
+
   let user = simulatedUsers.get(email);
   if (!user) {
     if (!IS_DEMO_AUTH_MODE) {
@@ -1102,7 +1141,11 @@ export async function completeInvitedMemberPassword(
  */
 export async function listTenantMembers(
   tenantId: string = DEFAULT_DEMO_TENANT_ID,
+  idToken?: string,
 ): Promise<TenantMember[]> {
+  if (!IS_DEMO_AUTH_MODE) {
+    return cognitoLive.listTenantMembers(tenantId, idToken);
+  }
   return simulatedMembers
     .filter((m) => m.tenantId === tenantId)
     .map((m) => ({ ...m }));
@@ -1118,6 +1161,7 @@ export async function inviteTenantMember(
   invitedRole: string,
   organizationName = 'Homestay ABC Hội An',
   tenantId: string = DEFAULT_DEMO_TENANT_ID,
+  idToken?: string,
 ): Promise<{ member: TenantMember; temporaryPassword: string }> {
   if (actorRole !== 'TENANT_ADMIN') {
     throw new ConsoleAuthError('PERMISSION_DENIED', 'Chỉ Tenant Admin mới có quyền mời thành viên.');
@@ -1139,6 +1183,10 @@ export async function inviteTenantMember(
       'ValidationError',
       'Chỉ được phép mời thành viên với vai trò Developer hoặc Reviewer.',
     );
+  }
+
+  if (!IS_DEMO_AUTH_MODE) {
+    return cognitoLive.inviteTenantMember(email, invitedRole, tenantId, idToken);
   }
 
   if (
@@ -1185,3 +1233,440 @@ export async function inviteTenantMember(
     temporaryPassword,
   };
 }
+
+// ============================================================================
+// 7. Chế độ kết nối Amazon Cognito thật (`VITE_AUTH_MODE=cognito`)
+//    Các hàm nghiệp vụ ở Mục 5–6 chuyển sang nhánh này khi `IS_DEMO_AUTH_MODE = false`.
+//    Đăng nhập bằng USER_PASSWORD_AUTH (app client công khai); tenant_id và role chỉ đọc từ ID token
+//    do Cognito ký (PostConfirmation / AdminCreateUser gán), không bao giờ lấy từ dữ liệu client gửi (QC-3).
+// ============================================================================
+
+/** Tùy chọn cho chế độ Cognito thật; mặc định đọc `VITE_AWS_REGION`, `VITE_COGNITO_CLIENT_ID`, `VITE_API_BASE_URL`. */
+export interface CognitoLiveOptions extends FetchConsoleTenantProfileOptions {
+  region?: string;
+  clientId?: string;
+  cognitoEndpoint?: string;
+}
+
+const liveViteEnv: Record<string, string | undefined> =
+  (typeof import.meta !== 'undefined'
+    ? (import.meta as unknown as { env?: Record<string, string | undefined> }).env
+    : undefined) ?? {};
+
+function liveEnv(name: string): string {
+  const fromNode = typeof process !== 'undefined' ? process.env?.[name] : undefined;
+  return (liveViteEnv[name] ?? fromNode ?? '').trim();
+}
+
+function liveIdpConfig(opts: CognitoLiveOptions = {}): CognitoIdpConfig {
+  return {
+    region: opts.region ?? liveEnv('VITE_AWS_REGION'),
+    clientId: opts.clientId ?? liveEnv('VITE_COGNITO_CLIENT_ID'),
+    endpoint: opts.cognitoEndpoint,
+    fetchFn: opts.fetchFn,
+  };
+}
+
+/** Thông báo riêng cho các lỗi Cognito mà bảng ánh xạ chung chưa có. */
+function liveCognitoMessage(err: CognitoIdpError): string | null {
+  const msg = err.message ?? '';
+  switch (err.code) {
+    case 'CONFIG_ERROR':
+      return 'Web Console chưa được cấu hình Amazon Cognito (thiếu Region hoặc App client). Vui lòng liên hệ quản trị viên.';
+    case 'UserLambdaValidationException':
+    case 'UnexpectedLambdaException':
+    case 'InvalidLambdaResponseException':
+      return 'Không khởi tạo được tổ chức cho tài khoản này. Vui lòng thử lại sau ít phút hoặc liên hệ quản trị viên.';
+    case 'CodeDeliveryFailureException':
+      return 'Không gửi được mã xác nhận tới email. Vui lòng kiểm tra lại địa chỉ email hoặc thử lại sau.';
+    case 'PasswordResetRequiredException':
+      return 'Tài khoản cần đặt lại mật khẩu. Vui lòng dùng chức năng Quên mật khẩu.';
+    case 'InvalidParameterException':
+      if (/verified email|registered\/verified/i.test(msg)) {
+        return 'Tài khoản chưa có email đã xác minh nên không thể đặt lại mật khẩu.';
+      }
+      return 'Thông tin gửi lên chưa hợp lệ. Vui lòng kiểm tra lại email và mật khẩu.';
+    case 'NotAuthorizedException':
+      if (/temporary password has expired/i.test(msg)) {
+        return 'Mật khẩu tạm thời đã hết hạn. Vui lòng nhờ Tenant Admin mời lại.';
+      }
+      if (/refresh token/i.test(msg)) {
+        return 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.';
+      }
+      return null;
+    default:
+      return null;
+  }
+}
+
+function toConsoleAuthError(err: unknown): ConsoleAuthError {
+  if (err instanceof ConsoleAuthError) return err;
+  if (err instanceof CognitoIdpError) {
+    const message = liveCognitoMessage(err) ?? mapCognitoErrorToVietnamese(err);
+    return new ConsoleAuthError(err.code, message, undefined, err.httpStatus);
+  }
+  return new ConsoleAuthError('INTERNAL_ERROR', mapCognitoErrorToVietnamese(err));
+}
+
+async function liveIdp<T>(
+  operation: CognitoOperation,
+  body: Record<string, unknown>,
+  opts: CognitoLiveOptions = {},
+  tolerate?: (err: CognitoIdpError) => boolean,
+): Promise<T | undefined> {
+  try {
+    return await callCognito<T>(operation, body, liveIdpConfig(opts));
+  } catch (err) {
+    if (tolerate && err instanceof CognitoIdpError && tolerate(err)) return undefined;
+    throw toConsoleAuthError(err);
+  }
+}
+
+function parseJsonValue(raw: string | undefined): unknown {
+  if (!raw) return undefined;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Dựng phiên Console từ bộ token Cognito rồi nạp trạng thái tenant qua `GET /console/me`. */
+async function liveSessionFromTokens(
+  result: CognitoAuthenticationResult | undefined,
+  opts: CognitoLiveOptions,
+  previous?: Partial<AuthenticatedSession>,
+): Promise<AuthenticatedSession> {
+  const idToken = result?.IdToken ?? '';
+  const claims = idToken ? (decodeJwtClaims(idToken) as (DecodedJwtClaims & Record<string, unknown>) | null) : null;
+  if (!claims) {
+    throw new ConsoleAuthError('INVALID_AUTH_RESPONSE', 'Phản hồi đăng nhập từ Amazon Cognito không hợp lệ. Vui lòng thử lại.');
+  }
+  const tenantId = String(claims['custom:tenant_id'] ?? '').trim();
+  const role = normalizeRole(claims['custom:role']);
+  if (!tenantId || !role) {
+    throw new ConsoleAuthError(
+      'TENANT_NOT_LINKED',
+      'Tài khoản chưa được gắn với tổ chức nào. Nếu bạn vừa xác nhận email, vui lòng đợi vài giây rồi đăng nhập lại.',
+    );
+  }
+  const email = String(claims.email ?? previous?.email ?? '');
+  const orgClaim = claims['custom:organization_name'];
+  const session: AuthenticatedSession = {
+    email,
+    fullName: String(claims.name ?? previous?.fullName ?? (email.split('@')[0] || email)),
+    sub: String(claims.sub ?? previous?.sub ?? ''),
+    tenantId,
+    organizationName: typeof orgClaim === 'string' && orgClaim ? orgClaim : previous?.organizationName ?? '',
+    plan: previous?.plan ?? 'FREE',
+    role,
+    idToken,
+    accessToken: result?.AccessToken ?? '',
+    // REFRESH_TOKEN_AUTH không trả refresh token mới: giữ token cũ.
+    refreshToken: result?.RefreshToken ?? previous?.refreshToken ?? '',
+    tokenRefreshedAt: new Date().toISOString(),
+    tenantStatus: 'UNKNOWN',
+  };
+  return hydrateSessionTenantStatus(session, { ...opts, demoMode: false });
+}
+
+function livePasswordAuth(email: string, password: string, opts: CognitoLiveOptions) {
+  return callCognito<CognitoInitiateAuthResponse>(
+    'InitiateAuth',
+    { AuthFlow: 'USER_PASSWORD_AUTH', AuthParameters: { USERNAME: email, PASSWORD: password } },
+    liveIdpConfig(opts),
+  );
+}
+
+async function liveRegisterAccount(
+  fullName: string,
+  email: string,
+  password: string,
+  organizationName: string,
+  opts: CognitoLiveOptions = {},
+): Promise<{ email: string; organizationName: string; demoConfirmationCode: string }> {
+  await liveIdp('SignUp', {
+    Username: email,
+    Password: password,
+    UserAttributes: [
+      { Name: 'email', Value: email },
+      { Name: 'name', Value: fullName },
+      { Name: 'custom:organization_name', Value: organizationName },
+    ],
+  }, opts);
+  return { email, organizationName, demoConfirmationCode: '' };
+}
+
+async function liveConfirmEmail(
+  email: string,
+  code: string,
+  input: ConfirmEmailInput,
+  opts: CognitoLiveOptions = {},
+): Promise<AuthenticatedSession> {
+  const organizationName = input.organizationName?.trim();
+  await liveIdp(
+    'ConfirmSignUp',
+    {
+      Username: email,
+      ConfirmationCode: code,
+      // PostConfirmation đọc tên tổ chức từ ClientMetadata, dự phòng bằng thuộc tính custom:organization_name.
+      ...(organizationName ? { ClientMetadata: { organization_name: organizationName } } : {}),
+    },
+    opts,
+    // Đã xác nhận từ trước (bấm lại, hoặc mở lại màn hình): đi tiếp sang đăng nhập.
+    (err) => err.code === 'NotAuthorizedException' && /current status is confirmed/i.test(err.message),
+  );
+
+  if (!input.password) {
+    throw new ConsoleAuthError('SIGN_IN_REQUIRED', 'Email đã được xác nhận. Vui lòng đăng nhập để tiếp tục.');
+  }
+  let auth: CognitoInitiateAuthResponse;
+  try {
+    auth = await livePasswordAuth(email, input.password, opts);
+  } catch (err) {
+    throw toConsoleAuthError(err);
+  }
+  return liveSessionFromTokens(auth.AuthenticationResult, opts, {
+    email,
+    fullName: input.fullName,
+    organizationName: organizationName ?? '',
+  });
+}
+
+async function liveSignIn(email: string, password: string, opts: CognitoLiveOptions = {}): Promise<SignInOutcome> {
+  let res: CognitoInitiateAuthResponse;
+  try {
+    res = await livePasswordAuth(email, password, opts);
+  } catch (err) {
+    if (err instanceof CognitoIdpError && err.code === 'UserNotConfirmedException') {
+      // Cognito không tự gửi lại mã khi đăng nhập: gửi lại để người dùng có mã còn hạn (bỏ qua lỗi gửi lại).
+      await callCognito('ResendConfirmationCode', { Username: email }, liveIdpConfig(opts)).catch(() => undefined);
+      return { status: 'CONFIRMATION_REQUIRED', email, organizationName: '' };
+    }
+    throw toConsoleAuthError(err);
+  }
+
+  if (res.AuthenticationResult) {
+    return { status: 'AUTHENTICATED', session: await liveSessionFromTokens(res.AuthenticationResult, opts, { email }) };
+  }
+  if (res.ChallengeName === 'NEW_PASSWORD_REQUIRED') {
+    const attrsRaw = parseJsonValue(res.ChallengeParameters?.userAttributes);
+    const attrs = attrsRaw && typeof attrsRaw === 'object' ? (attrsRaw as Record<string, unknown>) : {};
+    const role = normalizeRole(typeof attrs['custom:role'] === 'string' ? attrs['custom:role'] : undefined);
+    const org = attrs['custom:organization_name'];
+    return {
+      status: 'NEW_PASSWORD_REQUIRED',
+      email,
+      challengeSession: res.Session ?? '',
+      organizationName: typeof org === 'string' ? org : '',
+      invitedRole: role === 'DEVELOPER' ? 'DEVELOPER' : 'REVIEWER',
+    };
+  }
+  throw new ConsoleAuthError(
+    'UNSUPPORTED_CHALLENGE',
+    `Tài khoản yêu cầu một bước xác thực Web Console chưa hỗ trợ (${res.ChallengeName ?? 'không rõ'}).`,
+  );
+}
+
+async function liveCompleteInvitedPassword(
+  email: string,
+  input: ForceChangePasswordInput,
+  opts: CognitoLiveOptions = {},
+): Promise<AuthenticatedSession> {
+  // Luôn lấy Session challenge mới (Session của Cognito chỉ sống vài phút) bằng mật khẩu tạm thời.
+  let first: CognitoInitiateAuthResponse;
+  try {
+    first = await livePasswordAuth(email, input.temporaryPassword, opts);
+  } catch (err) {
+    if (err instanceof CognitoIdpError && err.code === 'NotAuthorizedException' && !liveCognitoMessage(err)) {
+      throw new ConsoleAuthError('NotAuthorizedException', 'Email hoặc mật khẩu tạm thời không chính xác.', undefined, err.httpStatus);
+    }
+    throw toConsoleAuthError(err);
+  }
+  if (first.AuthenticationResult) {
+    // Mật khẩu đã được đổi từ trước: dùng luôn phiên vừa đăng nhập.
+    return liveSessionFromTokens(first.AuthenticationResult, opts, { email });
+  }
+  if (first.ChallengeName !== 'NEW_PASSWORD_REQUIRED') {
+    throw new ConsoleAuthError(
+      'UNSUPPORTED_CHALLENGE',
+      `Tài khoản yêu cầu một bước xác thực Web Console chưa hỗ trợ (${first.ChallengeName ?? 'không rõ'}).`,
+    );
+  }
+
+  const params = first.ChallengeParameters ?? {};
+  const responses: Record<string, string> = {
+    USERNAME: params.USER_ID_FOR_SRP || email,
+    NEW_PASSWORD: input.newPassword,
+  };
+  const required = parseJsonValue(params.requiredAttributes);
+  if (Array.isArray(required) && required.includes('userAttributes.name')) {
+    responses['userAttributes.name'] = email.split('@')[0] || email;
+  }
+  const out = await liveIdp<CognitoInitiateAuthResponse>(
+    'RespondToAuthChallenge',
+    { ChallengeName: 'NEW_PASSWORD_REQUIRED', Session: first.Session, ChallengeResponses: responses },
+    opts,
+  );
+  return liveSessionFromTokens(out?.AuthenticationResult, opts, {
+    email,
+    organizationName: input.organizationName ?? '',
+  });
+}
+
+async function liveRefreshSession(
+  session: AuthenticatedSession,
+  opts: CognitoLiveOptions = {},
+): Promise<AuthenticatedSession> {
+  if (!session.refreshToken) {
+    throw new ConsoleAuthError('SIGN_IN_REQUIRED', 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+  }
+  const out = await liveIdp<CognitoInitiateAuthResponse>(
+    'InitiateAuth',
+    { AuthFlow: 'REFRESH_TOKEN_AUTH', AuthParameters: { REFRESH_TOKEN: session.refreshToken } },
+    opts,
+  );
+  return liveSessionFromTokens(out?.AuthenticationResult, opts, session);
+}
+
+/**
+ * Đăng xuất: thu hồi refresh token trên Cognito (bỏ qua lỗi, phiên phía trình duyệt luôn bị xóa).
+ * Chế độ demo không làm gì.
+ */
+export async function signOutSession(
+  session: Pick<AuthenticatedSession, 'refreshToken'> | null | undefined,
+  opts: CognitoLiveOptions = {},
+): Promise<void> {
+  if (IS_DEMO_AUTH_MODE && !opts.region && !opts.clientId) return;
+  if (!session?.refreshToken) return;
+  await callCognito('RevokeToken', { Token: session.refreshToken }, liveIdpConfig(opts)).catch(() => undefined);
+}
+
+/** Gọi REST API Console bằng ID token của phiên; lỗi chuyển thành `ConsoleAuthError` theo Bảng 2.10. */
+async function liveConsoleApi(
+  path: string,
+  init: { method: 'GET' | 'POST'; body?: Record<string, unknown> },
+  idToken: string | undefined,
+  opts: CognitoLiveOptions = {},
+): Promise<Record<string, unknown>> {
+  if (!idToken) {
+    throw new ConsoleAuthError('UNAUTHORIZED', 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.', undefined, 401);
+  }
+  const base = (opts.baseUrl ?? envApiBaseUrl).replace(/\/+$/, '');
+  if (!base && !opts.fetchFn) {
+    throw new ConsoleAuthError('NETWORK_ERROR', 'Chưa cấu hình địa chỉ API (VITE_API_BASE_URL).');
+  }
+  const doFetch = opts.fetchFn ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
+  let res: Response;
+  try {
+    res = await doFetch(`${base}${path}`, {
+      method: init.method,
+      headers: {
+        authorization: `Bearer ${idToken}`,
+        ...(init.body ? { 'content-type': 'application/json' } : {}),
+      },
+      ...(init.body ? { body: JSON.stringify(init.body) } : {}),
+    });
+  } catch {
+    throw new ConsoleAuthError('NETWORK_ERROR', 'Không kết nối được tới máy chủ.');
+  }
+  let data: Record<string, unknown> = {};
+  try {
+    const parsed = (await res.json()) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) data = parsed as Record<string, unknown>;
+  } catch {
+    data = {};
+  }
+  if (!res.ok) {
+    const extracted = extractApiErrorPayload(data, res.status);
+    throw new ConsoleAuthError(extracted.code, extracted.message, extracted.requestId, extracted.httpStatus);
+  }
+  return data;
+}
+
+const LIVE_MEMBER_ROLES: readonly ConsoleRole[] = ['TENANT_ADMIN', 'DEVELOPER', 'REVIEWER'];
+const LIVE_MEMBER_STATUSES: readonly TenantMember['status'][] = ['ACTIVE', 'PENDING_FIRST_LOGIN', 'DISABLED'];
+
+function liveMemberRole(raw: unknown): ConsoleRole | null {
+  if (typeof raw !== 'string') return null;
+  const upper = raw.trim().toUpperCase().replace(/\s+/g, '_');
+  return (LIVE_MEMBER_ROLES as readonly string[]).includes(upper) ? (upper as ConsoleRole) : normalizeRole(raw);
+}
+
+/** Chuẩn hóa bản ghi MEMBER (`userSub`, `email`, `role`, `status`, `createdAt`) từ `GET /console/members`. */
+function liveTenantMember(item: unknown, fallbackTenantId: string): TenantMember | null {
+  if (!item || typeof item !== 'object') return null;
+  const r = item as Record<string, unknown>;
+  const id = String(r.userSub ?? r.sub ?? r.id ?? '').trim();
+  const email = String(r.email ?? '').trim();
+  const role = liveMemberRole(r.role);
+  if (!id || !email || !role) return null;
+  const rawStatus = typeof r.status === 'string' ? r.status.trim().toUpperCase() : '';
+  const status = (LIVE_MEMBER_STATUSES as readonly string[]).includes(rawStatus)
+    ? (rawStatus as TenantMember['status'])
+    : 'ACTIVE';
+  const invitedAt = typeof r.createdAt === 'string' ? r.createdAt : typeof r.invitedAt === 'string' ? r.invitedAt : undefined;
+  return {
+    id,
+    tenantId: String(r.tenantId ?? r.tenant_id ?? fallbackTenantId),
+    email,
+    role,
+    status,
+    ...(invitedAt ? { invitedAt } : {}),
+  };
+}
+
+async function liveListTenantMembers(
+  tenantId: string,
+  idToken: string | undefined,
+  opts: CognitoLiveOptions = {},
+): Promise<TenantMember[]> {
+  const data = await liveConsoleApi('/console/members', { method: 'GET' }, idToken, opts);
+  const items = Array.isArray(data.items) ? data.items : [];
+  return items.map((it) => liveTenantMember(it, tenantId)).filter((m): m is TenantMember => m !== null);
+}
+
+async function liveInviteTenantMember(
+  email: string,
+  invitedRole: 'DEVELOPER' | 'REVIEWER',
+  tenantId: string,
+  idToken: string | undefined,
+  opts: CognitoLiveOptions = {},
+): Promise<{ member: TenantMember; temporaryPassword: string }> {
+  const data = await liveConsoleApi('/console/members/invite', { method: 'POST', body: { email, role: invitedRole } }, idToken, opts);
+  const userStatus = typeof data.userStatus === 'string' ? data.userStatus : '';
+  return {
+    member: {
+      id: String(data.userSub ?? data.username ?? email),
+      tenantId: String(data.tenantId ?? tenantId),
+      email: String(data.email ?? email),
+      role: liveMemberRole(data.role) ?? invitedRole,
+      status: userStatus && userStatus !== 'FORCE_CHANGE_PASSWORD' ? 'ACTIVE' : 'PENDING_FIRST_LOGIN',
+      invitedAt: new Date().toISOString(),
+    },
+    // Cognito tự gửi mật khẩu tạm thời qua email mời; Web Console không bao giờ nhận được mật khẩu này.
+    temporaryPassword: '',
+  };
+}
+
+/** Bộ hàm chế độ Cognito thật, xuất ra để kiểm thử với `fetchFn` giả (không phụ thuộc `VITE_AUTH_MODE`). */
+export const cognitoLive = Object.freeze({
+  registerAccount: liveRegisterAccount,
+  confirmEmail: liveConfirmEmail,
+  signIn: liveSignIn,
+  completeInvitedPassword: liveCompleteInvitedPassword,
+  refreshSession: liveRefreshSession,
+  resendConfirmationCode: async (email: string, opts: CognitoLiveOptions = {}) => {
+    await liveIdp('ResendConfirmationCode', { Username: email }, opts);
+    return { expiresInSeconds: 60 };
+  },
+  requestPasswordReset: async (email: string, opts: CognitoLiveOptions = {}) => {
+    await liveIdp('ForgotPassword', { Username: email }, opts);
+    return { email, expiresInSeconds: 60, demoResetCode: '' };
+  },
+  confirmPasswordReset: async (email: string, code: string, newPassword: string, opts: CognitoLiveOptions = {}) => {
+    await liveIdp('ConfirmForgotPassword', { Username: email, ConfirmationCode: code, Password: newPassword }, opts);
+  },
+  listTenantMembers: liveListTenantMembers,
+  inviteTenantMember: liveInviteTenantMember,
+});
