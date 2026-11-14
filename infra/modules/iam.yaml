@@ -354,9 +354,13 @@ Resources:
                 Action: dynamodb:GetItem
                 Resource: !Ref TableArn
                 Condition:
-                  StringLike:
+                # dynamodb:LeadingKeys là khóa nhiều giá trị: bắt buộc ForAllValues (StringLike trơn không bao giờ
+                # khớp → AccessDenied, deploy dev 14/11); 'Null' false để ForAllValues không đúng khi thiếu khóa.
+                  ForAllValues:StringLike:
                     dynamodb:LeadingKeys:
                       - 'TENANT#PLATFORM#SLUG#*'
+                  'Null':
+                    dynamodb:LeadingKeys: 'false'
               # Bảng dùng KMS key tự quản lý: đọc trực tiếp bằng role thực thi (không qua phiên tenant) cũng cần
               # kms:Decrypt; thiếu quyền này GetItem trả AccessDeniedException (deploy dev 14/11).
               - Sid: ReadPlatformMappingsKms
@@ -417,8 +421,13 @@ Resources:
                 Action: dynamodb:GetItem
                 Resource: !Ref TableArn
                 Condition:
-                  StringLike:
-                    dynamodb:LeadingKeys: 'TENANT#PLATFORM#SLUG#*'
+                # dynamodb:LeadingKeys là khóa nhiều giá trị: bắt buộc ForAllValues (StringLike trơn không bao giờ
+                # khớp → AccessDenied, deploy dev 14/11); 'Null' false để ForAllValues không đúng khi thiếu khóa.
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - 'TENANT#PLATFORM#SLUG#*'
+                  'Null':
+                    dynamodb:LeadingKeys: 'false'
               # Bảng dùng KMS key tự quản lý: đọc trực tiếp bằng role thực thi (không qua phiên tenant) cũng cần
               # kms:Decrypt; thiếu quyền này GetItem trả AccessDeniedException (deploy dev 14/11).
               - Sid: ReadPlatformSlugMappingKms
@@ -572,8 +581,13 @@ Resources:
                 Action: dynamodb:GetItem
                 Resource: !Ref TableArn
                 Condition:
-                  StringLike:
-                    dynamodb:LeadingKeys: 'TENANT#PLATFORM#KEY#*'
+                # dynamodb:LeadingKeys là khóa nhiều giá trị: bắt buộc ForAllValues (StringLike trơn không bao giờ
+                # khớp → AccessDenied, deploy dev 14/11); 'Null' false để ForAllValues không đúng khi thiếu khóa.
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys:
+                      - 'TENANT#PLATFORM#KEY#*'
+                  'Null':
+                    dynamodb:LeadingKeys: 'false'
               # Bảng dùng KMS key tự quản lý: đọc trực tiếp bằng role thực thi (không qua phiên tenant) cũng cần
               # kms:Decrypt; thiếu quyền này GetItem trả AccessDeniedException (deploy dev 14/11).
               - Sid: ReadPlatformKeyMappingKms
