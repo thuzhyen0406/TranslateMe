@@ -20,7 +20,9 @@
  * hỏng trang nhưng trả cache ngắn (s-maxage=60): thiếu SEG thì xóa cache chọn lọc (F5) có thể sót trang này.
  *
  * Bản tạm (B.14): hash câu và countChars chờ thư viện 1.8; db chờ batchGet/update của 2.2;
- * reserveChars/settleUsage chờ 2.7 (quotaStub); db của SEG chờ batchWrite/query GSI của 2.2.
+ * db của SEG chờ batchWrite/query GSI của 2.2.
+ * Hạn mức (QC-7): có TABLE_NAME thì reserveChars/releaseChars/settleUsage chạy trên UsageService (2.7) qua
+ * usageServiceQuota; không có TABLE_NAME (chạy local) thì dùng quotaStub và ghi log USAGE_STUB.
  *
  * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), TABLE_NAME (DynamoDB; website/TM, SEG và Glossary),
  * TRANSLATE_BUDGET_MS (20000), TRANSLATE_CONCURRENCY (4), WORKER_FUNCTION_NAME (bật hoàn tất nền),
@@ -47,6 +49,7 @@ import {
   type TranslateResult,
 } from '../../libs/common/translator.js';
 import type { Ctx, Sha256Hex } from '../../libs/common/types.js';
+import { UsageService } from '../../libs/common/usage/usage.js';
 import {
   DEFAULT_CACHE_SECONDS,
   LANG_RE,
@@ -59,7 +62,7 @@ import {
   staticSiteResolver,
 } from './sites.js';
 import { countCharsStub, getGlossaryStateStub, hashSentenceStub } from './stubs.js';
-import { emptyReservation, isCharQuotaExceeded, quotaStub, type QuotaApi, type Reservation } from './usage.js';
+import { emptyReservation, isCharQuotaExceeded, quotaStub, usageServiceQuota, type QuotaApi, type Reservation } from './usage.js';
 import { DEFAULT_WORKER_BUDGET_MS, type WorkerDeps } from './worker.js';
 import { buildWorkerEvents, type PayloadStore, type WorkerEvent } from './workerEvents.js';
 
@@ -110,7 +113,7 @@ export interface ProxyDeps {
   getGlossaryState?: (ctx: Ctx) => Promise<GlossaryState>;
   hashSentence?: (text: string) => Sha256Hex;
   countChars?: (text: string) => number;
-  /** B.11 (2.7). Mặc định quotaStub. */
+  /** B.11 (2.7). depsFromEnv dùng usageServiceQuota khi có TABLE_NAME; không truyền = quotaStub. */
   quota?: QuotaApi;
   /** Gửi sự kiện cho worker C13 (InvocationType = Event). Không truyền = không hoàn tất nền. */
   invokeWorker?: (event: WorkerEvent) => Promise<void>;
@@ -584,6 +587,23 @@ function sharedFromEnv(
     : undefined;
   if (!tm) logger.error({ action: 'TM_DISABLED', reason: 'MISSING_TABLE_NAME' });
   if (!seg) logger.error({ action: 'SEG_DISABLED', reason: 'MISSING_TABLE_NAME' });
+  // QC-7: hạn mức thật qua UsageService, cùng client định tuyến theo tenant (TENANT#<t>#USAGE nằm trong LeadingKeys)
+  const quota: QuotaApi = tableName
+    ? usageServiceQuota(new UsageService(documentClient as DynamoDBDocumentClient, {
+        tableName,
+        // Mặc định 18 lần (tối đa ~6,5 s chờ xung đột trên dòng MONTH#): quá dài cho ngân sách 20 s của trang.
+        // 8 lần ~ 1 s; hết lần thử thì đặt trước lỗi -> 302 về trang gốc, quyết toán lỗi -> chỉ ghi log.
+        maxTransactionAttempts: 8,
+        onAccountingError: (e) => logger.error({
+          action: 'USAGE_ACCOUNTING_ERROR',
+          operation: e.operation,
+          tenantId: e.tenantId,
+          requestId: e.requestId,
+          error: e.error instanceof Error ? e.error.name : 'Unknown',
+        }),
+      }))
+    : quotaStub((e) => logger.info(e));
+  if (!tableName) logger.error({ action: 'USAGE_STUB', reason: 'MISSING_TABLE_NAME' });
   const bucket = env.WORKER_PAYLOAD_BUCKET?.trim();
   return {
     resolveSite: resolveSiteOverride ?? (
@@ -607,7 +627,7 @@ function sharedFromEnv(
       undefined,
       env.DATA_KMS_KEY_ARN,
     ), env.DATA_KMS_KEY_ARN) : undefined,
-    quota: quotaStub((e) => logger.info(e)),
+    quota,
     concurrency: positive(env.TRANSLATE_CONCURRENCY, DEFAULT_CONCURRENCY),
   };
 }
