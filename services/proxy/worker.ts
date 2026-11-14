@@ -189,31 +189,42 @@ export function createWorkerHandler(deps: WorkerDeps) {
       }
       const byId = new Map(misses.map((s) => [s.id, s]));
       let postCheckFlagged = 0;
-      const rep = await deps.tm.putMachineTM(
-        ctx,
-        event.src,
-        event.tgt,
-        tr.translated.map((t) => {
-          const item = byId.get(t.id)!;
-          const postCheck = postCheckGlossary(item.text, t.tgt, event.tgt, glossary);
-          if (postCheck.needsReview) postCheckFlagged++;
-          return {
-            hash: item.hash,
-            sourceText: item.text,
-            tgt: t.tgt,
-            glossaryVersion: glossary.version,
-            needsReview: t.needsReview || postCheck.needsReview,
-          };
-        }),
-      );
+      // Ghi TM lỗi thì vẫn quyết toán phần đã dịch (Translate đã tính phí) rồi mới báo ERROR,
+      // để phiếu đặt trước không treo ở RESERVED.
+      let rep: Awaited<ReturnType<typeof deps.tm.putMachineTM>> | undefined;
+      let tmWriteError: unknown;
+      try {
+        rep = await deps.tm.putMachineTM(
+          ctx,
+          event.src,
+          event.tgt,
+          tr.translated.map((t) => {
+            const item = byId.get(t.id)!;
+            const postCheck = postCheckGlossary(item.text, t.tgt, event.tgt, glossary);
+            if (postCheck.needsReview) postCheckFlagged++;
+            return {
+              hash: item.hash,
+              sourceText: item.text,
+              tgt: t.tgt,
+              glossaryVersion: glossary.version,
+              needsReview: t.needsReview || postCheck.needsReview,
+            };
+          }),
+        );
+      } catch (err) {
+        tmWriteError = err;
+      }
       const machineChars = tr.translated.reduce((sum, t) => sum + countChars(byId.get(t.id)!.text), 0);
+      // Phần dịch nền không phải lượt truy cập: requests = pagesServed = 0; câu trượt đã được proxy đếm.
       await deps.quota.settleUsage(ctx, reservation, { kind: 'WEB', slug: site.slug }, {
         machineChars,
         memoryChars: 0,
         sentTotal: 0,
         sentFromTM: 0,
         requests: 0,
+        pagesServed: 0,
       });
+      if (!rep) throw tmWriteError ?? new Error('TM_WRITE_FAILED');
       Object.assign(log, {
         charsSent: tr.stats.charsSent,
         tmWritten: rep.written,

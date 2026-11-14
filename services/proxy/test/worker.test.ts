@@ -263,6 +263,25 @@ describe('worker C13 – FINISH_PAGE', () => {
     }
   });
 
+  it('ghi TM lỗi sau khi đã dịch -> vẫn quyết toán ký tự đã dịch (không treo phiếu RESERVED) rồi trả ERROR', async () => {
+    const db = memoryTmDb();
+    const tm = createTM({ db, writer: 'worker' });
+    const quota = fakeQuota();
+    const { worker, logger } = setup({
+      db,
+      quota,
+      tm: { ...tm, putMachineTM: async () => Promise.reject(Object.assign(new Error('x'), { name: 'ProvisionedThroughputExceededException' })) },
+    });
+    const r = await worker({ ...BASE, sentences: withHash(['Một', 'Hai']) });
+    assert.equal(r.status, 'ERROR');
+    assert.equal(r.reason, 'ProvisionedThroughputExceededException');
+    assert.equal(quota.releases.length, 0);
+    assert.equal(quota.settles.length, 1);
+    assert.equal(quota.settles[0].u.machineChars, quota.reserves[0].n);
+    assert.equal(quota.settles[0].u.pagesServed, 0);
+    assert.equal(logger.errors[0].action, 'WORKER_ERROR');
+  });
+
   it('lỗi bất ngờ -> trả ERROR, không throw (tránh Lambda tự gọi lại); bộ dịch lỗi thì hoàn lại hạn mức', async () => {
     const quota = fakeQuota();
     const { worker, logger } = setup({ quota, translate: async () => Promise.reject(new Error('boom')) });
