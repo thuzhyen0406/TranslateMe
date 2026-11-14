@@ -425,8 +425,10 @@ export class UsageService {
       Key: keys.total,
       UpdateExpression: "ADD #machineChars :machineDelta, #memoryChars :memoryChars, #sentTotal :sentTotal, #sentFromTM :sentFromTM, #requests :requests, #pagesServed :pagesServed, #tmHits :tmHits, #tmMisses :tmMisses",
       ExpressionAttributeNames: names,
+      // Dòng tổng dùng :machineDelta thay cho :machineChars; DynamoDB từ chối giá trị khai báo mà không dùng
+      // (ValidationException "ExpressionAttributeValues unused"), nên bỏ :machineChars khỏi bộ giá trị ở đây.
       ExpressionAttributeValues: {
-        ...counterValues,
+        ...Object.fromEntries(Object.entries(counterValues).filter(([name]) => name !== ":machineChars")),
         ":machineDelta": actual.machineChars - ticket.reservedChars,
       },
     };

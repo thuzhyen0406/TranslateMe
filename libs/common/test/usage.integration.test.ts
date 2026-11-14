@@ -20,6 +20,26 @@ type Item = Record<string, unknown>;
 type Key = { PK: string; SK: string };
 type TransactionItem = Record<string, Record<string, unknown>>;
 
+/**
+ * Giống DynamoDB thật: mọi :value / #name khai báo phải xuất hiện trong ít nhất một biểu thức của cùng thao tác,
+ * nếu không DynamoDB trả ValidationException (lỗi đã gặp khi deploy dev 14/11 ở bước settle).
+ */
+function assertExpressionTokensUsed(input: Record<string, unknown>): void {
+  const expressions = ['UpdateExpression', 'ConditionExpression', 'ProjectionExpression', 'KeyConditionExpression', 'FilterExpression']
+    .map((name) => input[name]).filter((v): v is string => typeof v === 'string').join(' ');
+  const used = new Set(expressions.match(/[:#][A-Za-z0-9_]+/g) ?? []);
+  for (const field of ['ExpressionAttributeValues', 'ExpressionAttributeNames']) {
+    const declared = input[field];
+    if (!declared || typeof declared !== 'object') continue;
+    const unused = Object.keys(declared).filter((token) => !used.has(token));
+    if (unused.length) {
+      const error = new Error(`Value provided in ${field} unused in expressions: keys: {${unused.join(', ')}}`);
+      error.name = 'ValidationException';
+      throw error;
+    }
+  }
+}
+
 function itemKey(key: Key): string {
   return `${key.PK}|${key.SK}`;
 }
@@ -66,6 +86,7 @@ class UsageDynamoMock {
   }
 
   async send(command: { input: Record<string, unknown> }): Promise<Item> {
+    assertExpressionTokensUsed(command.input);
     if (command instanceof GetCommand) {
       return { Item: this.get(asKey(command.input.Key)) };
     }
@@ -80,6 +101,7 @@ class UsageDynamoMock {
   }
 
   private transact(operations: TransactionItem[]): void {
+    for (const operation of operations) for (const op of Object.values(operation)) assertExpressionTokensUsed(op);
     const staged = new Map<string, Item>();
     for (const [key, item] of this.items) staged.set(key, structuredClone(item));
 
