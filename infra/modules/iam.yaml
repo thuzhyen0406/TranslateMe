@@ -138,6 +138,10 @@ Resources:
                     dynamodb:LeadingKeys:
                       - 'TENANT#${aws:PrincipalTag/TenantId}'
                       - 'TENANT#${aws:PrincipalTag/TenantId}#*'
+                      # KEYMAP của API key (TENANT#PLATFORM#KEY#<keyId>) ghi cùng giao dịch với APIKEY của tenant.
+                      # Session policy chỉ thêm đúng một khóa này khi Lambda Console bật ALLOW_PLATFORM_KEY_MAPPING,
+                      # nên quyền thực tế (giao của role và session policy) của các Lambda khác không đổi.
+                      - 'TENANT#PLATFORM#KEY#*'
                   'Null':
                     dynamodb:LeadingKeys: 'false'
               - Sid: TenantBatchObjects
