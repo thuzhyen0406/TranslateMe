@@ -55,7 +55,7 @@ Cuối cùng script in khối `TM_*` (lưu ở `.build/dev/e2e.env`) để dán 
 | `--skip-build` | Dùng lại gói mã Lambda đang chạy (chỉ đổi hạ tầng) |
 | `--no-install` | Bỏ `npm ci` (đã cài sẵn) |
 | `--skip-console` | Không build/đăng web console |
-| `TM_CONSOLE_AUTH_MODE` | `mock` (mặc định) hoặc `cognito` khi console đã nối Cognito thật |
+| `TM_CONSOLE_AUTH_MODE` | `cognito` (mặc định, đăng nhập Cognito thật) hoặc `mock` (kho giả lập trong trình duyệt, chỉ để thử giao diện) |
 | `TM_CODE_KEYS="proxy=… api=…"` | Dùng gói mã đã tải sẵn (CI) |
 | `TM_STATE_CACHE_S` | Ghi đè `StateCacheSeconds` (mặc định 30) |
 | `TM_PARAMS_<STACK>="K=V …"` | Thêm tham số CloudFormation cho một stack |
@@ -85,5 +85,6 @@ Xóa theo thứ tự ngược (stack sau import output stack trước): `ops`, `
 
 - Không có tên miền riêng: bản dịch ở `https://<dxxxx>.cloudfront.net/{slug}/{lang}/` (BASE_MODE=path).
 - `TENANT_ID_HMAC_SECRET` chưa cấu hình cho Lambda Post confirmation: mã tenant sinh bằng khóa ngẫu nhiên theo phiên chạy; nếu Cognito gọi lại trigger ở phiên khác sau khi đã ghi DynamoDB, có thể sinh mã khác.
-- Web console mặc định build ở chế độ `mock`: luồng đăng nhập Cognito thật của console chưa có (`cognitoAuth.ts` vẫn dùng kho giả lập ở chế độ `cognito`).
+- Web console mặc định build ở chế độ `cognito`: đăng ký, xác nhận email, đăng nhập, mời thành viên đi qua Cognito và API thật. Mã xác nhận và mật khẩu tạm thời do Cognito gửi bằng email mặc định của Cognito (giới hạn khoảng 50 email/ngày, đủ cho demo).
+- Console (CloudFront riêng) gọi API ở `execute-api` khác origin: Lambda console/website trả header CORS (`libs/common/cors.ts`), lỗi do API Gateway tự trả (401/403/429/5XX) có CORS qua `GatewayResponse`. Khi đổi method hoặc gateway response trong `infra/modules/api-gateway.yaml`, phải đổi tên logical ID `ApiDeploymentV<n>` để stage nhận bản deploy mới.
 - `dynamodb:TransactWriteItems` trong policy không phải action IAM thật (cfn-lint W3037); quyền giao dịch tính theo từng thao tác trên item nên không ảnh hưởng.

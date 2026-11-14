@@ -6,7 +6,7 @@
 //   --skip-console        không build/đồng bộ web console
 //   --dry-run             chỉ in lệnh ghi (lệnh đọc vẫn chạy)
 // Biến: TM_REGION, TM_ACCOUNT (bắt buộc); TM_ALERT_EMAIL, TM_MONTHLY_BUDGET_USD (ops); TM_CONSOLE_AUTH_MODE
-// (mặc định mock); TM_PARAMS_<STACK>="K=V ..." thêm tham số. Quy tắc: demo chỉ deploy từ thẻ phát hành sạch, có người duyệt.
+// (mặc định cognito; mock để thử giao diện không cần tài khoản); TM_PARAMS_<STACK>="K=V ..." thêm tham số. Quy tắc: demo chỉ deploy từ thẻ phát hành sạch, có người duyệt.
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { aws, arg, flag, git, STACKS, stackName, stackTemplate } from './aws';
@@ -131,7 +131,7 @@ function deployConsole(): void {
   if (!bucket && !dryRun) throw new Error('Chưa có stack console');
   const env = {
     ...process.env,
-    VITE_AUTH_MODE: process.env.TM_CONSOLE_AUTH_MODE ?? 'mock',
+    VITE_AUTH_MODE: process.env.TM_CONSOLE_AUTH_MODE || 'cognito',
     VITE_AWS_REGION: region!,
     VITE_COGNITO_USER_POOL_ID: o.identity?.UserPoolId ?? '',
     VITE_COGNITO_CLIENT_ID: o.identity?.ConsoleClientId ?? '',
