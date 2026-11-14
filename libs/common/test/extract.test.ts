@@ -99,6 +99,7 @@ describe('extract – trang mẫu tiếng Việt', () => {
       'Email của bạn',
       'Địa chỉ email',
       'Đặt phòng ngay',
+      'Phòng đôi',
       'Hotline: 0905 123 456',
     ]) {
       assert.ok(s.includes(expected), `thiếu câu: ${expected}`);
@@ -106,7 +107,7 @@ describe('extract – trang mẫu tiếng Việt', () => {
   });
 
   it('không lấy vùng không dịch, số thuần, meta không phải mô tả', () => {
-    for (const bad of ['Homestay ABC™', 'Không dịch đoạn này.', '2026', 'Bản quyền thuộc Homestay ABC.', 'width=device-width', 'Phòng đôi']) {
+    for (const bad of ['Homestay ABC™', 'Không dịch đoạn này.', '2026', 'Bản quyền thuộc Homestay ABC.', 'width=device-width']) {
       assert.ok(!s.some((x) => x.includes(bad)), `không được lấy: ${bad}`);
     }
     assert.ok(r.skeletonHtml.includes('<p class="legal">Bản quyền thuộc Homestay ABC.</p>'));
@@ -146,6 +147,17 @@ describe('extract – trang mẫu tiếng Việt', () => {
 });
 
 describe('extract – quy tắc chi tiết', () => {
+  it('<select>: chữ của <option> và label của <option>/<optgroup> là câu riêng; value giữ nguyên (5.4)', () => {
+    const html = wrap('<form><label for="r">Loại phòng</label> <select id="r" name="r"><optgroup label="Nhóm phòng nhỏ"><option value="doi">Phòng đôi</option><option value="don" label="Phòng một người"></option></optgroup><option value="">  </option></select> <button>Gửi</button></form>');
+    const r = extract(html);
+    assert.deepEqual(r.sentences, ['Loại phòng', 'Nhóm phòng nhỏ', 'Phòng đôi', 'Phòng một người', 'Gửi']);
+    const out = rebuild(r.skeletonHtml, r.sentences.map((x) => `EN ${x}`), r.placeholders, { targetLang: 'en', originalUrl: 'https://a.vn/', slug: 'a' });
+    assert.ok(out.includes('<option value="doi">EN Phòng đôi</option>'), out);
+    assert.ok(out.includes('<optgroup label="EN Nhóm phòng nhỏ">'));
+    assert.ok(out.includes('<option value="don" label="EN Phòng một người"></option>'));
+    assert.ok(out.includes('<option value="">'));
+  });
+
   it('gộp khoảng trắng trong câu', () => {
     assert.deepEqual(sentencesOf('<p>Xin\n      chào   bạn.</p>'), ['Xin chào bạn.']);
   });
