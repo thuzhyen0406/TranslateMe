@@ -165,8 +165,12 @@ try {
 
   const envText = e2eEnv(outputs, { stage, region, account: expectedAccount });
   if (!dryRun) writeFileSync(join(buildDir, 'e2e.env'), envText);
-  console.log(`\nXong. Cấu hình e2e (đã lưu ${join('.build', stage, 'e2e.env')}):\n\n${envText}`);
-  console.log('Tiếp theo: npm run demo:preflight -- --post');
+  if (dryRun) {
+    console.log(`\n[dry-run] Xong. Khi chạy thật, cấu hình e2e (đủ giá trị) được lưu ở ${join('.build', stage, 'e2e.env')}; lượt 2 chỉ hiện khi chạy thật.`);
+  } else {
+    console.log(`\nXong. Cấu hình e2e (đã lưu ${join('.build', stage, 'e2e.env')}):\n\n${envText}`);
+    console.log('Tiếp theo: dán khối trên vào e2e/.env.dev, rồi npm run demo:preflight -- --post');
+  }
 } catch (e) {
   console.error(e instanceof Error ? e.message : e);
   process.exit(1);
