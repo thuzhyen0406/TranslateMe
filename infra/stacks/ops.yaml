@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TranslateMe stack ops (C9) – AWS Budgets theo stage, chủ đề SNS cảnh báo và alarm CloudWatch cho proxy, API,
+  state machine. Hạn mức ký tự của tenant (F7) là chuyện khác, nằm trong ứng dụng.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[A-Za-z0-9_-]+'
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: Email nhận cảnh báo (phải bấm xác nhận đăng ký SNS). Để trống thì chỉ tạo chủ đề.
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 20
+    MinValue: 1
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
+
+Resources:
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'translateme-${StageName}-alerts'
+      KmsMasterKeyId: alias/aws/sns
+      Subscription: !If
+        - HasAlertEmail
+        - [{ Protocol: email, Endpoint: !Ref AlertEmail }]
+        - !Ref AWS::NoValue
+
+  AlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref AlertTopic]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowBudgetsPublish
+            Effect: Allow
+            Principal: { Service: budgets.amazonaws.com }
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: AllowCloudWatchPublish
+            Effect: Allow
+            Principal: { Service: cloudwatch.amazonaws.com }
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub 'translateme-${StageName}-monthly'
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit: { Amount: !Ref MonthlyBudgetUsd, Unit: USD }
+      NotificationsWithSubscribers:
+        - Notification: { ComparisonOperator: GREATER_THAN, NotificationType: ACTUAL, Threshold: 50, ThresholdType: PERCENTAGE }
+          Subscribers: [{ SubscriptionType: SNS, Address: !Ref AlertTopic }]
+        - Notification: { ComparisonOperator: GREATER_THAN, NotificationType: ACTUAL, Threshold: 80, ThresholdType: PERCENTAGE }
+          Subscribers: [{ SubscriptionType: SNS, Address: !Ref AlertTopic }]
+        - Notification: { ComparisonOperator: GREATER_THAN, NotificationType: FORECASTED, Threshold: 100, ThresholdType: PERCENTAGE }
+          Subscribers: [{ SubscriptionType: SNS, Address: !Ref AlertTopic }]
+
+  ProxyErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'translateme-${StageName}-proxy-errors'
+      AlarmDescription: Lambda proxy F2 ném lỗi (Visitor nhận 502/504 từ CloudFront).
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Sub 'translateme-${StageName}-proxy' }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  ProxyThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'translateme-${StageName}-proxy-throttles'
+      AlarmDescription: Lambda proxy bị giới hạn đồng thời (Service Quotas Lambda concurrency).
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions: [{ Name: FunctionName, Value: !Sub 'translateme-${StageName}-proxy' }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  ProxyDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'translateme-${StageName}-proxy-duration-p95'
+      AlarmDescription: p95 thời gian chạy proxy gần timeout 25 s (QC-10).
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions: [{ Name: FunctionName, Value: !Sub 'translateme-${StageName}-proxy' }]
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 22000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'translateme-${StageName}-api-5xx'
+      AlarmDescription: API Gateway trả 5xx.
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - { Name: ApiName, Value: !Sub 'translateme-${StageName}-api' }
+        - { Name: Stage, Value: !Ref StageName }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  BatchFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'translateme-${StageName}-batch-failed'
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - { Name: StateMachineArn, Value: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-BatchStateMachineArn' } }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  PrewarmFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'translateme-${StageName}-prewarm-failed'
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - { Name: StateMachineArn, Value: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-PrewarmStateMachineArn' } }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+Outputs:
+  AlertTopicArn:
+    Value: !Ref AlertTopic

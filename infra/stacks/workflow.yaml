@@ -1,0 +1,34 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: TranslateMe stack workflow (C8) – lồng modules/workflow.yaml, state machine BATCH (F10) và PREWARM (F6).
+
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks: [W3002]  # TemplateURL tương đối: deploy.ts chạy aws cloudformation package trước
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[A-Za-z0-9_-]+'
+
+Resources:
+  Workflow:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../modules/workflow.yaml
+      Parameters:
+        StageName: !Ref StageName
+        BatchWorkflowFunctionArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-BatchWorkflowFunctionArn' }
+        ReadSitemapFunctionArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-ReadSitemapFunctionArn' }
+        PrewarmPagesFunctionArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-PrewarmPagesFunctionArn' }
+        FinishPrewarmFunctionArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-FinishPrewarmFunctionArn' }
+        MarkPrewarmFailedFunctionArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-MarkPrewarmFailedFunctionArn' }
+
+Outputs:
+  BatchStateMachineArn:
+    Value: !GetAtt Workflow.Outputs.BatchStateMachineArn
+    Export: { Name: !Sub 'translateme-${StageName}-BatchStateMachineArn' }
+  PrewarmStateMachineArn:
+    Value: !GetAtt Workflow.Outputs.PrewarmStateMachineArn
+    Export: { Name: !Sub 'translateme-${StageName}-PrewarmStateMachineArn' }

@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TranslateMe stack console (C7) – Web console tĩnh (React/Vite) trên S3 riêng tư + CloudFront (OAC).
+  deploy.ts build console với VITE_* lấy từ output các stack rồi đồng bộ lên bucket này.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[A-Za-z0-9_-]+'
+
+Resources:
+  ConsoleBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      Tags:
+        - { Key: project, Value: translateme }
+        - { Key: stage, Value: !Ref StageName }
+
+  ConsoleOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub 'translateme-${StageName}-console'
+        Description: CloudFront đọc bucket web console.
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  ConsoleBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ConsoleBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub '${ConsoleBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${ConsoleDistribution}'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt ConsoleBucket.Arn
+              - !Sub '${ConsoleBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  ConsoleDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub 'TranslateMe ${StageName} – Web console'
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_200
+        DefaultRootObject: index.html
+        Origins:
+          - Id: console
+            DomainName: !GetAtt ConsoleBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt ConsoleOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: console
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # Managed-CachingOptimized
+        # Ứng dụng một trang: mọi đường dẫn không có tệp trả index.html
+        CustomErrorResponses:
+          - { ErrorCode: 403, ResponseCode: 200, ResponsePagePath: /index.html, ErrorCachingMinTTL: 0 }
+          - { ErrorCode: 404, ResponseCode: 200, ResponsePagePath: /index.html, ErrorCachingMinTTL: 0 }
+      Tags:
+        - { Key: project, Value: translateme }
+        - { Key: stage, Value: !Ref StageName }
+
+Outputs:
+  ConsoleBucketName:
+    Value: !Ref ConsoleBucket
+  ConsoleDistributionId:
+    Value: !Ref ConsoleDistribution
+  ConsoleUrl:
+    Value: !Sub 'https://${ConsoleDistribution.DomainName}'
+    Export: { Name: !Sub 'translateme-${StageName}-ConsoleUrl' }

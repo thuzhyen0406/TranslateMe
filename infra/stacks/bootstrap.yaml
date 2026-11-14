@@ -1,0 +1,60 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TranslateMe bootstrap – bucket chứa gói mã Lambda và template lồng nhau (aws cloudformation package).
+  e2e/demo/deploy.ts tạo stack này trước bảy stack ứng dụng.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[A-Za-z0-9_-]+'
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          # Lambda sao chép mã lúc deploy nên gói cũ không còn cần; khóa có hash nên bản mới luôn khác tên.
+          - Id: ExpireOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - { Key: project, Value: translateme }
+        - { Key: stage, Value: !Ref StageName }
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub '${ArtifactBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+Outputs:
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: !Sub 'translateme-${StageName}-ArtifactBucket'

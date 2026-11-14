@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TranslateMe stack edge (C1, C10) – CloudFront (domain mặc định) trước Lambda proxy F2: Function URL AWS_IAM ký bằng
+  OAC, CloudFront Function kiểm tra slug (infra/functions/viewer-request.js), cache theo s-maxage của proxy.
+  Đường dẫn bản dịch: https://<domain>/{slug}/{lang}/{path} (BASE_MODE=path).
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[A-Za-z0-9_-]+'
+  PriceClass:
+    Type: String
+    Default: PriceClass_200
+    AllowedValues: [PriceClass_100, PriceClass_200, PriceClass_All]
+    Description: PriceClass_200 có edge ở châu Á (gần Visitor Việt Nam) mà rẻ hơn PriceClass_All.
+
+Resources:
+  ProxyFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-ProxyFunctionArn' }
+      AuthType: AWS_IAM
+      InvokeMode: BUFFERED
+
+  # OAC ký SigV4 thay CloudFront; chỉ distribution này gọi được Function URL.
+  ProxyUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-ProxyFunctionArn' }
+      FunctionUrlAuthType: AWS_IAM
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+
+  # Function URL tạo sau 10/2025 cần thêm quyền lambda:InvokeFunction (chỉ khi gọi qua Function URL).
+  ProxyInvokeViaUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-ProxyFunctionArn' }
+      InvokedViaFunctionUrl: true
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+
+  ProxyOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub 'translateme-${StageName}-proxy'
+        Description: Ký SigV4 cho Function URL của Lambda proxy F2.
+        OriginAccessControlOriginType: lambda
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # Bản sao nguyên văn của infra/functions/viewer-request.js (e2e/tests/infra-stacks.test.ts kiểm tra khớp).
+  SlugCheckFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub 'translateme-${StageName}-slug-check'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Từ chối đường dẫn không có slug hợp lệ (404) trước khi tới proxy.
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var req = event.request;
+          var m = /^\/([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\/|$)/.exec(req.uri);
+          if (!m) return { statusCode: 404, statusDescription: 'Not Found' };
+          return req;
+        }
+
+  # Khóa cache = đường dẫn + query; TTL theo Cache-Control của proxy (s-maxage), tối đa 1 ngày.
+  PagesCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub 'translateme-${StageName}-pages'
+        Comment: Trang bản dịch – theo s-maxage của proxy (QC-16), không theo cookie hay header của Visitor.
+        MinTTL: 0
+        DefaultTTL: 0
+        MaxTTL: 86400
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig: { CookieBehavior: none }
+          HeadersConfig: { HeaderBehavior: none }
+          QueryStringsConfig: { QueryStringBehavior: all }
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub 'TranslateMe ${StageName} – bản dịch website (proxy F2)'
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: !Ref PriceClass
+        Origins:
+          - Id: proxy
+            # https://<id>.lambda-url.<region>.on.aws/ -> <id>.lambda-url.<region>.on.aws
+            DomainName: !Select [2, !Split ['/', !GetAtt ProxyFunctionUrl.FunctionUrl]]
+            OriginAccessControlId: !GetAtt ProxyOriginAccessControl.Id
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: [TLSv1.2]
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
+        DefaultCacheBehavior:
+          TargetOriginId: proxy
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: !Ref PagesCachePolicy
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt SlugCheckFunction.FunctionMetadata.FunctionARN
+        # Lỗi 5xx của origin không được lưu cache (Visitor tải lại là được, QC-8)
+        CustomErrorResponses:
+          - { ErrorCode: 500, ErrorCachingMinTTL: 0 }
+          - { ErrorCode: 502, ErrorCachingMinTTL: 0 }
+          - { ErrorCode: 503, ErrorCachingMinTTL: 0 }
+          - { ErrorCode: 504, ErrorCachingMinTTL: 0 }
+      Tags:
+        - { Key: project, Value: translateme }
+        - { Key: stage, Value: !Ref StageName }
+
+Outputs:
+  DistributionId:
+    Value: !Ref Distribution
+    Export: { Name: !Sub 'translateme-${StageName}-DistributionId' }
+  DistributionArn:
+    Value: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+  DistributionDomainName:
+    Value: !GetAtt Distribution.DomainName
+  PublicBaseUrl:
+    Description: PUBLIC_BASE_URL của proxy (lượt 2 của stack api) và TM_PUBLIC_BASE của e2e.
+    Value: !Sub 'https://${Distribution.DomainName}'
+    Export: { Name: !Sub 'translateme-${StageName}-PublicBaseUrl' }
+  ProxyFunctionUrl:
+    Value: !GetAtt ProxyFunctionUrl.FunctionUrl

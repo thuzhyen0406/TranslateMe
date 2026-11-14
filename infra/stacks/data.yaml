@@ -1,0 +1,53 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TranslateMe stack data (C3, C11, C12) – lồng modules/data.yaml: bảng DynamoDB một bảng, khóa KMS, bucket payload
+  của worker và bucket tệp batch. Tên theo stage để dev và demo cùng một account.
+
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks: [W3002]  # TemplateURL tương đối: deploy.ts chạy aws cloudformation package trước
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[A-Za-z0-9_-]+'
+  DeletionProtection:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Đặt 'true' cho stage demo trước khi thu số liệu.
+
+Resources:
+  Data:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../modules/data.yaml
+      Parameters:
+        TableName: !Sub 'translateme-${StageName}'
+        KeyAliasName: !Sub 'alias/translateme-${StageName}-data'
+        DeletionProtection: !Ref DeletionProtection
+
+Outputs:
+  TableName:
+    Value: !GetAtt Data.Outputs.TableName
+    Export: { Name: !Sub 'translateme-${StageName}-TableName' }
+  TableArn:
+    Value: !GetAtt Data.Outputs.TableArn
+    Export: { Name: !Sub 'translateme-${StageName}-TableArn' }
+  KeyArn:
+    Value: !GetAtt Data.Outputs.KeyArn
+    Export: { Name: !Sub 'translateme-${StageName}-KeyArn' }
+  PayloadBucketName:
+    Value: !GetAtt Data.Outputs.PayloadBucketName
+    Export: { Name: !Sub 'translateme-${StageName}-PayloadBucketName' }
+  PayloadBucketArn:
+    Value: !GetAtt Data.Outputs.PayloadBucketArn
+    Export: { Name: !Sub 'translateme-${StageName}-PayloadBucketArn' }
+  BatchFilesBucketName:
+    Value: !GetAtt Data.Outputs.BatchFilesBucketName
+    Export: { Name: !Sub 'translateme-${StageName}-BatchFilesBucketName' }
+  BatchFilesBucketArn:
+    Value: !GetAtt Data.Outputs.BatchFilesBucketArn
+    Export: { Name: !Sub 'translateme-${StageName}-BatchFilesBucketArn' }

@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TranslateMe stack api (C2, C5, C6, C13) – lồng modules/iam.yaml, modules/lambdas.yaml, modules/api-gateway.yaml.
+  Deploy hai lượt (e2e/demo/deploy.ts): lượt 1 tạo IAM, Lambda, API Gateway; lượt 2 truyền ID usage plan (output của
+  chính stack này), ID CloudFront và PUBLIC_BASE_URL (output của stack edge) vào biến môi trường Lambda.
+
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks: [W3002]  # TemplateURL tương đối: deploy.ts chạy aws cloudformation package trước
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[A-Za-z0-9_-]+'
+  ProxyCodeKey:
+    Type: String
+    Description: Khóa S3 (trong bucket bootstrap) của gói mã services/proxy – proxy, worker, bốn hàm PREWARM.
+  ApiCodeKey:
+    Type: String
+    Description: Khóa S3 của gói mã services/api – console, website, translate, batch, platform, post-confirmation.
+  BasicUsagePlanId:
+    Type: String
+    Default: ''
+    Description: Lượt 2 – output BasicUsagePlanId của chính stack này.
+  StandardUsagePlanId:
+    Type: String
+    Default: ''
+  CloudFrontDistributionId:
+    Type: String
+    Default: ''
+    Description: Lượt 2 – output DistributionId của stack edge (xóa cache chọn lọc F5, khóa tenant QC-16).
+  PublicBaseUrl:
+    Type: String
+    Default: ''
+    Description: Lượt 2 – output PublicBaseUrl của stack edge (canonical/hreflang).
+  TranslateConcurrency:
+    Type: Number
+    Default: 4
+    MinValue: 1
+    MaxValue: 10
+  StateCacheSeconds:
+    Type: Number
+    Default: 30
+    MinValue: 0
+    MaxValue: 60
+
+Conditions:
+  HasDistribution: !Not [!Equals [!Ref CloudFrontDistributionId, '']]
+
+Resources:
+  Iam:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../modules/iam.yaml
+      Parameters:
+        StageName: !Ref StageName
+        TableArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-TableArn' }
+        UserPoolArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-UserPoolArn' }
+        PayloadBucketArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-PayloadBucketArn' }
+        KmsKeyArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-KeyArn' }
+        BatchUploadBucketArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-BatchFilesBucketArn' }
+        BatchUploadKmsKeyArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-KeyArn' }
+        # Worker do modules/lambdas.yaml tạo với tên cố định; dựng ARN để gỡ vòng IAM ↔ Lambda
+        WorkerFunctionArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:translateme-${StageName}-worker'
+        # Lượt 1 chưa có CloudFront: quyền xóa cache thu hẹp về đúng distribution ở lượt 2
+        CloudFrontDistributionArn: !If
+          - HasDistribution
+          - !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistributionId}'
+          - !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*'
+
+  Lambdas:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../modules/lambdas.yaml
+      Parameters:
+        StageName: !Ref StageName
+        ArtifactBucket: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-ArtifactBucket' }
+        ProxyCodeKey: !Ref ProxyCodeKey
+        WorkerCodeKey: !Ref ProxyCodeKey
+        ConsoleCodeKey: !Ref ApiCodeKey
+        TranslateCodeKey: !Ref ApiCodeKey
+        PlatformCodeKey: !Ref ApiCodeKey
+        PostConfirmationCodeKey: !Ref ApiCodeKey
+        WebsiteCodeKey: !Ref ApiCodeKey
+        TableName: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-TableName' }
+        PayloadBucketName: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-PayloadBucketName' }
+        PayloadBucketArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-PayloadBucketArn' }
+        BatchUploadBucketName: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-BatchFilesBucketName' }
+        BatchUploadBucketArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-BatchFilesBucketArn' }
+        KmsKeyArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-KeyArn' }
+        BatchUploadKmsKeyArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-KeyArn' }
+        UserPoolArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-UserPoolArn' }
+        BasicUsagePlanId: !Ref BasicUsagePlanId
+        StandardUsagePlanId: !Ref StandardUsagePlanId
+        CloudFrontDistributionId: !Ref CloudFrontDistributionId
+        PublicBaseUrl: !Ref PublicBaseUrl
+        WorkerFunctionArn: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:translateme-${StageName}-worker'
+        TenantDataAccessRoleArn: !GetAtt Iam.Outputs.TenantDataAccessRoleArn
+        TenantWebsiteDataAccessRoleArn: !GetAtt Iam.Outputs.TenantWebsiteDataAccessRoleArn
+        TenantPayloadRoleArn: !GetAtt Iam.Outputs.TenantPayloadAccessRoleArn
+        ProxyRoleArn: !GetAtt Iam.Outputs.ProxyExecutionRoleArn
+        WorkerRoleArn: !GetAtt Iam.Outputs.WorkerExecutionRoleArn
+        ConsoleRoleArn: !GetAtt Iam.Outputs.ConsoleApiExecutionRoleArn
+        WebsiteRoleArn: !GetAtt Iam.Outputs.WebsiteFunctionRoleArn
+        TranslateRoleArn: !GetAtt Iam.Outputs.TranslateApiExecutionRoleArn
+        PlatformRoleArn: !GetAtt Iam.Outputs.PlatformApiExecutionRoleArn
+        PostConfirmationRoleArn: !GetAtt Iam.Outputs.PostConfirmationExecutionRoleArn
+        TranslateConcurrency: !Ref TranslateConcurrency
+        StateCacheSeconds: !Ref StateCacheSeconds
+
+  ApiGateway:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../modules/api-gateway.yaml
+      Parameters:
+        StageName: !Ref StageName
+        ApiName: !Sub 'translateme-${StageName}-api'
+        CognitoUserPoolId: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-UserPoolId' }
+        ConsoleFunctionArn: !GetAtt Lambdas.Outputs.ConsoleFunctionArn
+        WebsiteFunctionArn: !GetAtt Lambdas.Outputs.WebsiteFunctionArn
+        PlatformFunctionArn: !GetAtt Lambdas.Outputs.PlatformFunctionArn
+        TranslateFunctionArn: !GetAtt Lambdas.Outputs.TranslateFunctionArn
+
+Outputs:
+  ApiBaseUrl:
+    Value: !GetAtt ApiGateway.Outputs.ApiBaseUrl
+    Export: { Name: !Sub 'translateme-${StageName}-ApiBaseUrl' }
+  ApiId:
+    Value: !GetAtt ApiGateway.Outputs.ApiId
+    Export: { Name: !Sub 'translateme-${StageName}-ApiId' }
+  BasicUsagePlanId:
+    Value: !GetAtt ApiGateway.Outputs.BasicUsagePlanId
+  StandardUsagePlanId:
+    Value: !GetAtt ApiGateway.Outputs.StandardUsagePlanId
+  ProxyFunctionArn:
+    Value: !GetAtt Lambdas.Outputs.ProxyFunctionArn
+    Export: { Name: !Sub 'translateme-${StageName}-ProxyFunctionArn' }
+  PostConfirmationFunctionArn:
+    Value: !GetAtt Lambdas.Outputs.PostConfirmationFunctionArn
+  BatchWorkflowFunctionArn:
+    Value: !GetAtt Lambdas.Outputs.BatchWorkflowFunctionArn
+    Export: { Name: !Sub 'translateme-${StageName}-BatchWorkflowFunctionArn' }
+  ReadSitemapFunctionArn:
+    Value: !GetAtt Lambdas.Outputs.ReadSitemapFunctionArn
+    Export: { Name: !Sub 'translateme-${StageName}-ReadSitemapFunctionArn' }
+  PrewarmPagesFunctionArn:
+    Value: !GetAtt Lambdas.Outputs.PrewarmPagesFunctionArn
+    Export: { Name: !Sub 'translateme-${StageName}-PrewarmPagesFunctionArn' }
+  FinishPrewarmFunctionArn:
+    Value: !GetAtt Lambdas.Outputs.FinishPrewarmFunctionArn
+    Export: { Name: !Sub 'translateme-${StageName}-FinishPrewarmFunctionArn' }
+  MarkPrewarmFailedFunctionArn:
+    Value: !GetAtt Lambdas.Outputs.MarkPrewarmFailedFunctionArn
+    Export: { Name: !Sub 'translateme-${StageName}-MarkPrewarmFailedFunctionArn' }

@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  TranslateMe stack identity (C5) – Cognito User Pool dùng chung cho Web console và Platform Admin (nhóm PlatformAdmins).
+  Trigger Post confirmation (C6) gắn ở lượt deploy thứ hai, khi Lambda của stack api đã tồn tại.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[A-Za-z0-9_-]+'
+  PostConfirmationFunctionArn:
+    Type: String
+    Default: ''
+    Description: ARN Lambda post-confirmation (output của stack api); để trống ở lượt 1.
+
+Conditions:
+  HasPostConfirmation: !Not [!Equals [!Ref PostConfirmationFunctionArn, '']]
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub 'translateme-${StageName}'
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      UsernameConfiguration:
+        CaseSensitive: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireUppercase: false
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - { Name: verified_email, Priority: 1 }
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      Schema:
+        - { Name: email, AttributeDataType: String, Required: true, Mutable: true }
+        - { Name: name, AttributeDataType: String, Required: false, Mutable: true }
+        # custom:tenant_id, custom:role do Lambda (PostConfirmation, mời thành viên) gán; client không được ghi (QC-3)
+        - { Name: tenant_id, AttributeDataType: String, Mutable: true, StringAttributeConstraints: { MinLength: '1', MaxLength: '80' } }
+        - { Name: role, AttributeDataType: String, Mutable: true, StringAttributeConstraints: { MinLength: '1', MaxLength: '32' } }
+        - { Name: organization_name, AttributeDataType: String, Mutable: true, StringAttributeConstraints: { MinLength: '1', MaxLength: '120' } }
+      LambdaConfig: !If
+        - HasPostConfirmation
+        - { PostConfirmation: !Ref PostConfirmationFunctionArn }
+        - !Ref AWS::NoValue
+      UserPoolTags:
+        project: translateme
+        stage: !Ref StageName
+
+  # Web console và script e2e đăng nhập bằng USER_PASSWORD_AUTH (InitiateAuth); không có client secret (ứng dụng công khai).
+  ConsoleClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub 'translateme-${StageName}-console'
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows: [ALLOW_USER_PASSWORD_AUTH, ALLOW_USER_SRP_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits: { AccessToken: minutes, IdToken: minutes, RefreshToken: days }
+      ReadAttributes: [email, email_verified, name, custom:tenant_id, custom:role, custom:organization_name]
+      WriteAttributes: [email, name, custom:organization_name]
+
+  PlatformClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub 'translateme-${StageName}-platform'
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows: [ALLOW_USER_PASSWORD_AUTH, ALLOW_USER_SRP_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 1
+      TokenValidityUnits: { AccessToken: minutes, IdToken: minutes, RefreshToken: days }
+      ReadAttributes: [email, email_verified, name]
+      WriteAttributes: [email, name]
+
+  PlatformAdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: PlatformAdmins
+      Description: Platform Admin – chỉ đọc số liệu tổng hợp và khóa/mở tenant (services/api/platform).
+      UserPoolId: !Ref UserPool
+
+Outputs:
+  UserPoolId:
+    Value: !Ref UserPool
+    Export: { Name: !Sub 'translateme-${StageName}-UserPoolId' }
+  UserPoolArn:
+    Value: !GetAtt UserPool.Arn
+    Export: { Name: !Sub 'translateme-${StageName}-UserPoolArn' }
+  ConsoleClientId:
+    Value: !Ref ConsoleClient
+    Export: { Name: !Sub 'translateme-${StageName}-ConsoleClientId' }
+  PlatformClientId:
+    Value: !Ref PlatformClient
+    Export: { Name: !Sub 'translateme-${StageName}-PlatformClientId' }
