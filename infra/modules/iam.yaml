@@ -119,7 +119,7 @@ Resources:
                     dynamodb:LeadingKeys:
                       - 'TENANT#${aws:PrincipalTag/TenantId}'
                       - 'TENANT#${aws:PrincipalTag/TenantId}#*'
-                  Null:
+                  'Null':
                     dynamodb:LeadingKeys: 'false'
               - Sid: TenantBatchObjects
                 Effect: Allow

@@ -71,7 +71,8 @@ describe('tenant-scoped AWS sessions', () => {
     assert.ok(tenantRole, 'TenantDataAccessRole exists');
     assert.match(tenantRole[0], /aws:RequestTag\/TenantId: '\$\{sts:SourceIdentity\}'/);
     assert.match(tenantRole[0], /dynamodb:LeadingKeys:[\s\S]*?'TENANT#\$\{aws:PrincipalTag\/TenantId\}'/);
-    assert.match(tenantRole[0], /Null:\s*\n\s*dynamodb:LeadingKeys: 'false'/);
+    // Khóa phải đặt trong ngoặc ('Null':) – không thì YAML hiểu là null và CloudFormation từ chối template
+    assert.match(tenantRole[0], /'Null':\s*\n\s*dynamodb:LeadingKeys: 'false'/);
     assert.match(tenantRole[0], /\/batch\/\$\{!aws:PrincipalTag\/TenantId\}\/input\/\*/);
     assert.match(tenantRole[0], /\/batch\/\$\{!aws:PrincipalTag\/TenantId\}\/results\/\*/);
     assert.doesNotMatch(tenantRole[0], /TENANT#t_\*|\/batch\/\*\/\*/);
