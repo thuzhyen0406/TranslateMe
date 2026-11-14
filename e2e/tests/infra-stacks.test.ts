@@ -139,3 +139,21 @@ test('IAM: role đọc DynamoDB trực tiếp (không qua phiên tenant) có kms
     assert.match(body, /- kms:Decrypt[\s\S]*?Resource: !Ref KmsKeyArn[\s\S]*?kms:ViaService: !Sub 'dynamodb\./, `${name} thiếu kms:Decrypt`);
   }
 });
+
+test('IAM: dynamodb:LeadingKeys (khóa nhiều giá trị) luôn dùng ForAllValues kèm Null false', () => {
+  for (const file of ['iam.yaml', 'data.yaml', 'lambdas.yaml', 'workflow.yaml']) {
+    const path = join(infra, 'modules', file);
+    if (!existsSync(path)) continue;
+    const lines = read(path).split('\n');
+    lines.forEach((line, i) => {
+      if (!/^\s*dynamodb:LeadingKeys:/.test(line)) return;
+      const indent = line.search(/\S/);
+      // Dòng cha gần nhất thụt lề ít hơn là toán tử điều kiện.
+      let j = i - 1;
+      while (j >= 0 && (lines[j].trim().startsWith('#') || lines[j].search(/\S/) >= indent)) j--;
+      const operator = lines[j].trim();
+      if (operator === "'Null':") return;
+      assert.match(operator, /^ForAllValues:String(Like|Equals):$/, `${file}:${i + 1} dùng ${operator} cho dynamodb:LeadingKeys`);
+    });
+  }
+});
