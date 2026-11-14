@@ -34,6 +34,7 @@ cd ../../services/proxy && npm ci && npm test
 | `PROXY_SITES_JSON` | Tuần 1 | Danh sách website, xem ví dụ dưới. Từ tuần 2 thay bằng tra DynamoDB (SLUG → HOST + CONFIG) |
 | `TABLE_NAME` | Có (bật TM và SEG) | Tên bảng DynamoDB chính. Không có thì proxy chạy không TM, không ghi SEG và ghi log `TM_DISABLED`, `SEG_DISABLED` |
 | `TRANSLATE_BUDGET_MS` | Không | Ngân sách dịch, mặc định 20000 |
+| `STATE_CACHE_S` | Không | Thời gian giữ trạng thái website/tenant tra từ DynamoDB trong bộ nhớ Lambda (QC-10). Mặc định 60, kẹp tối đa 60 (QC-16), `0` = tắt. `lambdas.yaml` đặt 30 để khoá tenant có hiệu lực trong 60 s kể cả thời gian xoá cache CloudFront. Lỗi tra cứu không bao giờ được lưu đệm |
 | `TRANSLATE_CONCURRENCY` | Không | Số lời gọi TranslateText song song, mặc định 4 |
 | `WORKER_FUNCTION_NAME` | Không | Tên Lambda worker C13. Không có thì không hoàn tất nền, ghi log `WORKER_DISABLED` |
 | `WORKER_PAYLOAD_BUCKET` | Không | Bucket S3 chứa danh sách câu lớn gửi worker (khoá `tenant/<tenantId>/worker/…`). Nên đặt Lifecycle xoá sau 1 ngày |
@@ -58,10 +59,12 @@ cd ../../services/proxy && npm ci && npm test
 | Còn câu chưa dịch (lỗi Translate hoặc hết 20 giây) | `200`, `s-maxage=60`, `X-TranslateMe-Partial: 1`; phần còn lại gửi worker |
 | Tenant hết hạn mức ký tự (`CHAR_QUOTA_EXCEEDED`) | `200`, `s-maxage=300`, `X-TranslateMe-Partial: quota`; câu có trong TM vẫn dịch, câu trượt giữ gốc |
 | Đường dẫn sai, slug lạ, ngôn ngữ chưa bật | `404` |
+| Website PENDING (chưa xác minh tên miền) | `404`, `s-maxage=60`; không chuyển hướng, không tải trang (QC-2) |
+| Origin trả `404` / `410` | `404`, `s-maxage=60`; không dịch (QC-2) |
 | Phương thức khác GET/HEAD | `405` |
-| Website PAUSED/PENDING, tenant LOCKED | `302` về trang tương ứng trên website gốc |
+| Website PAUSED, tenant LOCKED | `302` về trang tương ứng trên website gốc |
 | `safe_fetch`: NOT_HTML / BLOCKED / TOO_LARGE / TIMEOUT / TOO_MANY_REDIRECTS, NETWORK_ERROR | `302` tới tệp gốc / `403` / `302` về trang gốc / `504` / `502` |
-| Origin trả mã khác 2xx, chuyển hướng sang tên miền khác, lỗi không lường trước, trang dịch > 5,5 MB | `302` về trang gốc |
+| Origin trả mã khác 2xx (trừ 404/410), chuyển hướng sang tên miền khác, lỗi không lường trước, trang dịch > 5,5 MB | `302` về trang gốc |
 
 ## Câu và marker gửi Translate
 
@@ -71,7 +74,7 @@ Báo cáo (F2 bước 5) ghi "bọc câu bằng `<span data-i>`". Không dùng c
 
 ## Translation Memory (2.4)
 
-- Hash câu: tạm dùng `hashSentenceStub` (`stubs.ts`, cùng quy tắc B.1.3) cho tới khi có `hashSentence` của thư viện 1.8.
+- Hash câu: `normalize_hash` của thư viện 1.8 (`libs/common/text-utils.ts`, quy tắc B.1.3), cùng hàm với realtime và batch. Bản tạm `hashSentenceStub` chỉ còn trong test và cho cùng kết quả.
 - Thuật ngữ: tạm dùng `getGlossaryStateStub` (không có thuật ngữ) cho tới khi có `getGlossaryState` của 2.8.
 - Đọc ghi DynamoDB: `createDynamoTmDb` trong `libs/common/tm.ts` (stub của 2.2, tự lặp `UnprocessedKeys`, kiểm tra khoá theo tiền tố tenant) cho tới khi `db.batchGet`/`db.update` của 2.2 dùng được.
 - Lỗi TM không làm hỏng trang: tra lỗi thì coi như trượt hết; ghi lỗi thì chỉ ghi log (`tmReadError`, `tmWriteFailed`).
@@ -129,7 +132,7 @@ Worker kiểm tra lại sự kiện và tenant (B.1.1): slug thuộc đúng `ten
 
 ## Việc còn lại
 
-- Thay `countCharsStub`, `hashSentenceStub`, `getGlossaryStateStub` khi 1.8, 2.8 xong (hạn mức 2.7 đã nối, xem mục 2.5).
+- Thay `countCharsStub`, `getGlossaryStateStub` khi 1.8, 2.8 xong (hạn mức 2.7 và hash câu 1.8 đã nối).
 - Khai báo Lambda worker và bucket tải trọng trong IaC (TV1).
 - Đo thời gian: lần tải đầu < 30 giây, lần hai trúng TM (mốc 4).
 - Xóa cache chọn lọc dựa trên SEG (3.5).

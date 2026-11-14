@@ -8,7 +8,8 @@
  *  - dịch đủ:                     200, Cache-Control: public, max-age=0, s-maxage=<cacheSeconds>
  *  - hết 20 giây còn câu chưa dịch: 200, s-maxage=60  + X-TranslateMe-Partial: 1; gửi phần còn lại cho worker C13
  *  - tenant hết hạn mức ký tự:     200, s-maxage=300 + X-TranslateMe-Partial: quota (câu có trong TM vẫn dịch)
- *  - website không ACTIVE / tenant LOCKED: 302 về trang gốc; ngôn ngữ không bật: 404
+ *  - website PAUSED / tenant LOCKED: 302 về trang gốc; website PENDING (chưa xác minh) hoặc ngôn ngữ không bật: 404
+ *  - origin trả 404/410: 404 (cache ngắn); origin trả mã khác ngoài 2xx: 302 về trang gốc, không cache (QC-2)
  *  - lỗi không lường trước: 302 về trang gốc (Visitor không bao giờ thấy trang lỗi)
  * Lỗi TM, đếm lượng dùng, gọi worker không làm hỏng trang: chỉ ghi log.
  * Đọc thuật ngữ (getGlossaryState) lỗi -> xử lý như lỗi tra TM: bỏ qua TM (không tra, không ghi, không gọi worker),
@@ -19,14 +20,15 @@
  * Bước 7 (3.4): ghi chỉ mục câu–trang SEG cho mọi câu của trang, <path> gồm slug (QC-5). Ghi SEG lỗi không làm
  * hỏng trang nhưng trả cache ngắn (s-maxage=60): thiếu SEG thì xóa cache chọn lọc (F5) có thể sót trang này.
  *
- * Bản tạm (B.14): hash câu và countChars chờ thư viện 1.8; db chờ batchGet/update của 2.2;
- * db của SEG chờ batchWrite/query GSI của 2.2.
+ * Hash câu: normalize_hash của thư viện 1.8 (libs/common/text-utils). Bản tạm (B.14): countChars chờ 1.8;
+ * db của TM và SEG chờ batchGet/update/batchWrite/query GSI của 2.2.
  * Hạn mức (QC-7): có TABLE_NAME thì reserveChars/releaseChars/settleUsage chạy trên UsageService (2.7) qua
  * usageServiceQuota; không có TABLE_NAME (chạy local) thì dùng quotaStub và ghi log USAGE_STUB.
  *
  * Biến môi trường: PUBLIC_BASE_URL, BASE_MODE (path|host), TABLE_NAME (DynamoDB; website/TM, SEG và Glossary),
  * TRANSLATE_BUDGET_MS (20000), TRANSLATE_CONCURRENCY (4), WORKER_FUNCTION_NAME (bật hoàn tất nền),
- * WORKER_PAYLOAD_BUCKET (S3 cho danh sách câu lớn), WORKER_BUDGET_MS (240000), USE_FETCH_STUB=1.
+ * WORKER_PAYLOAD_BUCKET (S3 cho danh sách câu lớn), WORKER_BUDGET_MS (240000), USE_FETCH_STUB=1,
+ * STATE_CACHE_S (lưu đệm website/tenant trong bộ nhớ Lambda, mặc định 60, tối đa 60, 0 = tắt; QC-10).
  */
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
@@ -48,6 +50,7 @@ import {
   type TranslateRequest,
   type TranslateResult,
 } from '../../libs/common/translator.js';
+import { normalize_hash } from '../../libs/common/text-utils.js';
 import type { Ctx, Sha256Hex } from '../../libs/common/types.js';
 import { UsageService } from '../../libs/common/usage/usage.js';
 import {
@@ -61,12 +64,15 @@ import {
   type SiteResolver,
   staticSiteResolver,
 } from './sites.js';
-import { countCharsStub, getGlossaryStateStub, hashSentenceStub } from './stubs.js';
+import { countCharsStub, getGlossaryStateStub } from './stubs.js';
 import { emptyReservation, isCharQuotaExceeded, quotaStub, usageServiceQuota, type QuotaApi, type Reservation } from './usage.js';
 import { DEFAULT_WORKER_BUDGET_MS, type WorkerDeps } from './worker.js';
 import { buildWorkerEvents, type PayloadStore, type WorkerEvent } from './workerEvents.js';
 
 export type { SiteConfig };
+
+/** Hash câu B.1.3 (NFC, gộp khoảng trắng, cắt hai đầu, SHA-256 hex) – cùng hàm với realtime và batch. */
+export const defaultHashSentence = (text: string): Sha256Hex => normalize_hash(text).hash as Sha256Hex;
 
 export const DEFAULT_BUDGET_MS = 20_000;
 export const PARTIAL_CACHE_SECONDS = 60;
@@ -253,6 +259,11 @@ export function createProxyHandler(deps: ProxyDeps) {
     if (!site) return finish(textResponse(404, 'Not Found', 'public, max-age=0, s-maxage=60'), { outcome: 'UNKNOWN_SLUG' });
     const originUrl = buildOriginUrl(site.homeUrl, parsed.rest, event.rawQueryString ?? '');
     if (!originUrl) return finish(textResponse(404, 'Not Found'), { outcome: 'OUTSIDE_SITE' });
+    // QC-2: website PENDING chưa xác minh quyền sở hữu tên miền nên không chuyển Visitor tới đó (tránh
+    // open redirect qua hostname bất kỳ vừa khai báo) mà trả 404 như slug chưa có. PAUSED / LOCKED -> 302.
+    if (site.status === 'PENDING') {
+      return finish(textResponse(404, 'Not Found', 'public, max-age=0, s-maxage=60'), { outcome: 'SITE_PENDING' });
+    }
     if (site.status !== 'ACTIVE' || site.tenantStatus !== 'ACTIVE') {
       return finish(redirect(originUrl, 'public, max-age=0, s-maxage=60'), { outcome: 'SITE_INACTIVE' });
     }
@@ -264,6 +275,11 @@ export function createProxyHandler(deps: ProxyDeps) {
     const fetched = await deps.fetchPage(originUrl);
     if (fetched.outcome.kind !== 'OK') {
       return finish(fetchFailureResponse(fetched, originUrl), { outcome: `FETCH_${fetched.outcome.kind}` });
+    }
+    // QC-2: trang gốc không tồn tại (404/410) -> 404 cache ngắn, để bản dịch không trỏ về trang lỗi của origin
+    // và trang bị xoá không bị dịch lại liên tục. Mã khác (403, 5xx…) -> 302 về trang gốc, không cache.
+    if (fetched.status === 404 || fetched.status === 410) {
+      return finish(textResponse(404, 'Not Found', 'public, max-age=0, s-maxage=60'), { outcome: 'ORIGIN_NOT_FOUND', originStatus: fetched.status });
     }
     if (fetched.status < 200 || fetched.status > 299) {
       return finish(redirect(originUrl), { outcome: 'ORIGIN_STATUS', originStatus: fetched.status });
@@ -294,7 +310,7 @@ export function createProxyHandler(deps: ProxyDeps) {
       }
 
       // Bước 3–4: băm câu và tra TM
-      const hashOf = deps.hashSentence ?? hashSentenceStub;
+      const hashOf = deps.hashSentence ?? defaultHashSentence;
       const items: SentenceWithHash[] = ex.sentences.map((text, id) => ({ id, text, hash: hashOf(text) }));
       let hits = new Map<Sha256Hex, TmHit>();
       let reviewFlags: Sha256Hex[] = [];
@@ -546,6 +562,21 @@ export function createProxyHandler(deps: ProxyDeps) {
 
 const positive = (v: string | undefined, d: number): number => (Number(v) > 0 ? Number(v) : d);
 
+/** Bọc resolver bằng bộ đệm trong bộ nhớ Lambda; ttl 0 thì đọc thẳng (lỗi tra cứu không bao giờ được lưu đệm). */
+function withStateCache(resolver: SiteResolver, ttlMs: number): SiteResolver {
+  return ttlMs > 0 ? cachedSiteResolver(resolver, ttlMs) : resolver;
+}
+
+/** Giữ trạng thái website/tenant tối đa bấy nhiêu giây (QC-10, QC-16: không quá 60 s sau khi khoá/tạm dừng). */
+export const MAX_STATE_CACHE_S = 60;
+
+/** STATE_CACHE_S -> mili giây: thiếu hoặc sai dạng = 60 s; kẹp trong [0, 60]; 0 = không lưu đệm. */
+export function stateCacheMs(v: string | undefined): number {
+  const n = v === undefined || v.trim() === '' ? Number.NaN : Number(v);
+  if (!Number.isFinite(n) || n < 0) return MAX_STATE_CACHE_S * 1000;
+  return Math.min(n, MAX_STATE_CACHE_S) * 1000;
+}
+
 /** Phần cấu hình proxy và worker dùng chung. */
 function sharedFromEnv(
   env: NodeJS.ProcessEnv,
@@ -610,9 +641,9 @@ function sharedFromEnv(
       useStaticSiteConfig
         ? staticResolver
         : documentClient && tableName
-          ? dynamoSiteResolver(documentClient as DynamoDBDocumentClient, tableName, {
+          ? withStateCache(dynamoSiteResolver(documentClient as DynamoDBDocumentClient, tableName, {
                 onInvalidConfig: (e) => logger.error({ action: 'INVALID_SITE_CONFIG', ...e }),
-              })
+              }), stateCacheMs(env.STATE_CACHE_S))
           : staticResolver
     ),
     tm,

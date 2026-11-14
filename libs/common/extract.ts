@@ -16,6 +16,8 @@
  *    (tiết kiệm ký tự tính phí – mục 3.2 Quy ước).
  *  - Không dịch: script, style, noscript, template, textarea, pre, code, svg, math, iframe, video…,
  *    phần tử có translate="no" hoặc class "notranslate", và customExclusionSelectors của website.
+ *  - <select> là phần tử khối (5.4): chữ của mỗi <option> là một câu, thuộc tính label của <option>/<optgroup>
+ *    được dịch; value giữ nguyên nên dữ liệu gửi đi của biểu mẫu không đổi.
  *  - <br> và phần tử khối ngắt đoạn; câu tách bằng segmenter (chỉ cắt ở chỗ marker cân bằng).
  */
 import { parse, serialize, serializeOuter } from 'parse5';
@@ -48,7 +50,7 @@ import { isTranslatable, segmentBlock } from './segmenter.js';
 /** Không dịch cả cây con (ở vị trí khối) / giữ nguyên thành {n/} (ở giữa câu). */
 export const NON_TRANSLATABLE_TAGS: ReadonlySet<string> = new Set([
   'script', 'style', 'noscript', 'template', 'textarea', 'pre', 'code', 'kbd', 'samp', 'var',
-  'svg', 'math', 'iframe', 'object', 'embed', 'canvas', 'video', 'audio', 'select',
+  'svg', 'math', 'iframe', 'object', 'embed', 'canvas', 'video', 'audio',
 ]);
 
 /** Thẻ nội tuyến có nội dung dịch được -> {n}…{/n}. */
@@ -59,7 +61,7 @@ const INLINE_WRAPPERS: ReadonlySet<string> = new Set([
 
 /** Phần tử nội tuyến giữ nguyên khi nằm giữa câu -> {n/}. */
 const INLINE_ATOMIC: ReadonlySet<string> = new Set([
-  'code', 'kbd', 'samp', 'var', 'img', 'svg', 'math', 'wbr', 'picture', 'select',
+  'code', 'kbd', 'samp', 'var', 'img', 'svg', 'math', 'wbr', 'picture',
 ]);
 
 const META_CONTENT_KEYS: ReadonlySet<string> = new Set([
@@ -129,6 +131,8 @@ function isTranslatableAttr(el: Element, name: string): boolean {
       return true;
     case 'alt':
       return el.tagName === 'img' || el.tagName === 'area' || el.tagName === 'input';
+    case 'label':
+      return el.tagName === 'option' || el.tagName === 'optgroup';
     case 'value': {
       const type = (getAttr(el, 'type') ?? '').toLowerCase();
       return el.tagName === 'input' && (type === 'submit' || type === 'button' || type === 'reset');

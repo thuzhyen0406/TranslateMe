@@ -7,10 +7,14 @@ import {
   createProxyHandler,
   depsFromEnv,
   parseProxyPath,
+  stateCacheMs,
+  defaultHashSentence,
   type FunctionUrlEvent,
   type ProxyDeps,
 } from '../handler.js';
 import { staticSiteResolver, type SiteConfig } from '../sites.js';
+import { hashSentenceStub } from '../stubs.js';
+import { normalize_hash } from '../../../libs/common/text-utils.js';
 import { SAMPLE_PAGE, SITE, fakeFetch, fakeLogger, fakeTranslate, okHtml, throttlingError } from './helpers.js';
 
 const CF = 'https://d1abc.cloudfront.net';
@@ -159,7 +163,7 @@ describe('proxy – từ chối và chuyển hướng', () => {
   });
 
   it('website tạm dừng hoặc tenant bị khoá -> 302 về trang tương ứng trên website gốc', async () => {
-    for (const patch of [{ status: 'PAUSED' }, { status: 'PENDING' }, { tenantStatus: 'LOCKED' }] as Partial<SiteConfig>[]) {
+    for (const patch of [{ status: 'PAUSED' }, { tenantStatus: 'LOCKED' }, { status: 'PAUSED', tenantStatus: 'LOCKED' }] as Partial<SiteConfig>[]) {
       const { handler, fetchPage } = setup({ sites: [{ ...SITE, ...patch }] });
       const res = await handler(ev('/homestay-abc/en/lien-he', 'GET', 'x=1'));
       assert.equal(res.statusCode, 302, JSON.stringify(patch));
@@ -185,11 +189,36 @@ describe('proxy – từ chối và chuyển hướng', () => {
     }
   });
 
-  it('origin trả mã khác 2xx -> 302 về trang gốc, không cache', async () => {
-    const res = await setup({ outcome: (u) => okHtml('<p>Không tìm thấy</p>', u, 404) }).handler(ev('/homestay-abc/en/x'));
-    assert.equal(res.statusCode, 302);
-    assert.equal(res.headers.location, 'https://homestay-abc.vn/x');
-    assert.equal(res.headers['cache-control'], 'no-store');
+  it('website PENDING (chưa xác minh) -> 404 như slug lạ, không chuyển hướng, không tải trang (QC-2)', async () => {
+    for (const patch of [{ status: 'PENDING' }, { status: 'PENDING', tenantStatus: 'LOCKED' }] as Partial<SiteConfig>[]) {
+      const { handler, fetchPage } = setup({ sites: [{ ...SITE, ...patch }] });
+      const res = await handler(ev('/homestay-abc/en/lien-he', 'GET', 'x=1'));
+      assert.equal(res.statusCode, 404, JSON.stringify(patch));
+      assert.equal(res.headers.location, undefined);
+      assert.equal(res.headers['cache-control'], 'public, max-age=0, s-maxage=60');
+      assert.equal(fetchPage.urls.length, 0);
+    }
+  });
+
+  it('origin trả 404 hoặc 410 -> 404 cache ngắn, không dịch (QC-2)', async () => {
+    for (const status of [404, 410]) {
+      const translateClient = fakeTranslate();
+      const { handler } = setup({ outcome: (u) => okHtml('<p>Không tìm thấy</p>', u, status), translateClient });
+      const res = await handler(ev('/homestay-abc/en/x'));
+      assert.equal(res.statusCode, 404, String(status));
+      assert.equal(res.headers.location, undefined);
+      assert.equal(res.headers['cache-control'], 'public, max-age=0, s-maxage=60');
+      assert.equal(translateClient.calls.length, 0);
+    }
+  });
+
+  it('origin trả mã khác ngoài 2xx (403, 500, 503) -> 302 về trang gốc, không cache', async () => {
+    for (const status of [403, 500, 503]) {
+      const res = await setup({ outcome: (u) => okHtml('<p>Lỗi</p>', u, status) }).handler(ev('/homestay-abc/en/x'));
+      assert.equal(res.statusCode, 302, String(status));
+      assert.equal(res.headers.location, 'https://homestay-abc.vn/x');
+      assert.equal(res.headers['cache-control'], 'no-store');
+    }
   });
 
   it('origin chuyển hướng sang tên miền khác -> không dịch, chuyển Visitor tới đó', async () => {
@@ -226,6 +255,31 @@ describe('proxy – từ chối và chuyển hướng', () => {
     const big = `<html><body><p>Xin chào</p><pre>${'x'.repeat(MAX_RESPONSE_BYTES)}</pre></body></html>`;
     const res = await setup({ outcome: (u) => okHtml(big, u) }).handler(ev('/homestay-abc/en/'));
     assert.equal(res.statusCode, 302);
+  });
+});
+
+describe('hash câu (B.1.3)', () => {
+  it('defaultHashSentence = normalize_hash (1.8) = bản tạm cũ, nên TM đã ghi vẫn trúng', () => {
+    const nfd = 'Phòng có ban công'.normalize('NFD');
+    for (const text of ['Chào mừng', `  ${nfd}  nhìn ra\tsông\n Hoài. `, 'Xem {1}bảng giá{/1} nhé.', 'a\u00a0b', '']) {
+      assert.equal(defaultHashSentence(text), normalize_hash(text).hash, JSON.stringify(text));
+      assert.equal(defaultHashSentence(text), hashSentenceStub(text), JSON.stringify(text));
+      assert.match(defaultHashSentence(text), /^[0-9a-f]{64}$/);
+    }
+    assert.equal(defaultHashSentence(nfd), defaultHashSentence('Phòng có ban công'), 'NFC');
+  });
+});
+
+describe('stateCacheMs (QC-10: STATE_CACHE_S)', () => {
+  it('mặc định 60 s; kẹp trong [0, 60]; 0 tắt lưu đệm; giá trị hỏng về mặc định', () => {
+    assert.equal(stateCacheMs(undefined), 60_000);
+    assert.equal(stateCacheMs(''), 60_000);
+    assert.equal(stateCacheMs('30'), 30_000);
+    assert.equal(stateCacheMs('0'), 0);
+    assert.equal(stateCacheMs('600'), 60_000, 'không giữ trạng thái khoá/tạm dừng quá 60 s (QC-16)');
+    assert.equal(stateCacheMs('-5'), 60_000);
+    assert.equal(stateCacheMs('abc'), 60_000);
+    assert.equal(stateCacheMs('1.5'), 1_500);
   });
 });
 

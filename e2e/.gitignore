@@ -4,3 +4,4 @@ evidence/
 .env
 .env.*
 !.env.example
+sites/dist/

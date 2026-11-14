@@ -95,6 +95,16 @@ Parameters:
     Default: 4
     MinValue: 1
     MaxValue: 10
+  PublicBaseUrl:
+    Type: String
+    Default: ''
+    Description: Địa chỉ công khai của bản dịch (CloudFront hoặc tên miền riêng, ví dụ https://dxxxx.cloudfront.net), dùng cho canonical/hreflang. Truyền từ stack edge để tránh vòng phụ thuộc CloudFront -> Function URL -> Lambda.
+  StateCacheSeconds:
+    Type: Number
+    Default: 30
+    MinValue: 0
+    MaxValue: 60
+    Description: STATE_CACHE_S (QC-10) – thời gian proxy/worker/prewarm giữ trạng thái website và tenant trong bộ nhớ. Đặt 30 để khoá tenant có hiệu lực trong 60 giây kể cả khi cộng thời gian xoá cache CloudFront (KB5 L4).
 
 Resources:
   ProxyFunction:
@@ -104,11 +114,16 @@ Resources:
       Runtime: nodejs22.x
       Handler: !Ref ProxyHandler
       Role: !Ref ProxyRoleArn
-      Timeout: 60
+      # QC-10: ngân sách dịch 20 s + tải trang/ráp HTML; CloudFront chỉ chờ origin 30 s nên Lambda phải dừng trước.
+      Timeout: 25
       MemorySize: 1024
       Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref ProxyCodeKey }
       Environment:
         Variables:
+          PUBLIC_BASE_URL: !Ref PublicBaseUrl
+          TRANSLATE_BUDGET_MS: '20000'
+          TRANSLATE_CONCURRENCY: !Ref TranslateConcurrency
+          STATE_CACHE_S: !Ref StateCacheSeconds
           TABLE_NAME: !Ref TableName
           WORKER_PAYLOAD_BUCKET: !Ref PayloadBucketName
           WORKER_FUNCTION_NAME: !Ref WorkerFunctionArn
@@ -124,11 +139,13 @@ Resources:
       Runtime: nodejs22.x
       Handler: !Ref WorkerHandler
       Role: !Ref WorkerRoleArn
-      Timeout: 240
+      # WORKER_BUDGET_MS mặc định 240 000 ms; cộng thời gian ghi TM và quyết toán hạn mức.
+      Timeout: 270
       MemorySize: 1024
       Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref WorkerCodeKey }
       Environment:
         Variables:
+          STATE_CACHE_S: !Ref StateCacheSeconds
           TABLE_NAME: !Ref TableName
           WORKER_PAYLOAD_BUCKET: !Ref PayloadBucketName
           TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
@@ -367,6 +384,232 @@ Resources:
           }
         - BatchWorkflowArn: !GetAtt BatchWorkflowFunction.Arn
 
+  # ---------------------------------------------------------------------------
+  # F6 – Dịch trước (PREWARM, Task 4.5). Bốn bước chạy cùng gói mã proxy (prewarm.ts dùng lõi F2) với vai trò
+  # của worker C13: tra website qua TENANT#PLATFORM#SLUG#, assume TenantDataAccessRole / TenantPayloadAccessRole,
+  # gọi Translate. Định nghĩa state machine giống hệt infra/statemachines/prewarm.asl.json
+  # (services/proxy/test/prewarm.test.ts kiểm tra hai bản khớp nhau).
+  # ---------------------------------------------------------------------------
+  ReadSitemapFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'translateme-${StageName}-prewarm-read-sitemap'
+      Runtime: nodejs22.x
+      Handler: services/proxy/prewarm.readSitemapHandler
+      Role: !Ref WorkerRoleArn
+      Timeout: 90
+      MemorySize: 512
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref ProxyCodeKey }
+      Environment:
+        Variables:
+          PUBLIC_BASE_URL: !Ref PublicBaseUrl
+          STATE_CACHE_S: !Ref StateCacheSeconds
+          TRANSLATE_CONCURRENCY: !Ref TranslateConcurrency
+          TABLE_NAME: !Ref TableName
+          WORKER_PAYLOAD_BUCKET: !Ref PayloadBucketName
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          TENANT_PAYLOAD_BUCKET_ARN: !Ref PayloadBucketArn
+          TENANT_PAYLOAD_ROLE_ARN: !Ref TenantPayloadRoleArn
+          DATA_KMS_KEY_ARN: !Ref KmsKeyArn
+
+  PrewarmPagesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'translateme-${StageName}-prewarm-pages'
+      Runtime: nodejs22.x
+      Handler: services/proxy/prewarm.prewarmPagesHandler
+      Role: !Ref WorkerRoleArn
+      # PREWARM_WORKER_BUDGET_MS = 240 s; ASL đặt TimeoutSeconds 300 cho bước này.
+      Timeout: 270
+      MemorySize: 1024
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref ProxyCodeKey }
+      Environment:
+        Variables:
+          PUBLIC_BASE_URL: !Ref PublicBaseUrl
+          STATE_CACHE_S: !Ref StateCacheSeconds
+          TRANSLATE_CONCURRENCY: !Ref TranslateConcurrency
+          TABLE_NAME: !Ref TableName
+          WORKER_PAYLOAD_BUCKET: !Ref PayloadBucketName
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          TENANT_PAYLOAD_BUCKET_ARN: !Ref PayloadBucketArn
+          TENANT_PAYLOAD_ROLE_ARN: !Ref TenantPayloadRoleArn
+          DATA_KMS_KEY_ARN: !Ref KmsKeyArn
+
+  FinishPrewarmFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'translateme-${StageName}-prewarm-finish'
+      Runtime: nodejs22.x
+      Handler: services/proxy/prewarm.finishPrewarmHandler
+      Role: !Ref WorkerRoleArn
+      Timeout: 30
+      MemorySize: 256
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref ProxyCodeKey }
+      Environment:
+        Variables:
+          PUBLIC_BASE_URL: !Ref PublicBaseUrl
+          STATE_CACHE_S: !Ref StateCacheSeconds
+          TRANSLATE_CONCURRENCY: !Ref TranslateConcurrency
+          TABLE_NAME: !Ref TableName
+          WORKER_PAYLOAD_BUCKET: !Ref PayloadBucketName
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          TENANT_PAYLOAD_BUCKET_ARN: !Ref PayloadBucketArn
+          TENANT_PAYLOAD_ROLE_ARN: !Ref TenantPayloadRoleArn
+          DATA_KMS_KEY_ARN: !Ref KmsKeyArn
+
+  MarkPrewarmFailedFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'translateme-${StageName}-prewarm-mark-failed'
+      Runtime: nodejs22.x
+      Handler: services/proxy/prewarm.markPrewarmFailedHandler
+      Role: !Ref WorkerRoleArn
+      Timeout: 30
+      MemorySize: 256
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref ProxyCodeKey }
+      Environment:
+        Variables:
+          PUBLIC_BASE_URL: !Ref PublicBaseUrl
+          STATE_CACHE_S: !Ref StateCacheSeconds
+          TRANSLATE_CONCURRENCY: !Ref TranslateConcurrency
+          TABLE_NAME: !Ref TableName
+          WORKER_PAYLOAD_BUCKET: !Ref PayloadBucketName
+          TENANT_DATA_ACCESS_ROLE_ARN: !Ref TenantDataAccessRoleArn
+          TENANT_PAYLOAD_BUCKET_ARN: !Ref PayloadBucketArn
+          TENANT_PAYLOAD_ROLE_ARN: !Ref TenantPayloadRoleArn
+          DATA_KMS_KEY_ARN: !Ref KmsKeyArn
+
+  PrewarmStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'translateme-${StageName}-prewarm-sfn'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: states.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: invoke-prewarm-steps
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ReadSitemapFunction.Arn
+                  - !GetAtt PrewarmPagesFunction.Arn
+                  - !GetAtt FinishPrewarmFunction.Arn
+                  - !GetAtt MarkPrewarmFailedFunction.Arn
+
+  PrewarmStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      # Tên cố định: ConsoleFunction dựng PREWARM_STATE_MACHINE_ARN và iam.yaml cấp states:StartExecution theo tên này.
+      StateMachineName: !Sub 'translateme-${StageName}-prewarm'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt PrewarmStateMachineRole.Arn
+      DefinitionSubstitutions:
+        ReadSitemapFunctionArn: !GetAtt ReadSitemapFunction.Arn
+        PrewarmPagesFunctionArn: !GetAtt PrewarmPagesFunction.Arn
+        FinishPrewarmFunctionArn: !GetAtt FinishPrewarmFunction.Arn
+        MarkPrewarmFailedFunctionArn: !GetAtt MarkPrewarmFailedFunction.Arn
+      DefinitionString: |-
+        {
+          "Comment": "TranslateMe PREWARM (F6, Task 4.5): đọc sitemap, Map thường qua các lô URL, worker C13 chế độ trang. Đầu vào M2: {job_id, tenant_id, slug, target_langs}. DefinitionSubstitutions: ReadSitemapFunctionArn, PrewarmPagesFunctionArn, FinishPrewarmFunctionArn, MarkPrewarmFailedFunctionArn.",
+          "StartAt": "ReadSitemap",
+          "States": {
+            "ReadSitemap": {
+              "Type": "Task",
+              "Resource": "${ReadSitemapFunctionArn}",
+              "TimeoutSeconds": 120,
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+              "Next": "PrewarmLots"
+            },
+            "PrewarmLots": {
+              "Type": "Map",
+              "ItemsPath": "$.lots",
+              "MaxConcurrency": 2,
+              "ItemSelector": {
+                "mode": "PREWARM_PAGES",
+                "job_id.$": "$.job_id",
+                "tenant_id.$": "$.tenant_id",
+                "slug.$": "$.slug",
+                "target_langs.$": "$.target_langs",
+                "urls_key.$": "$$.Map.Item.Value"
+              },
+              "ItemProcessor": {
+                "ProcessorConfig": { "Mode": "INLINE" },
+                "StartAt": "PrewarmPages",
+                "States": {
+                  "PrewarmPages": {
+                    "Type": "Task",
+                    "Resource": "${PrewarmPagesFunctionArn}",
+                    "TimeoutSeconds": 300,
+                    "Retry": [
+                      {
+                        "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                        "IntervalSeconds": 5,
+                        "MaxAttempts": 3,
+                        "BackoffRate": 2
+                      }
+                    ],
+                    "End": true
+                  }
+                }
+              },
+              "ResultPath": "$.results",
+              "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+              "Next": "FinishPrewarm"
+            },
+            "FinishPrewarm": {
+              "Type": "Task",
+              "Resource": "${FinishPrewarmFunctionArn}",
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+              "End": true
+            },
+            "MarkFailed": {
+              "Type": "Task",
+              "Resource": "${MarkPrewarmFailedFunctionArn}",
+              "TimeoutSeconds": 60,
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Next": "Failed"
+            },
+            "Failed": {
+              "Type": "Fail",
+              "Error": "PrewarmFailed",
+              "Cause": "Xem lý do trong bản ghi JOB"
+            }
+          }
+        }
+
   PlatformFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -421,6 +664,8 @@ Outputs:
     Value: !GetAtt BatchWorkflowFunction.Arn
   BatchStateMachineArn:
     Value: !Ref BatchStateMachine
+  PrewarmStateMachineArn:
+    Value: !Ref PrewarmStateMachine
   PlatformFunctionArn:
     Value: !GetAtt PlatformFunction.Arn
   PostConfirmationFunctionArn:
