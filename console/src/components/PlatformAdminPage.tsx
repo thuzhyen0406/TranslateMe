@@ -4,6 +4,7 @@ import {
   DEFAULT_PRICE_REFERENCED_AT,
   DEFAULT_TRANSLATE_PRICE_USD_PER_MILLION,
   listPlatformTenants,
+  parseCharacterLimitInput,
   updatePlatformTenantLimit,
   updatePlatformTenantStatus,
   type PlatformTenantSummary,
@@ -64,15 +65,15 @@ export const PlatformAdminPage: React.FC<{
   };
 
   const handleSaveLimit = async (row: PlatformTenantSummary) => {
-    const raw = Number(limitDrafts[row.tenant_id] ?? row.character_limit ?? 200_000);
-    if (!Number.isSafeInteger(raw) || raw < 0) {
-      setError('Hạn mức ký tự phải là số nguyên không âm.');
+    const limit = parseCharacterLimitInput(limitDrafts[row.tenant_id] ?? String(row.character_limit ?? 200_000));
+    if (limit === undefined) {
+      setError('Nhập hạn mức ký tự là số nguyên không âm.');
       return;
     }
     setBusyId(row.tenant_id);
     setError('');
     try {
-      await updatePlatformTenantLimit(session, row.tenant_id, raw);
+      await updatePlatformTenantLimit(session, row.tenant_id, limit);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Không thể cập nhật hạn mức ký tự.');

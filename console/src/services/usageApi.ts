@@ -18,15 +18,26 @@ export type SessionWithOptionalLimit = AuthenticatedSession & {
   characterLimit?: number;
 };
 
-export interface TenantUsageSummary {
+interface SettledUsageCounters {
+  chars_machine_translated: number;
+  chars_from_memory: number;
+  requests: number;
+  pages_served: number;
+}
+
+export type UsageSourceSummary = SettledUsageCounters & (
+  | { kind: 'WEB'; slug: string }
+  | { kind: 'CONSOLE' }
+  | { kind: 'API'; key_id: string; name?: string }
+);
+
+export interface TenantUsageSummary extends SettledUsageCounters {
   request_id?: string;
   tenant_id: string;
   month: string;
-  chars_machine_translated: number;
-  chars_from_memory: number;
   chars_quota_used: number;
-  requests: number;
-  pages_served: number;
+  reserved_in_flight?: number;
+  sources?: UsageSourceSummary[];
   /** Hạn mức ký tự riêng của tenant nếu API trả kèm hoặc đã đồng bộ từ cấu hình CONFIG. */
   character_limit?: number;
   characterLimit?: number;
@@ -56,6 +67,12 @@ export interface PlatformTenantSummary {
 
 export function isValidCharacterLimit(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+export function parseCharacterLimitInput(input: string): number | undefined {
+  if (!input.trim()) return undefined;
+  const limit = Number(input);
+  return isValidCharacterLimit(limit) ? limit : undefined;
 }
 
 export function currentMonthUtc(date: Date = new Date()): string {
@@ -99,7 +116,7 @@ export function computeUsageMetrics(
   const tmChars = Math.max(0, Number(raw.chars_from_memory ?? 0));
   const quotaUsed = Math.max(0, Number(raw.chars_quota_used ?? machineChars));
   const totalChars = machineChars + tmChars;
-  const reservedInFlight = Math.max(0, quotaUsed - machineChars);
+  const reservedInFlight = raw.reserved_in_flight ?? Math.max(0, quotaUsed - machineChars);
   const quotaUsedPercent =
     characterLimit > 0 ? (quotaUsed / characterLimit) * 100 : quotaUsed > 0 ? 100 : 0;
   const tmHitRatePercent = totalChars > 0 ? (tmChars / totalChars) * 100 : 0;
@@ -179,8 +196,14 @@ function getDefaultMockUsage(tenantId: string, month: string): TenantUsageSummar
     chars_machine_translated: 28_200,
     chars_from_memory: 65_800,
     chars_quota_used: 28_200,
+    reserved_in_flight: 0,
     requests: 2_012,
     pages_served: 48,
+    sources: [
+      { kind: 'WEB', slug: 'homestay-pho-co', chars_machine_translated: 12_200, chars_from_memory: 47_800, requests: 48, pages_served: 48 },
+      { kind: 'API', key_id: 'demo-api-key', name: 'Khóa demo', chars_machine_translated: 10_000, chars_from_memory: 12_000, requests: 1_000, pages_served: 0 },
+      { kind: 'CONSOLE', chars_machine_translated: 6_000, chars_from_memory: 6_000, requests: 964, pages_served: 0 },
+    ],
     ...(isValidCharacterLimit(limit) ? { character_limit: limit } : {}),
   };
   mockUsageStore.set(key, initial);

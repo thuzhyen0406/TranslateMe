@@ -247,7 +247,7 @@ export const UsagePage: React.FC<{ session: AuthenticatedSession }> = ({ session
               {formatUsd(metrics.estimated_cost_avoided_usd)}
             </div>
             <p className="mt-1.5 text-xs text-gray-600">
-              Chi phí dịch máy thực tế:{' '}
+              Chi phí dịch máy ước tính:{' '}
               <strong data-testid="metric-machine-cost" className="text-gray-800">
                 {formatUsd(metrics.estimated_machine_cost_usd)}
               </strong>{' '}
@@ -302,6 +302,17 @@ export const UsagePage: React.FC<{ session: AuthenticatedSession }> = ({ session
                     </td>
                     <td className="px-5 py-3.5 text-right font-semibold text-gray-800">
                       {formatNumber(metrics.chars_quota_used)} / {formatNumber(metrics.character_limit)} ký tự
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="px-5 py-3.5 font-medium text-gray-800">
+                      Ký tự đang giữ chỗ
+                    </td>
+                    <td className="px-4 py-3.5 font-mono text-xs text-gray-500">
+                      reserved_in_flight
+                    </td>
+                    <td className="px-5 py-3.5 text-right font-semibold text-gray-800">
+                      {formatNumber(metrics.reserved_in_flight)} ký tự
                     </td>
                   </tr>
                   <tr>
@@ -367,6 +378,50 @@ export const UsagePage: React.FC<{ session: AuthenticatedSession }> = ({ session
             </div>
           </section>
         </div>
+      )}
+
+      {metrics?.sources && (
+        <section className="mt-5 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="border-b border-gray-100 px-5 py-4">
+            <h2 className="font-semibold text-gray-800">Lượng dùng theo nguồn ({metrics.month})</h2>
+            <p className="mt-1 text-xs text-gray-500">Số liệu đã quyết toán theo từng website, API key và Console.</p>
+          </div>
+          {metrics.sources.length === 0 ? (
+            <p className="px-5 py-4 text-sm text-gray-500">Chưa có lượng dùng đã quyết toán trong tháng này.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm tabular-nums">
+                <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
+                  <tr>
+                    <th scope="col" className="px-5 py-3">Nguồn</th>
+                    <th scope="col" className="px-4 py-3 text-right">Ký tự dịch máy</th>
+                    <th scope="col" className="px-4 py-3 text-right">Ký tự từ TM</th>
+                    <th scope="col" className="px-4 py-3 text-right">Yêu cầu</th>
+                    <th scope="col" className="px-5 py-3 text-right">Trang đã phục vụ</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {metrics.sources.map((source) => {
+                    const id = source.kind === 'WEB' ? source.slug : source.kind === 'API' ? source.key_id : '';
+                    const label = source.kind === 'WEB' ? 'Website' : source.kind === 'API' ? 'API key' : 'Console';
+                    return (
+                      <tr key={`${source.kind}:${id}`}>
+                        <th scope="row" className="px-5 py-3.5 font-medium text-gray-800">
+                          {label}{source.kind === 'API' && source.name ? ` · ${source.name}` : ''}
+                          {id && <span className="block break-all text-xs font-normal text-gray-500">{id}</span>}
+                        </th>
+                        <td className="px-4 py-3.5 text-right">{formatNumber(source.chars_machine_translated)}</td>
+                        <td className="px-4 py-3.5 text-right">{formatNumber(source.chars_from_memory)}</td>
+                        <td className="px-4 py-3.5 text-right">{formatNumber(source.requests)}</td>
+                        <td className="px-5 py-3.5 text-right">{formatNumber(source.pages_served)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       )}
     </div>
   );

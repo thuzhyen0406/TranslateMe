@@ -620,10 +620,64 @@ export async function handleConsoleMeApiGatewayRoute(
   }
 }
 
+function settledUsageCounters(usage: Record<string, unknown> | null) {
+  const fromMemory = Number(usage?.sentFromTM ?? usage?.memoryChars ?? 0);
+  return {
+    chars_machine_translated: Math.max(0, Number(usage?.sentTotal ?? 0) - fromMemory),
+    chars_from_memory: fromMemory,
+    requests: Number(usage?.requests ?? 0),
+    pages_served: Number(usage?.pagesServed ?? 0),
+  };
+}
+
+async function readUsageSources(ctx: Ctx, month: string, usageDb: Pick<typeof db, 'get' | 'query'>) {
+  const { total, source: console } = usageKeys(ctx.tenantId, month, { kind: 'CONSOLE' });
+  const prefix = `${total.SK}#`;
+  const webPrefix = `${prefix}WEB#`;
+  const apiKeys = keys.apiKey(ctx, '');
+  const [channelRows, keyRows] = await Promise.all([
+    usageDb.query(ctx, total.PK, prefix, { consistent: true }),
+    usageDb.query(ctx, apiKeys.PK, apiKeys.SK, { consistent: true }),
+  ]);
+  const sources: Array<ReturnType<typeof settledUsageCounters> & (
+    | { kind: 'WEB'; slug: string }
+    | { kind: 'CONSOLE' }
+    | { kind: 'API'; key_id: string; name?: string }
+  )> = [];
+  for (const row of channelRows) {
+    if (row.SK === console.SK) {
+      sources.push({ kind: 'CONSOLE', ...settledUsageCounters(row) });
+    } else if (row.SK.startsWith(webPrefix)) {
+      const slug = decodeURIComponent(row.SK.slice(webPrefix.length));
+      sources.push({ kind: 'WEB', slug, ...settledUsageCounters(row) });
+    }
+  }
+  // Khóa đã thu hồi vẫn có bản ghi KEY# và giữ số liệu các tháng trước.
+  const batchSize = 20;
+  for (let offset = 0; offset < keyRows.length; offset += batchSize) {
+    const rows = await Promise.all(keyRows.slice(offset, offset + batchSize).map(async (row) => {
+      const keyId = row.SK.slice(apiKeys.SK.length);
+      const { source } = usageKeys(ctx.tenantId, month, { kind: 'API', keyId });
+      const usage = await usageDb.get(ctx, source, { consistent: true });
+      if (!usage) return null;
+      return {
+        kind: 'API' as const,
+        key_id: keyId,
+        ...(typeof row.name === 'string' ? { name: row.name } : {}),
+        ...settledUsageCounters(usage),
+      };
+    }));
+    for (const row of rows) {
+      if (row) sources.push(row);
+    }
+  }
+  return sources;
+}
+
 async function handleConsoleUsageRoute(
   event: ConsoleEvent,
   ctx: Ctx,
-  usageDb: Pick<typeof db, 'get'>,
+  usageDb: Pick<typeof db, 'get' | 'query'>,
 ): Promise<ConsoleResponse | null> {
   const path = normalizeConsolePath(event.path ?? event.rawPath ?? '').replace(/\/$/, '');
   if (path !== '/console/usage') return null;
@@ -639,8 +693,11 @@ async function handleConsoleUsageRoute(
     }
     const { total } = usageKeys(ctx.tenantId, month, { kind: 'CONSOLE' });
     const usage = await usageDb.get(ctx, total, { consistent: true });
-    const fromMemory = Number(usage?.sentFromTM ?? usage?.memoryChars ?? 0);
+    // Dòng tổng cộng vào machineChars ngay lúc giữ chỗ; sentTotal chỉ tăng khi quyết toán.
+    const settled = settledUsageCounters(usage);
     const quotaUsed = Number(usage?.machineChars ?? 0);
+    const reserved = Math.max(0, quotaUsed - settled.chars_machine_translated);
+    const sources = usage?.sentTotal === undefined ? [] : await readUsageSources(ctx, month, usageDb);
     const rawLimit =
       usage?.characterLimit ??
       usage?.charLimit ??
@@ -653,11 +710,10 @@ async function handleConsoleUsageRoute(
         request_id: requestId,
         tenant_id: ctx.tenantId,
         month,
-        chars_machine_translated: usage?.sentTotal === undefined ? quotaUsed : Math.max(0, Number(usage.sentTotal) - fromMemory),
-        chars_from_memory: fromMemory,
+        ...settled,
         chars_quota_used: quotaUsed,
-        requests: Number(usage?.requests ?? 0),
-        pages_served: Number(usage?.pagesServed ?? 0),
+        reserved_in_flight: reserved,
+        sources,
         ...(typeof rawLimit === 'number' && Number.isSafeInteger(rawLimit) && rawLimit >= 0
           ? { character_limit: rawLimit }
           : {}),
@@ -671,7 +727,7 @@ async function handleConsoleUsageRoute(
 
 export interface ConsoleHandlerDeps {
   contextFromClaims?: (claims: Record<string, unknown>, requestId: string) => Promise<Ctx>;
-  db?: Pick<typeof db, 'get'>;
+  db?: Pick<typeof db, 'get'> & Partial<Pick<typeof db, 'query'>>;
   prewarmDeps?: PrewarmManagerDeps;
   apiKeyDeps?: ApiKeyManagerDependencies;
 }
@@ -712,7 +768,10 @@ export function createConsoleHandler(
           deps?.db ? { db: deps.db } : undefined,
         );
         if (meResponse) return meResponse;
-        const usageResponse = await handleConsoleUsageRoute(event, ctx, deps?.db ?? db);
+        const usageResponse = await handleConsoleUsageRoute(event, ctx, {
+          get: deps?.db?.get ?? db.get,
+          query: deps?.db?.query ?? db.query,
+        });
         if (usageResponse) return usageResponse;
       }
       for (const route of effectiveModules) {

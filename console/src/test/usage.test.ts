@@ -9,6 +9,7 @@ import {
   computeUsageMetrics,
   fetchTenantCustomLimit,
   listPlatformTenants,
+  parseCharacterLimitInput,
   resolveTenantCharacterLimit,
   updatePlatformTenantLimit,
 } from '../services/usageApi.js';
@@ -56,6 +57,29 @@ describe('Usage & Cost Avoided calculation (Q5 / KB2)', () => {
     assert.equal(metrics.is_custom_limit, false);
     assert.equal(metrics.reserved_in_flight, 30);
     assert.equal(metrics.tm_hit_rate_percent, 25);
+  });
+
+  it('lượt giữ chỗ đầu tiên chiếm hạn mức và có chi phí dịch máy bằng 0', () => {
+    const metrics = computeUsageMetrics({
+      tenant_id: 't_usage', month: '2026-11',
+      chars_machine_translated: 0, chars_from_memory: 0, chars_quota_used: 60, reserved_in_flight: 60,
+      requests: 0, pages_served: 0, sources: [],
+    }, 'FREE', 100);
+
+    assert.equal(metrics.reserved_in_flight, 60);
+    assert.equal(metrics.quota_used_percent, 60);
+    assert.equal(metrics.total_chars_processed, 0);
+    assert.equal(metrics.estimated_machine_cost_usd, 0);
+    assert.deepEqual(metrics.sources, []);
+  });
+
+  it('từ chối hạn mức bỏ trống và chấp nhận giá trị 0 được nhập rõ ràng', () => {
+    assert.equal(parseCharacterLimitInput(''), undefined);
+    assert.equal(parseCharacterLimitInput('  '), undefined);
+    assert.equal(parseCharacterLimitInput('0'), 0);
+    assert.equal(parseCharacterLimitInput('25000'), 25_000);
+    assert.equal(parseCharacterLimitInput('-1'), undefined);
+    assert.equal(parseCharacterLimitInput('0.5'), undefined);
   });
 
   it('ưu tiên hạn mức riêng (customLimit hoặc raw.character_limit) khi khác mức mặc định của gói và xử lý đúng hạn mức bằng 0', () => {
