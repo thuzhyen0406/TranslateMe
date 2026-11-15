@@ -24,6 +24,10 @@ export const PlatformAdminPage: React.FC<{
   const [limitDrafts, setLimitDrafts] = useState<Record<string, string>>({});
 
   const refresh = useCallback(async () => {
+    if (mode === 'pricing') {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError('');
     try {
@@ -39,7 +43,7 @@ export const PlatformAdminPage: React.FC<{
     } finally {
       setLoading(false);
     }
-  }, [session]);
+  }, [session, mode]);
 
   useEffect(() => {
     void refresh();
@@ -80,36 +84,43 @@ export const PlatformAdminPage: React.FC<{
   if (mode === 'pricing') {
     return (
       <div className="mx-auto max-w-4xl p-6 md:p-9">
-        <p className="text-xs font-bold uppercase tracking-wider text-[#146c54]">
-          Quản trị nền tảng (F11)
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs font-bold uppercase tracking-wider text-[#146c54]">
+            Thông tin tham chiếu hệ thống (F11)
+          </p>
+          <span className="rounded-full bg-slate-100 border border-slate-200 px-2.5 py-0.5 text-xs font-semibold text-slate-600">
+            Chỉ đọc (Tĩnh)
+          </span>
+        </div>
         <h1 className="mt-1 text-2xl font-bold text-gray-800">
-          Cấu hình đơn giá tham chiếu & Ngân sách nền tảng
+          Thông tin đơn giá tham chiếu & Ngưỡng ngân sách mặc định
         </h1>
         <p className="mt-2 text-sm text-gray-500">
-          Thông số tham chiếu lưu tại bản ghi <code className="text-gray-700">PK = PLATFORM, SK = CONFIG</code> để tính chi phí dịch máy và chi phí ước tính tránh được.
+          Trang tra cứu tĩnh hiển thị các hằng số tham chiếu của nền tảng (được thiết lập qua mã hạ tầng CloudFormation{' '}
+          <code className="text-gray-700">infra/stacks/ops.yaml</code> và tệp hạt giống{' '}
+          <code className="text-gray-700">e2e/demo/platform-config.json</code>) dùng để quy đổi chi phí dịch máy và chi phí ước tính tránh được trên báo cáo lượng dùng.
         </p>
 
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
           <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
             <div className="text-xs font-semibold uppercase text-gray-500">
-              Đơn giá Amazon Translate (Standard Pay-as-you-go)
+              Đơn giá tham chiếu Amazon Translate (Pay-as-you-go)
             </div>
             <div className="mt-2 text-2xl font-bold text-[#146c54]">
               ${DEFAULT_TRANSLATE_PRICE_USD_PER_MILLION.toFixed(2)} / 1.000.000 ký tự
             </div>
             <p className="mt-2 text-xs text-gray-500">
-              Ngày tra cứu tham chiếu: <code>{DEFAULT_PRICE_REFERENCED_AT}</code> (nguồn: aws.amazon.com/translate/pricing).
+              Ngày tra cứu tham chiếu: <code>{DEFAULT_PRICE_REFERENCED_AT}</code> (nguồn biểu giá chuẩn của AWS Amazon Translate).
             </p>
           </div>
 
           <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
             <div className="text-xs font-semibold uppercase text-gray-500">
-              Ngân sách AWS Budgets toàn nền tảng
+              Ngưỡng cảnh báo AWS Budgets mặc định (IaC)
             </div>
             <div className="mt-2 text-2xl font-bold text-gray-800">$20.00 / tháng</div>
             <p className="mt-2 text-xs text-gray-500">
-              Cảnh báo SNS tự động tại các ngưỡng 50% ($10), 80% ($16) và dự báo 100% ($20).
+              Cấu hình trong <code>ops.yaml</code> (`TranslateMeMonthlyBudget`): gửi cảnh báo SNS tại các mốc 50% ($10), 80% ($16) và dự báo 100% ($20).
             </p>
           </div>
         </div>
@@ -205,7 +216,7 @@ export const PlatformAdminPage: React.FC<{
                         onClick={() => void handleSaveLimit(row)}
                         className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100"
                       >
-                        Lưu({formatNumber(Number(row.character_limit ?? 200_000))})
+                        Lưu ({formatNumber(Number(row.character_limit ?? 200_000))})
                       </button>
                     </div>
                   </td>

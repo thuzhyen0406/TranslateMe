@@ -13,6 +13,11 @@ export const PLAN_CHAR_LIMITS: Readonly<Record<AuthenticatedSession['plan'], num
   BUSINESS: 10_000_000,
 });
 
+export type SessionWithOptionalLimit = AuthenticatedSession & {
+  character_limit?: number;
+  characterLimit?: number;
+};
+
 export interface TenantUsageSummary {
   request_id?: string;
   tenant_id: string;
@@ -22,10 +27,14 @@ export interface TenantUsageSummary {
   chars_quota_used: number;
   requests: number;
   pages_served: number;
+  /** Hạn mức ký tự riêng của tenant nếu API trả kèm hoặc đã đồng bộ từ cấu hình CONFIG. */
+  character_limit?: number;
+  characterLimit?: number;
 }
 
 export interface ComputedUsageMetrics extends TenantUsageSummary {
   character_limit: number;
+  is_custom_limit: boolean;
   total_chars_processed: number;
   reserved_in_flight: number;
   quota_used_percent: number;
@@ -45,8 +54,29 @@ export interface PlatformTenantSummary {
   character_limit?: number;
 }
 
+export function isValidCharacterLimit(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 export function currentMonthUtc(date: Date = new Date()): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+const customTenantLimits = new Map<string, number>();
+
+export function resolveTenantCharacterLimit(
+  session: SessionWithOptionalLimit,
+  usage?: Partial<TenantUsageSummary> | null,
+  profileLimit?: number,
+): number {
+  if (isValidCharacterLimit(usage?.character_limit)) return usage.character_limit;
+  if (isValidCharacterLimit(usage?.characterLimit)) return usage.characterLimit;
+  if (isValidCharacterLimit(profileLimit)) return profileLimit;
+  if (isValidCharacterLimit(session.character_limit)) return session.character_limit;
+  if (isValidCharacterLimit(session.characterLimit)) return session.characterLimit;
+  const storedCustom = customTenantLimits.get(session.tenantId);
+  if (isValidCharacterLimit(storedCustom)) return storedCustom;
+  return PLAN_CHAR_LIMITS[session.plan] ?? PLAN_CHAR_LIMITS.FREE;
 }
 
 export function computeUsageMetrics(
@@ -55,16 +85,23 @@ export function computeUsageMetrics(
   customLimit?: number,
   priceUsdPerMillion: number = DEFAULT_TRANSLATE_PRICE_USD_PER_MILLION,
 ): ComputedUsageMetrics {
-  const characterLimit =
-    typeof customLimit === 'number' && customLimit > 0
-      ? customLimit
-      : (PLAN_CHAR_LIMITS[plan] ?? PLAN_CHAR_LIMITS.FREE);
+  const defaultPlanLimit = PLAN_CHAR_LIMITS[plan] ?? PLAN_CHAR_LIMITS.FREE;
+  const characterLimit = isValidCharacterLimit(customLimit)
+    ? customLimit
+    : isValidCharacterLimit(raw.character_limit)
+      ? raw.character_limit
+      : isValidCharacterLimit(raw.characterLimit)
+        ? raw.characterLimit
+        : defaultPlanLimit;
+  const isCustomLimit = characterLimit !== defaultPlanLimit;
+
   const machineChars = Math.max(0, Number(raw.chars_machine_translated ?? 0));
   const tmChars = Math.max(0, Number(raw.chars_from_memory ?? 0));
   const quotaUsed = Math.max(0, Number(raw.chars_quota_used ?? machineChars));
   const totalChars = machineChars + tmChars;
   const reservedInFlight = Math.max(0, quotaUsed - machineChars);
-  const quotaUsedPercent = characterLimit > 0 ? (quotaUsed / characterLimit) * 100 : 0;
+  const quotaUsedPercent =
+    characterLimit > 0 ? (quotaUsed / characterLimit) * 100 : quotaUsed > 0 ? 100 : 0;
   const tmHitRatePercent = totalChars > 0 ? (tmChars / totalChars) * 100 : 0;
   const estimatedMachineCostUsd = (machineChars * priceUsdPerMillion) / 1_000_000;
   const estimatedCostAvoidedUsd = (tmChars * priceUsdPerMillion) / 1_000_000;
@@ -77,6 +114,7 @@ export function computeUsageMetrics(
     requests: Math.max(0, Number(raw.requests ?? 0)),
     pages_served: Math.max(0, Number(raw.pages_served ?? 0)),
     character_limit: characterLimit,
+    is_custom_limit: isCustomLimit,
     total_chars_processed: totalChars,
     reserved_in_flight: reservedInFlight,
     quota_used_percent: quotaUsedPercent,
@@ -117,10 +155,23 @@ const mockPlatformTenants: PlatformTenantSummary[] = [
   },
 ];
 
+function getMockTenantCharacterLimit(tenantId: string): number | undefined {
+  const custom = customTenantLimits.get(tenantId);
+  if (isValidCharacterLimit(custom)) return custom;
+  const tenantRow = mockPlatformTenants.find((t) => t.tenant_id === tenantId);
+  return isValidCharacterLimit(tenantRow?.character_limit) ? tenantRow.character_limit : undefined;
+}
+
 function getDefaultMockUsage(tenantId: string, month: string): TenantUsageSummary {
   const key = `${tenantId}:${month}`;
+  const limit = getMockTenantCharacterLimit(tenantId);
   const existing = mockUsageStore.get(key);
-  if (existing) return { ...existing };
+  if (existing) {
+    return {
+      ...existing,
+      ...(isValidCharacterLimit(limit) ? { character_limit: limit } : {}),
+    };
+  }
   const initial: TenantUsageSummary = {
     request_id: `req-mock-${month}`,
     tenant_id: tenantId,
@@ -130,6 +181,7 @@ function getDefaultMockUsage(tenantId: string, month: string): TenantUsageSummar
     chars_quota_used: 28_200,
     requests: 2_012,
     pages_served: 48,
+    ...(isValidCharacterLimit(limit) ? { character_limit: limit } : {}),
   };
   mockUsageStore.set(key, initial);
   return { ...initial };
@@ -142,14 +194,51 @@ function jsonHeaders(session: AuthenticatedSession): Record<string, string> {
   };
 }
 
+/**
+ * Truy vấn hạn mức ký tự thực tế của tenant từ API (`/console/me`) hoặc bộ nhớ phiên làm việc.
+ * Nếu tenant được Platform Admin đặt `character_limit` riêng, giá trị này sẽ ghi đè hạn mức mặc định của gói.
+ */
+export async function fetchTenantCustomLimit(
+  session: SessionWithOptionalLimit,
+  fetchImpl: typeof fetch = fetch,
+): Promise<number | undefined> {
+  if (IS_DEMO_AUTH_MODE) {
+    return (
+      getMockTenantCharacterLimit(session.tenantId) ??
+      (isValidCharacterLimit(session.character_limit) ? session.character_limit : undefined) ??
+      (isValidCharacterLimit(session.characterLimit) ? session.characterLimit : undefined)
+    );
+  }
+  try {
+    const response = await fetchImpl(`${baseUrl}/console/me`, {
+      method: 'GET',
+      headers: jsonHeaders(session),
+    });
+    if (response.ok) {
+      const data = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      const candidate = data?.character_limit ?? data?.characterLimit ?? data?.charLimit;
+      if (isValidCharacterLimit(candidate)) {
+        customTenantLimits.set(session.tenantId, candidate);
+        return candidate;
+      }
+    }
+  } catch {
+    // Nếu không đọc được /console/me, lùi về hạn mức đã lưu trên session hoặc customTenantLimits
+  }
+  if (isValidCharacterLimit(session.character_limit)) return session.character_limit;
+  if (isValidCharacterLimit(session.characterLimit)) return session.characterLimit;
+  return customTenantLimits.get(session.tenantId);
+}
+
 export async function fetchTenantUsage(
-  session: AuthenticatedSession,
+  session: SessionWithOptionalLimit,
   month: string = currentMonthUtc(),
+  fetchImpl: typeof fetch = fetch,
 ): Promise<TenantUsageSummary> {
   if (IS_DEMO_AUTH_MODE) {
     return getDefaultMockUsage(session.tenantId, month);
   }
-  const response = await fetch(
+  const response = await fetchImpl(
     `${baseUrl}/console/usage?month=${encodeURIComponent(month)}`,
     {
       method: 'GET',
@@ -182,6 +271,11 @@ export async function listPlatformTenants(
     throw new Error(data?.error?.message ?? `Không thể tải danh sách tenant (${response.status}).`);
   }
   const payload = (await response.json()) as { items?: PlatformTenantSummary[] };
+  for (const item of payload.items ?? []) {
+    if (isValidCharacterLimit(item.character_limit)) {
+      customTenantLimits.set(item.tenant_id, item.character_limit);
+    }
+  }
   return payload.items ?? [];
 }
 
@@ -216,6 +310,10 @@ export async function updatePlatformTenantLimit(
   tenantId: string,
   characterLimit: number,
 ): Promise<void> {
+  if (!isValidCharacterLimit(characterLimit)) {
+    throw new Error('Hạn mức ký tự phải là số nguyên không âm.');
+  }
+  customTenantLimits.set(tenantId, characterLimit);
   if (IS_DEMO_AUTH_MODE) {
     const target = mockPlatformTenants.find((t) => t.tenant_id === tenantId);
     if (target) target.character_limit = characterLimit;

@@ -5,10 +5,12 @@ import {
   currentMonthUtc,
   DEFAULT_PRICE_REFERENCED_AT,
   DEFAULT_TRANSLATE_PRICE_USD_PER_MILLION,
+  fetchTenantCustomLimit,
   fetchTenantUsage,
+  resolveTenantCharacterLimit,
   type ComputedUsageMetrics,
+  type SessionWithOptionalLimit,
 } from '../services/usageApi.js';
-import { listKeys, type ApiKeyRow } from '../services/apiToolsApi.js';
 
 function formatNumber(n: number): string {
   return new Intl.NumberFormat('vi-VN').format(Math.round(n));
@@ -39,7 +41,6 @@ export const UsagePage: React.FC<{ session: AuthenticatedSession }> = ({ session
   const recentMonths = useMemo(() => buildRecentMonths(defaultMonth, 6), [defaultMonth]);
   const [month, setMonth] = useState<string>(defaultMonth);
   const [metrics, setMetrics] = useState<ComputedUsageMetrics | null>(null);
-  const [apiKeys, setApiKeys] = useState<ApiKeyRow[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>('');
 
@@ -47,12 +48,17 @@ export const UsagePage: React.FC<{ session: AuthenticatedSession }> = ({ session
     setLoading(true);
     setError('');
     try {
-      const [rawUsage, keysResult] = await Promise.all([
-        fetchTenantUsage(session, month),
-        listKeys(session).catch(() => [] as ApiKeyRow[]),
+      const sessionWithLimit = session as SessionWithOptionalLimit;
+      const [rawUsage, profileLimit] = await Promise.all([
+        fetchTenantUsage(sessionWithLimit, month),
+        fetchTenantCustomLimit(sessionWithLimit),
       ]);
-      setMetrics(computeUsageMetrics(rawUsage, session.plan));
-      setApiKeys(keysResult);
+      const effectiveLimit = resolveTenantCharacterLimit(
+        sessionWithLimit,
+        rawUsage,
+        profileLimit,
+      );
+      setMetrics(computeUsageMetrics(rawUsage, session.plan, effectiveLimit));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Không thể tải báo cáo lượng dùng.');
     } finally {
@@ -130,13 +136,21 @@ export const UsagePage: React.FC<{ session: AuthenticatedSession }> = ({ session
         <section className="mb-6 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <h2 className="font-semibold text-gray-800">
                   Hạn mức ký tự dịch máy tháng {metrics.month}
                 </h2>
                 <span className="rounded-full bg-[#e6f2ee] px-2.5 py-0.5 text-xs font-semibold text-[#146c54]">
                   Gói {session.plan}
                 </span>
+                {metrics.is_custom_limit && (
+                  <span
+                    data-testid="badge-custom-limit"
+                    className="rounded-full bg-amber-50 border border-amber-200 px-2.5 py-0.5 text-xs font-semibold text-amber-800"
+                  >
+                    Hạn mức riêng: {formatNumber(metrics.character_limit)} ký tự
+                  </span>
+                )}
               </div>
               <p className="mt-1 text-xs text-gray-500">
                 Kiểm soát nguyên tử qua <code className="text-gray-700">reserveChars</code> /{' '}
@@ -162,7 +176,13 @@ export const UsagePage: React.FC<{ session: AuthenticatedSession }> = ({ session
           <div className="mt-3 h-3 w-full overflow-hidden rounded-full bg-gray-100">
             <div
               className={`h-full transition-all duration-300 ${quotaColorClass}`}
-              style={{ width: `${Math.min(100, Math.max(1, metrics.quota_used_percent))}%` }}
+              style={{
+                width: `${
+                  metrics.quota_used_percent <= 0
+                    ? 0
+                    : Math.min(100, Math.max(1, metrics.quota_used_percent))
+                }%`,
+              }}
             />
           </div>
         </section>
@@ -182,7 +202,7 @@ export const UsagePage: React.FC<{ session: AuthenticatedSession }> = ({ session
               {formatNumber(metrics.chars_machine_translated)}
             </div>
             <p className="mt-1.5 text-xs text-gray-500">
-              Ký tự câu mới gửi sang Amazon Translate (tính vào hạn mức gói).
+              Ký tự câu mới gửi sang Amazon Translate (tính vào hạn mức tháng).
             </p>
           </div>
 
@@ -237,17 +257,18 @@ export const UsagePage: React.FC<{ session: AuthenticatedSession }> = ({ session
         </div>
       )}
 
-      {/* Bảng đối chiếu lưu lượng & Công thức quy đổi chi phí */}
+      {/* Bảng tổng hợp số liệu cấp tổ chức & Công thức quy đổi chi phí */}
       {metrics && (
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
           <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
             <div className="border-b border-gray-100 px-5 py-4">
               <h2 className="font-semibold text-gray-800">
-                Chi tiết lưu lượng và kênh tích hợp của tổ chức
+                Tổng hợp lưu lượng cấp tổ chức trong kỳ ({metrics.month})
               </h2>
               <p className="mt-1 text-xs text-gray-500">
-                Tổng hợp từ bản ghi <code className="text-gray-700">PK = TENANT#{metrics.tenant_id}#USAGE</code>,{' '}
-                <code className="text-gray-700">SK = MONTH#{metrics.month}</code>.
+                Số liệu tổng hợp toàn tổ chức từ bản ghi{' '}
+                <code className="text-gray-700">PK = TENANT#{metrics.tenant_id}#USAGE</code>,{' '}
+                <code className="text-gray-700">SK = MONTH#{metrics.month}</code> (gộp chung lưu lượng từ Website Proxy, REST API và Web Console).
               </p>
             </div>
 
@@ -255,18 +276,51 @@ export const UsagePage: React.FC<{ session: AuthenticatedSession }> = ({ session
               <table className="w-full text-left text-sm">
                 <thead className="bg-gray-50 text-xs uppercase tracking-wide text-gray-500">
                   <tr>
-                    <th className="px-5 py-3">Chỉ số / Kênh phát sinh</th>
-                    <th className="px-4 py-3">Khóa hạch toán DynamoDB</th>
+                    <th className="px-5 py-3">Bộ đếm tổng hợp của tổ chức</th>
+                    <th className="px-4 py-3">Trường phản hồi (/console/usage)</th>
                     <th className="px-5 py-3 text-right">Giá trị ghi nhận</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   <tr>
                     <td className="px-5 py-3.5 font-medium text-gray-800">
-                      Tổng lượt yêu cầu dịch (API & Console)
+                      Ký tự dịch máy thực tế đã quyết toán
                     </td>
                     <td className="px-4 py-3.5 font-mono text-xs text-gray-500">
-                      MONTH#{metrics.month}.requests
+                      chars_machine_translated
+                    </td>
+                    <td className="px-5 py-3.5 text-right font-semibold text-gray-800">
+                      {formatNumber(metrics.chars_machine_translated)} ký tự
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="px-5 py-3.5 font-medium text-gray-800">
+                      Ký tự tính vào hạn mức tháng (gồm cả giữ chỗ)
+                    </td>
+                    <td className="px-4 py-3.5 font-mono text-xs text-gray-500">
+                      chars_quota_used / character_limit
+                    </td>
+                    <td className="px-5 py-3.5 text-right font-semibold text-gray-800">
+                      {formatNumber(metrics.chars_quota_used)} / {formatNumber(metrics.character_limit)} ký tự
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="px-5 py-3.5 font-medium text-gray-800">
+                      Ký tự phục vụ từ Bộ nhớ dịch (TM)
+                    </td>
+                    <td className="px-4 py-3.5 font-mono text-xs text-gray-500">
+                      chars_from_memory
+                    </td>
+                    <td className="px-5 py-3.5 text-right font-semibold text-[#146c54]">
+                      {formatNumber(metrics.chars_from_memory)} ký tự ({formatUsd(metrics.estimated_cost_avoided_usd)})
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="px-5 py-3.5 font-medium text-gray-800">
+                      Tổng số lượt yêu cầu dịch trong tháng
+                    </td>
+                    <td className="px-4 py-3.5 font-mono text-xs text-gray-500">
+                      requests
                     </td>
                     <td className="px-5 py-3.5 text-right font-semibold text-gray-800">
                       {formatNumber(metrics.requests)} yêu cầu
@@ -274,35 +328,13 @@ export const UsagePage: React.FC<{ session: AuthenticatedSession }> = ({ session
                   </tr>
                   <tr>
                     <td className="px-5 py-3.5 font-medium text-gray-800">
-                      Số trang Website Proxy đã phục vụ
+                      Tổng số trang Website Proxy đã phục vụ
                     </td>
                     <td className="px-4 py-3.5 font-mono text-xs text-gray-500">
-                      MONTH#{metrics.month}#WEB#&lt;slug&gt;
+                      pages_served
                     </td>
                     <td className="px-5 py-3.5 text-right font-semibold text-gray-800">
                       {formatNumber(metrics.pages_served)} trang
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="px-5 py-3.5 font-medium text-gray-800">
-                      Khóa API đang hoạt động của tổ chức
-                    </td>
-                    <td className="px-4 py-3.5 font-mono text-xs text-gray-500">
-                      KEYUSAGE#&lt;keyId&gt; / MONTH#{metrics.month}
-                    </td>
-                    <td className="px-5 py-3.5 text-right font-semibold text-[#146c54]">
-                      {apiKeys.filter((k) => k.status === 'ACTIVE').length} khóa ACTIVE
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="px-5 py-3.5 font-medium text-gray-800">
-                      Ký tự tiết kiệm được nhờ Bộ nhớ dịch (TM)
-                    </td>
-                    <td className="px-4 py-3.5 font-mono text-xs text-gray-500">
-                      MONTH#{metrics.month}.sentFromTM
-                    </td>
-                    <td className="px-5 py-3.5 text-right font-semibold text-[#146c54]">
-                      {formatNumber(metrics.chars_from_memory)} ký tự ({formatUsd(metrics.estimated_cost_avoided_usd)})
                     </td>
                   </tr>
                 </tbody>
