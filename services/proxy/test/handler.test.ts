@@ -103,6 +103,21 @@ describe('proxy – luồng thành công', () => {
     assert.ok(!JSON.stringify(entry).includes('BAN CÔNG'), 'log không chứa nội dung trang');
   });
 
+  it('giữ nguyên phần tử translate="no" ở đúng vị trí khi Translate bỏ span đánh dấu', async () => {
+    const translateClient = fakeTranslate((text) => text
+      .replace(/<span\b[^>]*\btranslate="no"[^>]*>[\s\S]*?<\/span>/gi, '')
+      .replace(/<[^>]*>|[^<]+/g, (value) => value.startsWith('<') ? value : value.toUpperCase()));
+    const { handler } = setup({
+      translateClient,
+      outcome: (url) => okHtml('<p>đặt phòng <span translate="no"><strong>Brand &amp; Co</strong></span> ngay.</p>', url),
+    });
+    const res = await handler(ev('/homestay-abc/en/'));
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers['x-translateme-partial'], undefined);
+    assert.match(res.body, /ĐẶT PHÒNG <span translate="no"><strong>Brand &amp; Co<\/strong><\/span> NGAY\./u);
+    assert.ok(translateClient.calls.every((call) => !call.Text.includes('Brand')));
+  });
+
   it('BASE_MODE=host: liên kết /{lang}/…, canonical theo tên miền con', async () => {
     const { handler } = setup({ baseMode: 'host', publicBaseUrl: 'https://translateme.example' });
     const res = await handler(ev('/homestay-abc/ko/'));

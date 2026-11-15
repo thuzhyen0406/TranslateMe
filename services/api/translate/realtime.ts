@@ -9,7 +9,7 @@ import { TranslateClient } from '@aws-sdk/client-translate';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { S3Client } from '@aws-sdk/client-s3';
-import { createDynamoGlossaryReader, postCheckGlossary, type GlossaryState } from '../../../libs/common/glossary.js';
+import { createDynamoGlossaryReader, postCheckGlossary, machineGlossaryVersion, syncedTerminologyName, type GlossaryState } from '../../../libs/common/glossary.js';
 import { createTenantDocumentClientRouter, createTenantS3Client } from '../../../libs/common/tenantAws.js';
 import { segmentBlock } from '../../../libs/common/segmenter.js';
 import { normalize_hash } from '../../../libs/common/text-utils.js';
@@ -123,10 +123,7 @@ async function loadRealtimeGlossary(
     return deps.getGlossaryState(ctx);
   }
   const version = Number(configItem.glossaryVersion ?? EMPTY_GLOSSARY_STATE.version);
-  const syncedTerminologyName =
-    typeof configItem.terminologyName === 'string' && configItem.terminologyName.trim() !== ''
-      ? configItem.terminologyName.trim()
-      : null;
+  const terminologyName = syncedTerminologyName(configItem, version);
   if (version <= 0) {
     return { version: 0, terminologyName: null, terms: [] };
   }
@@ -136,6 +133,7 @@ async function loadRealtimeGlossary(
     const glossRes = await deps.ddb.send(
       new QueryCommand({
         TableName: deps.tableName,
+        ConsistentRead: true,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
         ExpressionAttributeValues: {
           ':pk': `TENANT#${ctx.tenantId}#GLOSS`,
@@ -159,10 +157,16 @@ async function loadRealtimeGlossary(
     sinceVersion: Number(item.sinceVersion ?? 1),
     deleted: Boolean(item.deleted),
   }));
+  if (terms.some((term) => term.sinceVersion > version)) {
+    throw new Error('Glossary changed while reading its terms.');
+  }
   const hasActiveTerms = terms.some((t) => !t.deleted);
   return {
     version,
-    terminologyName: hasActiveTerms ? syncedTerminologyName : null,
+    terminologyName: hasActiveTerms ? terminologyName : null,
+    ...(hasActiveTerms && !terminologyName && configItem.terminologySyncedVersion !== version
+      ? { pendingTerminology: true }
+      : {}),
     terms,
   };
 }
@@ -321,7 +325,7 @@ export function createRealtimeHandler(deps: RealtimeDeps) {
               hash: item.hash,
               sourceText: item.text,
               tgt: translated.tgt,
-              glossaryVersion: glossary.version,
+              glossaryVersion: machineGlossaryVersion(glossary),
               needsReview: translated.needsReview,
             };
           }));

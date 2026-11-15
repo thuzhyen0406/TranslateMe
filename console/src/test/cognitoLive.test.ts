@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { cognitoLive, ConsoleAuthError, createMockJwt, decodeJwtClaims, signOutSession, type CognitoLiveOptions } from '../services/cognitoAuth.js';
+import { applySessionRefresh, cognitoLive, ConsoleAuthError, createMockJwt, decodeJwtClaims, signOutSession, type CognitoLiveOptions } from '../services/cognitoAuth.js';
 import { callCognito, cognitoEndpoint, CognitoIdpError } from '../services/cognitoIdp.js';
 
 // Cognito + REST API giả lập qua fetchFn: kiểm tra đúng thao tác, đúng tham số, và cách dựng phiên từ token.
@@ -305,12 +305,47 @@ describe('Web Console – chế độ Cognito thật (VITE_AUTH_MODE=cognito)', 
     assert.notEqual(refreshed.idToken, out.session.idToken);
     assert.equal(calls.filter((c) => c.target === 'InitiateAuth').at(-1)!.body.AuthFlow, 'REFRESH_TOKEN_AUTH');
 
-    await signOutSession(refreshed, live);
+    let revokeAttempts = 0;
+    await signOutSession(refreshed, {
+      ...live,
+      fetchFn: (input, init) => {
+        const target = new Headers(init?.headers).get('x-amz-target');
+        if (target?.endsWith('.RevokeToken')) {
+          assert.equal(init?.keepalive, true);
+          if (++revokeAttempts === 1) return Promise.resolve(Response.json({}, { status: 503 }));
+        }
+        return live.fetchFn!(input, init);
+      },
+    });
+    assert.equal(revokeAttempts, 2);
     assert.equal(calls.at(-1)!.target, 'RevokeToken');
     await assert.rejects(
       cognitoLive.refreshSession(refreshed, live),
       (e: unknown) => e instanceof ConsoleAuthError && /hết hạn/.test(e.message),
     );
+  });
+
+  it('bỏ cả kết quả lẫn lỗi từ refresh đang chạy sau khi phiên đã đăng xuất', async () => {
+    const { users, live } = fakeBackend();
+    users.set('lan@x.vn', confirmedAdmin());
+    const result = await cognitoLive.signIn('lan@x.vn', 'Password123', live);
+    assert.equal(result.status, 'AUTHENTICATED');
+    if (result.status !== 'AUTHENTICATED') return;
+
+    const session = result.session;
+    let current = true;
+    const unexpected = () => assert.fail('Refresh của phiên cũ đã cập nhật Console');
+    let finish!: (next: typeof session) => void;
+    let fail!: (reason: Error) => void;
+    const pendingSuccess = new Promise<typeof session>((resolve) => { finish = resolve; });
+    const pendingError = new Promise<typeof session>((_resolve, reject) => { fail = reject; });
+    const refreshes = [pendingSuccess, pendingError].map((refresh) =>
+      applySessionRefresh(refresh, () => current, unexpected, unexpected),
+    );
+    current = false;
+    finish(session);
+    fail(new Error('Expired refresh token'));
+    await Promise.all(refreshes);
   });
 
   it('Tenant bị khóa: /console/me trả TENANT_SUSPENDED → phiên LOCKED (khóa thao tác ghi)', async () => {

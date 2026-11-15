@@ -14,11 +14,19 @@ const mockKeyRows = new Map<string, ApiKeyRow[]>();
 const mockJobs = new Map<string, { file: File; job: BatchJob; createdAt: number }>();
 const jsonHeaders = (session: AuthenticatedSession) => ({ Authorization: `Bearer ${session.idToken}`, 'Content-Type': 'application/json' });
 
+class ApiRequestError extends Error {
+  constructor(readonly status: number, readonly code: string | undefined, message: string) {
+    super(message);
+  }
+}
+
 async function request<T>(session: AuthenticatedSession, path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, { ...init, headers: { ...jsonHeaders(session), ...init.headers } });
-  const data = await response.json() as T & { error?: { message?: string } };
-  if (!response.ok) throw new Error(data.error?.message ?? `Yêu cầu thất bại (${response.status}).`);
-  return data;
+  if (!response.ok) {
+    const data = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null;
+    throw new ApiRequestError(response.status, data?.error?.code, data?.error?.message ?? `Yêu cầu thất bại (${response.status}).`);
+  }
+  return await response.json() as T;
 }
 
 export async function listKeys(session: AuthenticatedSession): Promise<ApiKeyRow[]> {
@@ -66,13 +74,55 @@ export async function submitBatch(session: AuthenticatedSession, file: File, sou
     const job: BatchJob = { job_id: jobId, status: 'RUNNING', total: Math.max(1, Math.ceil(file.size / 2000)), done: 0, failed: 0, progress: 0, target_langs: targetLangs, send_email: sendEmail };
     mockJobs.set(jobId, { file, job, createdAt: Date.now() }); return job;
   }
-  const upload = await request<{ file_key: string; upload_url: string; required_headers: Record<string, string> }>(session, '/translate/batch/session/upload-url', { method: 'POST', body: JSON.stringify({ file_name: file.name, size_bytes: file.size }) });
-  const put = await fetch(upload.upload_url, { method: 'PUT', headers: upload.required_headers, body: file });
-  if (!put.ok) throw new Error('Không thể tải tệp lên kho lưu trữ.');
-  const body = { file_key: upload.file_key, target_langs: targetLangs, ...(sourceLang ? { source_lang: sourceLang } : {}), send_email: sendEmail };
-  const result = await request<{ job_id: string; status: string; estimated_characters: number }>(session, '/translate/batch/session', { method: 'POST', body: JSON.stringify(body) });
-  return { job_id: result.job_id, status: result.status, total: result.estimated_characters, done: 0, failed: 0, progress: 0, target_langs: targetLangs, send_email: sendEmail };
+  return submitLiveBatch(session, file, sourceLang, targetLangs, sendEmail);
 }
+
+const pendingUploads = new WeakMap<File, { submission: string; fileKey: string }>();
+
+export async function submitLiveBatch(
+  session: AuthenticatedSession,
+  file: File,
+  sourceLang: string,
+  targetLangs: string[],
+  sendEmail: boolean,
+  pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+): Promise<BatchJob> {
+  const submission = JSON.stringify([session.tenantId, session.sub, sourceLang, targetLangs, sendEmail]);
+  let pending = pendingUploads.get(file);
+  if (pending?.submission !== submission) {
+    const upload = await request<{ file_key: string; upload_url: string; required_headers: Record<string, string> }>(
+      session, '/translate/batch/session/upload-url', { method: 'POST', body: JSON.stringify({ file_name: file.name, size_bytes: file.size }) },
+    );
+    const put = await fetch(upload.upload_url, { method: 'PUT', headers: upload.required_headers, body: file });
+    if (!put.ok) throw new Error('Không thể tải tệp lên kho lưu trữ.');
+    pending = { submission, fileKey: upload.file_key };
+    pendingUploads.set(file, pending);
+  }
+  const clearPending = () => {
+    if (pendingUploads.get(file) === pending) pendingUploads.delete(file);
+  };
+  const body = JSON.stringify({
+    file_key: pending.fileKey, target_langs: targetLangs, ...(sourceLang ? { source_lang: sourceLang } : {}), send_email: sendEmail,
+  });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const result = await request<{ job_id: string; status: string; estimated_characters: number }>(
+        session, '/translate/batch/session', { method: 'POST', body },
+      );
+      clearPending();
+      return { job_id: result.job_id, status: result.status, total: result.estimated_characters, done: 0, failed: 0, progress: 0, target_langs: targetLangs, send_email: sendEmail };
+    } catch (error) {
+      const unavailable = error instanceof ApiRequestError && error.status === 503;
+      if (unavailable && attempt < 3) {
+        await pause(500 * 2 ** attempt);
+        continue;
+      }
+      if (error instanceof ApiRequestError && error.status < 500) clearPending();
+      throw error;
+    }
+  }
+}
+
 export async function getBatchJob(session: AuthenticatedSession, id: string): Promise<BatchJob> {
   if (IS_DEMO_AUTH_MODE) {
     const item = mockJobs.get(id); if (!item) throw new Error('Không tìm thấy công việc.');

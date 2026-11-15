@@ -106,6 +106,9 @@ function createMockHarness(
       }
     }
 
+    if (cond.includes('glossaryVersion = :v') && existing?.glossaryVersion !== vals[':v']) {
+      throw Object.assign(new Error('Glossary version changed'), { name: 'ConditionalCheckFailedException' });
+    }
     if (cond.includes('terminologySyncedVersion < :v')) {
       const syncedVer = existing?.terminologySyncedVersion;
       if (syncedVer !== undefined && syncedVer >= vals[':v']) {
@@ -123,6 +126,9 @@ function createMockHarness(
     }
     if (expr.includes('terminologyName = :tname')) {
       updated.terminologyName = vals[':tname'];
+    }
+    if (expr.includes('terminologySyncedVersion = if_not_exists') && updated.terminologySyncedVersion === undefined) {
+      updated.terminologySyncedVersion = vals[':old'];
     }
     if (expr.includes('terminologySyncedVersion = :v')) {
       updated.terminologySyncedVersion = vals[':v'];
@@ -271,7 +277,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     assert.equal(r1.version, 1);
     assert.equal(r1.terminologySynced, true);
     assert.equal(translateCalls.length, 1);
-    assert.equal(translateCalls[0].input.Name, 'tm-t1');
+    assert.equal(translateCalls[0].input.Name, 'tm-t1-v1');
     assert.equal(translateCalls[0].input.MergeStrategy, 'OVERWRITE');
 
     const csv1 = Buffer.from(translateCalls[0].input.TerminologyData!.File!).toString('utf8');
@@ -283,7 +289,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     assert.equal(savedConfig?.plan, 'PRO');
     assert.equal(savedConfig?.quotaLimit, 500_000);
     assert.equal(savedConfig?.glossaryVersion, 1);
-    assert.equal(savedConfig?.terminologyName, 'tm-t1');
+    assert.equal(savedConfig?.terminologyName, 'tm-t1-v1');
 
     // 2. Thêm mục FIXED ("phố cổ Hội An")
     const r2 = await putTerm(
@@ -306,7 +312,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
 
     const state = await getGlossaryState(adminCtx, deps);
     assert.equal(state.version, 2);
-    assert.equal(state.terminologyName, 'tm-t1');
+    assert.equal(state.terminologyName, 'tm-t1-v2');
     assert.equal(state.terms.length, 2);
 
     const keepItem = state.terms.find((t) => t.normalized === 'homestay abc');
@@ -342,7 +348,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
 
     const stateV1 = await getGlossaryState(adminCtx, deps);
     assert.equal(stateV1.version, 1);
-    assert.equal(stateV1.terminologyName, 'tm-t1');
+    assert.equal(stateV1.terminologyName, 'tm-t1-v1');
     assert.equal(isStale('Thưởng thức món cao lầu đặc sản.', 1, stateV1), false);
 
     // Xóa thuật ngữ "cao lầu" -> glossaryVersion tăng lên 2
@@ -488,7 +494,7 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
     assert.equal(stateFailed.terminologyName, null);
     assert.equal(stateFailed.terms.length, 1);
 
-    // Khi AWS Translate phục hồi ở lần lưu kế tiếp -> terminologyName được cập nhật thành 'tm-t1'
+    // Khi Amazon Translate phục hồi, CONFIG trỏ sang bản thuật ngữ mới.
     setFailTranslate(false);
     const res2 = await putTerm(
       adminCtx,
@@ -504,7 +510,45 @@ describe('Task 2.8 – Quản lý Thuật ngữ / Glossary (F4)', () => {
 
     const stateRecovered = await getGlossaryState(adminCtx, deps);
     assert.equal(stateRecovered.version, 2);
-    assert.equal(stateRecovered.terminologyName, 'tm-t1');
+    assert.equal(stateRecovered.terminologyName, 'tm-t1-v2');
+  });
+
+  it('không dùng terminology cũ trong lúc đồng bộ và không cho lần import chậm hơn ghi đè bản mới', async () => {
+    const { deps, translateCalls } = createMockHarness();
+    const term = (translation: string) => ({
+      sourceTerm: 'Trang chủ',
+      type: 'FIXED' as const,
+      translations: { en: translation },
+    });
+    await putTerm(adminCtx, term('Homepage'), deps);
+    let entered!: () => void;
+    let release!: () => void;
+    const importStarted = new Promise<void>((resolve) => { entered = resolve; });
+    const delayedImport = new Promise<void>((resolve) => { release = resolve; });
+    const client = deps.translateClient;
+    deps.translateClient = {
+      async send(cmd) {
+        if (cmd.input.Name === 'tm-t1-v2') {
+          entered();
+          await delayedImport;
+        }
+        return client.send(cmd);
+      },
+    };
+    const outdated = putTerm(adminCtx, term('Main page'), deps);
+    await importStarted;
+    try {
+      const pending = await getGlossaryState(adminCtx, deps);
+      assert.deepEqual([pending.version, pending.terminologyName, pending.pendingTerminology], [2, null, true]);
+      const newest = await putTerm(adminCtx, term('Home'), deps);
+      assert.equal(newest.terminologySynced, true);
+    } finally {
+      release();
+    }
+    assert.equal((await outdated).terminologySynced, false);
+    const current = await getGlossaryState(adminCtx, deps);
+    assert.deepEqual([current.version, current.terminologyName, current.terms[0]?.translations?.en], [3, 'tm-t1-v3', 'Home']);
+    assert.deepEqual(translateCalls.map((cmd) => cmd.input.Name), ['tm-t1-v1', 'tm-t1-v3', 'tm-t1-v2']);
   });
 
   it('importCsv ở chế độ PREVIEW bắt đủ các lỗi và giới hạn tối đa 99 dòng hợp lệ trong 1 giao dịch nguyên tử', async () => {

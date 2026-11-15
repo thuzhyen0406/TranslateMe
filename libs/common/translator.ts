@@ -16,7 +16,7 @@
  *  - Translate lỗi -> câu của khối đó nằm trong `failed` kèm lý do.
  */
 import { TranslateClient, TranslateTextCommand } from '@aws-sdk/client-translate';
-import { compareMarkers, escapeHtmlText, markersToSpanHtml, spanHtmlToMarkers, stripMarkers } from './markers.js';
+import { compareMarkers, escapeHtmlText, hasAtomicMarkers, markersToSpanHtml, serializeMarkers, spanHtmlToMarkers, stripMarkers, tokenizeMarkers } from './markers.js';
 import type { Sentence } from './tm.js';
 import type { Lang } from './types.js';
 
@@ -147,9 +147,35 @@ export function createTranslator(client: TranslateClientLike, opts: TranslatorOp
       return true;
     };
 
+    // If Translate removes a protected span, translate only the surrounding text and
+    // reassemble the original marker stream. A partial result would move or lose content.
+    const withoutAtomicSpans = async (u: Unit): Promise<void> => {
+      let tgt = '';
+      try {
+        for (const token of tokenizeMarkers(u.text)) {
+          if (token.type !== 'text' || !token.value.trim()) {
+            tgt += serializeMarkers([token]);
+            continue;
+          }
+          if (!timeLeft()) return void pending.add(u.k);
+          const leading = /^\s*/u.exec(token.value)![0];
+          const trailing = /\s*$/u.exec(token.value)![0];
+          const out = spanHtmlToMarkers(await call(escapeHtmlText(token.value.trim())));
+          if (!out.ok || !out.text.trim()) return void failed.set(u.k, 'ATOMIC_TRANSLATION_INCOMPLETE');
+          tgt += leading + out.text.trim() + trailing;
+        }
+        if (!compareMarkers(u.text, tgt).restorable) return void failed.set(u.k, 'ATOMIC_TRANSLATION_INCOMPLETE');
+        done.set(u.k, { tgt, needsReview: true });
+        stats.plainFallbacks++;
+      } catch (err) {
+        failed.set(u.k, errorName(err));
+      }
+    };
+
     /** Dịch lại một câu dạng văn bản thuần (bỏ thẻ nội tuyến), gắn "Cần xem lại". */
     const plain = async (u: Unit): Promise<void> => {
       if (!timeLeft()) return void pending.add(u.k);
+      if (hasAtomicMarkers(u.text)) return withoutAtomicSpans(u);
       try {
         const out = spanHtmlToMarkers((await call(escapeHtmlText(stripMarkers(u.text)))).trim());
         if (out.text.trim()) {

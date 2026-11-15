@@ -1539,7 +1539,31 @@ export async function signOutSession(
 ): Promise<void> {
   if (IS_DEMO_AUTH_MODE && !opts.region && !opts.clientId) return;
   if (!session?.refreshToken) return;
-  await callCognito('RevokeToken', { Token: session.refreshToken }, liveIdpConfig(opts)).catch(() => undefined);
+  const config = liveIdpConfig(opts);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await callCognito('RevokeToken', { Token: session.refreshToken }, config);
+      return;
+    } catch (error) {
+      const retryable = error instanceof CognitoIdpError &&
+        (error.code === 'NETWORK_ERROR' || error.code === 'TooManyRequestsException' || (error.httpStatus ?? 0) >= 500);
+      if (!retryable || attempt === 2) return;
+      await new Promise((resolve) => setTimeout(resolve, 200 * 2 ** attempt));
+    }
+  }
+}
+
+/** Apply a refresh result only while the session that requested it is still current. */
+export async function applySessionRefresh(
+  refresh: Promise<AuthenticatedSession>,
+  isCurrent: () => boolean,
+  onRefresh: (session: AuthenticatedSession) => void,
+  onFailure: () => void,
+): Promise<void> {
+  const next = await refresh.catch(() => null);
+  if (!isCurrent()) return;
+  if (next) onRefresh(next);
+  else onFailure();
 }
 
 /** Gọi REST API Console bằng ID token của phiên; lỗi chuyển thành `ConsoleAuthError` theo Bảng 2.10. */

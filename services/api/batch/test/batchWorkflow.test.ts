@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { createDocxPackage } from '../../../../libs/common/docx.js';
+import { validateMarkers } from '../../../../libs/common/markers.js';
+import { parse } from '../../../../libs/common/parsers.js';
 import { jobKey, type JobDb } from '../../../../libs/common/jobs.js';
 import { createBatchWorkflowHandler, failedExecutionTask, splitBatchBlocks, splitOversizedBatchBlocks, type BatchWorkflowDeps } from '../batchWorkflow.js';
 import type { Ctx } from '../../../../libs/common/types.js';
@@ -84,12 +87,47 @@ describe('batch workflow', () => {
     assert.deepEqual(pieces.map((piece) => piece.partIndex), pieces.map((_, i) => i));
   });
 
-  it('parses TXT, translates lots, assembles a result, and ignores duplicate lot completion', async () => {
+  const longPhrase = 'good morning '.repeat(1_300).trimEnd();
+  const batchFiles = [
+    {
+      format: 'TXT',
+      extension: 'txt',
+      input: Buffer.from('Hello.\n' + longPhrase + '.'),
+      verify(result: Uint8Array) {
+        assert.equal(new TextDecoder().decode(result), 'HELLO.\n' + longPhrase.toUpperCase() + '.');
+      },
+    },
+    {
+      format: 'HTML',
+      extension: 'html',
+      input: Buffer.from('<p>See <strong>' + longPhrase + '</strong> <span translate="no">Keep Case</span> today.</p>'),
+      verify(result: Uint8Array) {
+        assert.ok(new TextDecoder().decode(result).includes(
+          '<p>SEE <strong>' + longPhrase.toUpperCase() + '</strong> <span translate="no">Keep Case</span> TODAY.</p>',
+        ));
+      },
+    },
+    {
+      format: 'DOCX',
+      extension: 'docx',
+      input: createDocxPackage({
+        'word/document.xml': '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>' +
+          '<w:r><w:t xml:space="preserve">See </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>' + longPhrase + '</w:t></w:r>' +
+          '<w:r><w:t xml:space="preserve"> today.</w:t></w:r></w:p></w:body></w:document>',
+      }),
+      verify(result: Uint8Array) {
+        const doc = parse('DOCX', result);
+        assert.deepEqual(doc.blocks.map(({ text }) => text), ['{1}SEE {/1}' + longPhrase.toUpperCase() + '{2} TODAY.{/2}']);
+      },
+    },
+  ] as const;
+
+  for (const fixture of batchFiles) it(`translates oversized ${fixture.format} with spacing and markers, and ignores duplicate lot completion`, async () => {
     const key = jobKey(ctx, jobId);
     const item: Record<string, any> = {
       ...key, entityType: 'JOB', tenantId: ctx.tenantId, jobId, type: 'FILE', status: 'QUEUED',
       targetLangs: ['fr'], total: 0, done: 0, failed: 0, warnings: [], lots: {},
-      fileKey: `batch/${ctx.tenantId}/input/source.txt`, fileName: 'source.txt', format: 'txt', sourceLang: 'en',
+      fileKey: `batch/${ctx.tenantId}/input/source.${fixture.extension}`, fileName: `source.${fixture.extension}`, format: fixture.extension, sourceLang: 'en',
       usageSource: { kind: 'API', keyId: 'key-test' }, sendEmail: false,
     };
     const markers = new Map<string, Record<string, unknown>>();
@@ -132,7 +170,7 @@ describe('batch workflow', () => {
         if (lotId && values[':true'] === true) item.lots[lotId] = true;
       },
     };
-    const objects = new Map<string, Uint8Array>([[item.fileKey, new TextEncoder().encode('Hello.\nGood morning.')]]);
+    const objects = new Map<string, Uint8Array>([[item.fileKey, fixture.input]]);
     const reservations: number[] = [];
     const settlements: number[] = [];
     const settledRequests = new Map<string, string>();
@@ -177,7 +215,8 @@ describe('batch workflow', () => {
       async getGlossaryState() { return { version: 0, terminologyName: null, terms: [] }; },
       async translate(input) {
         translateCalls++;
-        return { translated: input.sentences.map((sentence) => ({ id: sentence.id, tgt: `FR:${sentence.text}`, needsReview: false })), pending: [], failed: [], stats: { uniqueSentences: input.sentences.length, calls: 1, charsSent: 0, splits: 0, plainFallbacks: 0 } };
+        assert.ok(input.sentences.every(({ text }) => validateMarkers(text).ok));
+        return { translated: input.sentences.map((sentence) => ({ id: sentence.id, tgt: sentence.text.trim().toUpperCase(), needsReview: false })), pending: [], failed: [], stats: { uniqueSentences: input.sentences.length, calls: 1, charsSent: 0, splits: 0, plainFallbacks: 0 } };
       },
       async detectLanguage() { return { language: 'en', confidence: 0.99 }; },
       now: () => new Date('2026-11-08T00:00:00.000Z'),
@@ -204,8 +243,8 @@ describe('batch workflow', () => {
     assert.equal(item.status, 'SUCCEEDED');
     assert.equal(item.done, item.total);
     assert.equal(settlements.length, 1);
-    const result = objects.get(`batch/${ctx.tenantId}/results/${jobId}/source.fr.txt`)!;
-    assert.equal(new TextDecoder().decode(result), 'FR:Hello.\nFR:Good morning.');
+    const result = objects.get(`batch/${ctx.tenantId}/results/${jobId}/source.fr.${fixture.extension}`)!;
+    fixture.verify(result);
 
     item.status = 'RUNNING';
     item.total = 3;
@@ -319,7 +358,7 @@ describe('batch workflow', () => {
       fileKey: `batch/${ctx.tenantId}/input/source.txt`, fileName: 'source.txt', format: 'txt',
       usageSource: { kind: 'API', keyId: 'key-test' }, sendEmail: false,
     };
-    const objects = new Map<string, Uint8Array>([[lotKey, new TextEncoder().encode('[]')]]);
+    const objects = new Map<string, Uint8Array>([[lotKey, new TextEncoder().encode(JSON.stringify([{ id: 0, text: 'Hello.' }]))]]);
     const db: JobDb = {
       async get(_ctx, lookup) { return lookup.PK === key.PK && lookup.SK === key.SK ? item : null; },
       async put(_ctx, value) { Object.assign(item, value); },
@@ -345,12 +384,12 @@ describe('batch workflow', () => {
         async refund() {},
       } as unknown as BatchWorkflowDeps['usage'],
       tm: {
-        async getTM() { return { hits: new Map(), misses: [], reviewFlags: [] }; },
+        async getTM(_ctx: Ctx, _src: string, _tgt: string, sentences: Array<{ id: number; text: string; hash: string }>) { return { hits: new Map(), misses: sentences, reviewFlags: [] }; },
         async markHumanNeedsReview() { return { marked: 0, skipped: 0, failed: [] }; },
         async putMachineTM() { return { written: 0, skippedHuman: 0, failed: [] }; },
       } as unknown as BatchWorkflowDeps['tm'],
       async getGlossaryState() { return { version: 0, terminologyName: null, terms: [] }; },
-      async translate() { throw new Error('Translation is not expected for an empty lot.'); },
+      async translate() { return { translated: [{ id: 0, tgt: 'Bonjour.', needsReview: false }], pending: [], failed: [], stats: { uniqueSentences: 1, calls: 1, charsSent: 6, splits: 0, plainFallbacks: 0 } }; },
       async detectLanguage() { return { language: 'en', confidence }; },
       now: () => new Date('2026-11-08T00:00:00.000Z'),
     });

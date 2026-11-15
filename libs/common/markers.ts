@@ -333,7 +333,7 @@ export function spanHtmlToMarkers(html: string): SpanParseResult {
   }
   pushText(html.slice(last));
 
-  for (const s of stack) if (s.id !== null && !s.isVoid) problems.push(`UNCLOSED_SPAN:${s.id}`);
+  for (const s of stack) if (s.id !== null) problems.push(`UNCLOSED_SPAN:${s.id}`);
   const v = validateMarkers(out);
   for (const e of v.errors) problems.push(`${e.code}:${e.id}`);
   return { text: out, ok: problems.length === 0, problems };
@@ -369,6 +369,10 @@ function markerMultiset(tokens: readonly MarkerToken[]): Map<string, number> {
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return counts;
+}
+
+export function hasAtomicMarkers(text: string): boolean {
+  return /\{\d+\/\}/u.test(text) && tokenizeMarkers(text).some((token) => token.type === 'void');
 }
 
 export function compareMarkers(source: string, translated: string): MarkerComparison {
