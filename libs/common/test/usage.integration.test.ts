@@ -214,6 +214,18 @@ describe('TranslateMe monthly usage reservation (offline)', () => {
     assert.ok(Number(total?.machineChars) <= limit);
   });
 
+  it('settles a memory-only request when existing machine usage exceeds the reduced quota', async () => {
+    const tenantId = 't_reduced';
+    const source: UsageSource = { kind: 'CONSOLE' };
+    const { ddb, usage } = createUsage(0, tenantId);
+    const total = usageKeys(tenantId, monthUtc(), source).total;
+    ddb.seed(total, { ...total, machineChars: 200 });
+    const ticket = await usage.reserve({ tenantId, requestId: 'memory-only', n: 0, source });
+    await usage.settle(ticket, { machineChars: 0, memoryChars: 12 });
+    assert.equal(ddb.get(total)?.machineChars, 200);
+    assert.equal(ddb.get(total)?.memoryChars, 12);
+  });
+
   it('rejects a reservation larger than CONFIG before creating usage counters', async () => {
     const tenantId = `oversized-${randomUUID()}`;
     const { ddb, usage } = createUsage(200, tenantId);

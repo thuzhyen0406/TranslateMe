@@ -111,6 +111,7 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
     executionName?: string;
     file?: {
       fileKey: string;
+      fileVersionId?: string;
       fileName: string;
       format: string;
       sourceLang?: string;
@@ -136,6 +137,7 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
         targetLangs: input.targetLangs,
         ...(input.file ? {
           fileKey: input.file.fileKey,
+          ...(input.file.fileVersionId ? { fileVersionId: input.file.fileVersionId } : {}),
           fileName: input.file.fileName,
           format: input.file.format,
           ...(input.file.sourceLang ? { sourceLang: input.file.sourceLang } : {}),
@@ -220,18 +222,18 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
   }
 
   /** Kết thúc công việc. Chỉ đổi được từ QUEUED/RUNNING (không ghi đè kết quả đã chốt). */
-  async function finish(ctx: Ctx, jobId: string, result: { status: 'SUCCEEDED' | 'FAILED'; warnings?: JobWarning[]; reason?: string; failedRemaining?: number }): Promise<void> {
-    const failedRemaining = result.failedRemaining ?? 0;
+  async function finish(ctx: Ctx, jobId: string, result: { status: 'SUCCEEDED' | 'FAILED'; warnings?: JobWarning[]; reason?: string; markUnfinishedFailed?: boolean }): Promise<void> {
+    const markUnfinishedFailed = result.status === 'FAILED' && result.markUnfinishedFailed;
     await db.update(ctx, {
       Key: jobKey(ctx, jobId),
-      UpdateExpression: 'SET #status = :status, #warnings = :warnings, #updatedAt = :at, #finishedAt = :at' + (result.reason ? ', #reason = :reason' : '') + (failedRemaining ? ' ADD #failed :failedRemaining' : ''),
+      UpdateExpression: 'SET #status = :status, #warnings = :warnings, #updatedAt = :at, #finishedAt = :at' + (result.reason ? ', #reason = :reason' : '') + (markUnfinishedFailed ? ', #failed = #total - #done' : ''),
       ConditionExpression: '#status IN (:queued, :running)',
       ExpressionAttributeNames: {
         '#status': 'status',
         '#warnings': 'warnings',
         '#updatedAt': 'updatedAt',
         '#finishedAt': 'finishedAt',
-        ...(failedRemaining ? { '#failed': 'failed' } : {}),
+        ...(markUnfinishedFailed ? { '#failed': 'failed', '#total': 'total', '#done': 'done' } : {}),
         ...(result.reason ? { '#reason': 'reason' } : {}),
       },
       ExpressionAttributeValues: {
@@ -240,7 +242,6 @@ export function createJobStore(db: JobDb, now: () => number = Date.now) {
         ':at': iso(),
         ':queued': 'QUEUED',
         ':running': 'RUNNING',
-        ...(failedRemaining ? { ':failedRemaining': failedRemaining } : {}),
         ...(result.reason ? { ':reason': result.reason } : {}),
       },
     });

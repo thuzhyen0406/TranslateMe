@@ -7,8 +7,8 @@
 import { randomUUID } from 'node:crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
-import { GetObjectCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
-import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { db } from '../../../libs/common/db.js';
 import { contextFromIdTokenClaims } from '../auth/context.js';
@@ -34,9 +34,9 @@ type BatchUsage = Pick<UsageService, 'reserve' | 'refund'>;
 
 /** S3 adapter tối thiểu giúp kiểm tra luồng bằng mock, không phụ thuộc mạng trong unit test. */
 export interface BatchObjectStore {
-  signPut(input: { tenantId: string; bucket: string; key: string; contentType: string; expiresIn: number }): Promise<string>;
-  head(input: { tenantId: string; bucket: string; key: string }): Promise<{ contentLength?: number; contentType?: string }>;
-  get(input: { tenantId: string; bucket: string; key: string }): Promise<Uint8Array>;
+  signPut(input: { tenantId: string; bucket: string; key: string; contentType: string; contentLength: number; expiresIn: number }): Promise<string>;
+  head(input: { tenantId: string; bucket: string; key: string }): Promise<{ contentLength?: number; contentType?: string; versionId?: string }>;
+  get(input: { tenantId: string; bucket: string; key: string; versionId: string }): Promise<Uint8Array>;
   signGet?(input: { tenantId: string; bucket: string; key: string; expiresIn: number }): Promise<string>;
 }
 
@@ -48,6 +48,7 @@ export interface BatchIngressDependencies {
   bucket: string;
   resolveTenant(event: BatchIngressEvent, requestId: string): Promise<Ctx | null>;
   startExecution(input: { name: string; input: string }): Promise<{ executionArn?: string }>;
+  describeExecution?(jobId: string): Promise<string | undefined>;
   now(): Date;
 }
 
@@ -214,7 +215,7 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
           expiresAt: retainedUntil.toISOString(), createdAt: createdAt.toISOString(),
           ttl: Math.floor(retainedUntil.getTime() / 1000),
         }, 'attribute_not_exists(PK) AND attribute_not_exists(SK)');
-        const uploadUrl = await deps.s3.signPut({ tenantId: ctx.tenantId, bucket: deps.bucket, key: fileKey, contentType, expiresIn: UPLOAD_URL_TTL_SECONDS });
+        const uploadUrl = await deps.s3.signPut({ tenantId: ctx.tenantId, bucket: deps.bucket, key: fileKey, contentType, contentLength: Number(declaredSize), expiresIn: UPLOAD_URL_TTL_SECONDS });
         return respond(200, {
           file_key: fileKey,
           upload_url: uploadUrl,
@@ -262,7 +263,7 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
         const existingJob = await deps.db.get(ctx, jobKey(ctx, jobId), { consistent: true });
         if (existingJob) return await respondForExistingJob(existingJob);
 
-        let head: { contentLength?: number; contentType?: string };
+        let head: Awaited<ReturnType<BatchObjectStore['head']>>;
         try {
           head = await deps.s3.head({ tenantId: ctx.tenantId, bucket: deps.bucket, key: fileKey });
         } catch (error) {
@@ -279,7 +280,11 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
         if (head.contentType !== upload.contentType || !Object.hasOwn(FORMAT_CONTENT_TYPES, format)) {
           throw new AppError('INVALID_REQUEST', 'Định dạng tệp không khớp phần mở rộng.');
         }
-        const bytes = await deps.s3.get({ tenantId: ctx.tenantId, bucket: deps.bucket, key: fileKey });
+        if (!head.versionId || head.versionId === 'null') {
+          throw new AppError('INTERNAL_ERROR', 'Kho tệp batch chưa trả phiên bản tệp hợp lệ.');
+        }
+        const fileVersionId = head.versionId;
+        const bytes = await deps.s3.get({ tenantId: ctx.tenantId, bucket: deps.bucket, key: fileKey, versionId: fileVersionId });
         if (bytes.length !== actualSize || bytes.length > MAX_FILE_BYTES) {
           throw new AppError('INVALID_REQUEST', 'Kích thước tệp đã thay đổi sau khi kiểm tra.');
         }
@@ -326,6 +331,7 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
             targetLangs,
             file: {
               fileKey,
+              fileVersionId,
               fileName: upload.fileName,
               format,
               ...(sourceLang ? { sourceLang } : {}),
@@ -355,8 +361,34 @@ export function createBatchIngressHandler(deps: BatchIngressDependencies) {
       const jobMatch = /(?:^|\/)translate\/batch\/(?:session\/)?((?:job-)?\d{8}-[0-9a-f]{12})\/?$/u.exec(path);
       if (method === 'GET' && jobMatch) {
         const jobId = jobMatch[1].startsWith('job-') ? jobMatch[1] : `job-${jobMatch[1]}`;
-        const job = await deps.db.get(ctx, jobKey(ctx, jobId), { consistent: true });
+        const key = jobKey(ctx, jobId);
+        let job = await deps.db.get(ctx, key, { consistent: true });
         if (!job || job.type !== 'FILE') throw new AppError('NOT_FOUND', 'Không tìm thấy công việc batch.');
+        const updatedAt = Date.parse(String(job.updatedAt ?? ''));
+        const stale = !Number.isFinite(updatedAt) || deps.now().getTime() - updatedAt >= 30_000;
+        if (deps.describeExecution && stale &&
+            (job.status === 'RUNNING' || (job.status === 'QUEUED' && job.workflowStarted === true))) {
+          try {
+            const status = await deps.describeExecution(jobId);
+            if (status === 'FAILED' || status === 'TIMED_OUT' || status === 'ABORTED') {
+              await createJobStore(deps.db, () => deps.now().getTime()).finish(ctx, jobId, {
+                status: 'FAILED',
+                reason: `WORKFLOW_${status}`,
+                markUnfinishedFailed: true,
+              });
+              job = await deps.db.get(ctx, key, { consistent: true }) ?? job;
+            }
+          } catch (error) {
+            if ((error as { name?: string })?.name === 'ConditionalCheckFailedException') {
+              job = await deps.db.get(ctx, key, { consistent: true }) ?? job;
+            } else if ((error as { name?: string })?.name !== 'ExecutionDoesNotExist') {
+              console.error(JSON.stringify({
+                level: 'ERROR', event: 'BATCH_EXECUTION_RECONCILE_FAILED', job_id: jobId,
+                errorName: error instanceof Error ? error.name : 'UnknownError',
+              }));
+            }
+          }
+        }
         const resultFiles = job.resultFiles && typeof job.resultFiles === 'object' ? job.resultFiles as Record<string, string> : {};
         const downloads: Record<string, string> = {};
         if (job.status === 'SUCCEEDED' && deps.s3.signGet) {
@@ -406,8 +438,18 @@ const usageService = new UsageService(usageDdbClient, { tableName: process.env.T
 const tenantS3Clients = new Map<string, ReturnType<typeof createTenantS3Client>>();
 const sfnClient = new SFNClient({});
 
+export function signBatchUpload(
+  client: S3Client,
+  { bucket, key, contentType, contentLength, expiresIn }: Omit<Parameters<BatchObjectStore['signPut']>[0], 'tenantId'>,
+): Promise<string> {
+  return getSignedUrl(client,
+    new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType, ContentLength: contentLength }),
+    { expiresIn, signableHeaders: new Set(['content-type', 'content-length']) },
+  );
+}
+
 /** Lấy client S3 STS theo tenant; mỗi client bị giới hạn trong prefix batch riêng của tenant. */
-function s3ClientForTenant(tenantId: string): any {
+function s3ClientForTenant(tenantId: string): S3Client {
   let client = tenantS3Clients.get(tenantId);
   if (!client) {
     const roleArn = process.env.TENANT_DATA_ACCESS_ROLE_ARN;
@@ -417,7 +459,7 @@ function s3ClientForTenant(tenantId: string): any {
     client = createTenantS3Client(roleArn, tenantId, bucketArn, 'batch', 'batch-ingress', kmsKeyArn);
     tenantS3Clients.set(tenantId, client);
   }
-  return client;
+  return client as unknown as S3Client;
 }
 
 /** Phân giải Ctx từ Cognito claims/MEMBER đang hiệu lực hoặc API Gateway API key/KEYMAP. */
@@ -454,18 +496,18 @@ export async function handler(event: BatchIngressEvent) {
       const response = await sfnClient.send(new StartExecutionCommand({ stateMachineArn, name, input }));
       return { executionArn: response.executionArn };
     },
+    async describeExecution(jobId) {
+      const executionArn = stateMachineArn.replace(':stateMachine:', ':execution:') + ':' + jobId;
+      return (await sfnClient.send(new DescribeExecutionCommand({ executionArn, includedData: 'METADATA_ONLY' }))).status;
+    },
     s3: {
-      signPut: ({ tenantId, bucket: targetBucket, key, contentType, expiresIn }) => getSignedUrl(
-        s3ClientForTenant(tenantId) as any,
-        new PutObjectCommand({ Bucket: targetBucket, Key: key, ContentType: contentType }),
-        { expiresIn, signableHeaders: new Set(['content-type']) },
-      ),
+      signPut: ({ tenantId, ...input }) => signBatchUpload(s3ClientForTenant(tenantId), input),
       async head({ tenantId, bucket: targetBucket, key }) {
         const result = await s3ClientForTenant(tenantId).send(new HeadObjectCommand({ Bucket: targetBucket, Key: key }));
-        return { contentLength: result.ContentLength, contentType: result.ContentType };
+        return { contentLength: result.ContentLength, contentType: result.ContentType, versionId: result.VersionId };
       },
-      async get({ tenantId, bucket: targetBucket, key }) {
-        const result = await s3ClientForTenant(tenantId).send(new GetObjectCommand({ Bucket: targetBucket, Key: key })) as any;
+      async get({ tenantId, bucket: targetBucket, key, versionId }) {
+        const result = await s3ClientForTenant(tenantId).send(new GetObjectCommand({ Bucket: targetBucket, Key: key, VersionId: versionId }));
         if (!result.Body) throw new Error('S3 object body is empty');
         return result.Body.transformToByteArray();
       },

@@ -7,8 +7,8 @@ import { cfg } from '../lib/config';
 import { loadState, State } from '../lib/state';
 import { login } from '../lib/auth';
 import { call, errCode } from '../lib/http';
-import { B, R, restorableConfig } from '../lib/contract';
-import { ev, record, skipCase, skipUnlessFeature } from '../lib/evidence';
+import { B, R } from '../lib/contract';
+import { ev, record, skipCase } from '../lib/evidence';
 
 const SC = 5;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -55,53 +55,41 @@ describe('Kịch bản 5 – ba loại 429', () => {
     assert.equal(got, 'REQUEST_QUOTA_EXCEEDED');
   }));
 
-  const l3Skip = !mutate()
-    ? skipCase(SC, 'L3', 'CHAR_QUOTA_EXCEEDED và TM hit', 'cần TM_ALLOW_MUTATION=1 trên dev/demo')
-    : skipUnlessFeature(SC, 'L3', 'CHAR_QUOTA_EXCEEDED và TM hit', 'TM_E2E_HAS_PLATFORM_CONFIG', 'API chưa triển khai GET/PUT /platform/config')
-      || skipUnlessFeature(SC, 'L3', 'CHAR_QUOTA_EXCEEDED và TM hit', 'TM_E2E_HAS_CONSOLE_ME', 'API chưa triển khai GET /console/me để xác định gói tenant C');
+  const l3Skip = !mutate() && skipCase(SC, 'L3', 'CHAR_QUOTA_EXCEEDED và TM hit', 'cần TM_ALLOW_MUTATION=1 trên dev/demo');
   it('L3 CHAR_QUOTA_EXCEEDED, nhưng câu đã có trong TM vẫn 200', { skip: l3Skip },
     ev(SC, 'L3', '429 CHAR_QUOTA_EXCEEDED và 200 cho câu trong TM', async (note) => {
-      const key = S.tenants.C.apiKey;
+      const tenant = S.tenants.C;
       const known = `Câu đã có trong bộ nhớ dịch ${Date.now()}`;
       const fresh = `Câu mới chưa từng dịch ${Date.now() + 1}`;
-      const me = await call('GET', R.me, { token: tokC });
-      assert.equal(me.status, 200, 'GET /console/me phải thành công trước khi sửa cấu hình platform');
-      assert.equal(String(me.body?.tenant_id ?? me.body?.tenantId ?? ''), S.tenants.C.tenantId,
-        'GET /console/me phải xác nhận đang dùng tenant C');
-      const plan = me.body?.plan ?? me.body?.service_plan ?? me.body?.tenant_plan;
-      assert.equal(typeof plan, 'string', 'GET /console/me phải trả tên gói cụ thể; không dùng giá trị mặc định');
-      assert.ok(plan.trim(), 'tên gói tenant C không được để trống');
-      const orig = await call('GET', R.platformConfig, { token: tokPlat });
-      assert.equal(orig.status, 200);
-      assert.ok(orig.body?.plan_limits && Object.hasOwn(orig.body.plan_limits, plan),
-        `cấu hình platform không có hạn mức cho gói tenant C: ${plan}`);
+      const route = R.platformTenantLimits(tenant.tenantId);
+      const detail = R.platformTenant(tenant.tenantId);
+      const original = await call('GET', detail, { token: tokPlat });
+      assert.equal(original.status, 200);
+      const originalLimit = original.body?.character_limit;
+      assert.ok(Number.isSafeInteger(originalLimit) && originalLimit >= 0, 'tenant C phải có hạn mức ký tự');
+      const request = (text: string) => call('POST', R.translate, { apiKey: tenant.apiKey, body: B.translate(text) });
+      const setLimit = (character_limit: number) => call('PATCH', route, { token: tokPlat, body: { character_limit } });
+
+      const first = await request(known);
+      assert.equal(first.status, 200, 'dịch lần đầu phải thành công để câu vào TM');
       try {
-        const first = await call('POST', R.translate, { apiKey: key, body: B.translate(known) });
-        note('known_first', first.status);
-        assert.equal(first.status, 200, 'dịch lần đầu phải thành công để câu vào TM');
-        const put = await call('PUT', R.platformConfig, { token: tokPlat, body: B.platformQuota(plan, 1) });
-        note('put_config', put.status);
-        assert.equal(put.status, 200);
-        let r = await call('POST', R.translate, { apiKey: key, body: B.translate(fresh) });
-        for (let i = 0; i < 5 && r.status === 200; i++) { await sleep(1000); r = await call('POST', R.translate, { apiKey: key, body: B.translate(fresh + i) }); }
-        note('fresh', `${r.status} ${errCode(r) ?? ''}`);
-        assert.equal(r.status, 429);
-        assert.equal(errCode(r), 'CHAR_QUOTA_EXCEEDED');
-        const again = await call('POST', R.translate, { apiKey: key, body: B.translate(known) });
-        note('known_again', again.status);
-        assert.equal(again.status, 200, 'câu đã có trong TM vẫn phải trả 200 khi hết hạn mức');
-        assert.equal(again.body?.characters_machine_translated, 0);
-        assert.ok(again.body?.characters_from_memory > 0);
+        const exhausted = await setLimit(0);
+        assert.equal(exhausted.status, 200);
+        const miss = await request(fresh);
+        note('fresh', `${miss.status} ${errCode(miss) ?? ''}`.trim());
+        assert.equal(miss.status, 429);
+        assert.equal(errCode(miss), 'CHAR_QUOTA_EXCEEDED');
+        const hit = await request(known);
+        note('known_again', hit.status);
+        assert.equal(hit.status, 200, 'câu đã có trong TM vẫn phải trả 200 khi hết hạn mức');
+        assert.equal(hit.body?.characters_machine_translated, 0);
+        assert.ok(hit.body?.characters_from_memory > 0);
       } finally {
-        const back = await call('PUT', R.platformConfig, { token: tokPlat, body: restorableConfig(orig.body) });
-        note('restore_config', back.status);
-        assert.ok(back.status >= 200 && back.status < 300,
-          `khôi phục cấu hình platform thất bại: HTTP ${back.status} ${errCode(back) ?? ''}`.trim());
-        const restored = await call('GET', R.platformConfig, { token: tokPlat });
-        note('verify_restore_config', restored.status);
-        assert.equal(restored.status, 200, 'phải đọc lại được cấu hình platform sau khi khôi phục');
-        assert.deepEqual(restorableConfig(restored.body), restorableConfig(orig.body),
-          'cấu hình platform sau khôi phục phải khớp cấu hình ban đầu');
+        const restored = await setLimit(originalLimit);
+        assert.equal(restored.status, 200, 'phải khôi phục được hạn mức của tenant C');
+        const after = await call('GET', detail, { token: tokPlat });
+        assert.equal(after.status, 200);
+        assert.equal(after.body?.character_limit, originalLimit);
       }
     }));
 });

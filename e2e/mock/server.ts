@@ -7,7 +7,7 @@ import { State, TenantState } from '../lib/state';
 
 type Leak = 'jobs' | 'host' | 'file_key' | 'body_tenant' | 'perm_msg' | 'lock_cache' | 'lock_api' | 'platform_tm' | 'ssrf';
 interface Opts { leaks?: Leak[]; lockDelayMs?: number; rate?: number }
-interface Tenant { id: string; plan: string; status: 'ACTIVE' | 'LOCKED'; lockedAt: number; charUsed: number }
+interface Tenant { id: string; plan: string; status: 'ACTIVE' | 'LOCKED'; lockedAt: number; charUsed: number; charLimit: number }
 interface Key { value: string; keyId: string; tenantId: string; plan: 'basic' | 'tiny'; used: number; win: number[] }
 
 const NF = 'Không tìm thấy tài nguyên.';
@@ -112,6 +112,17 @@ export function startMock(opts: Opts = {}) {
       return { key: k, tenant: tenants.get(k.tenantId)! };
     };
 
+    const sessionJob = path.match(/^\/translate\/batch\/session\/([^/]+)$/);
+    if (sessionJob && method === 'GET') {
+      const tenant = consoleCtx(); if (!tenant) return;
+      const job = jobs.get(sessionJob[1]);
+      if (!job || job.tenantId !== tenant.id) return denyOther(res);
+      return send(res, 200, { job: {
+        job_id: sessionJob[1], status: 'SUCCEEDED',
+        results: [{ target_lang: 'en', download_url: 'https://download.example/result.txt' }],
+      } });
+    }
+
     // ---- /translate/*
     if (path.startsWith('/translate/')) {
       const ctx = apiCtx(); if (!ctx) return;
@@ -124,7 +135,7 @@ export function startMock(opts: Opts = {}) {
         const h = hashSentence(text);
         const mem = myTm(tenant.id);
         if (mem.has(h)) return send(res, 200, { translated_text: mem.get(h)!.targetText, characters_machine_translated: 0, characters_from_memory: text.length });
-        const limit = config.plan_limits?.[tenant.plan] ?? 200000;
+        const limit = tenant.charLimit;
         if (tenant.charUsed + text.length > limit) return fail(res, 429, 'CHAR_QUOTA_EXCEEDED', 'Hết hạn mức ký tự.');
         tenant.charUsed += text.length;
         mem.set(h, { sourceText: text, targetText: `[en] ${text}` });
@@ -166,11 +177,17 @@ export function startMock(opts: Opts = {}) {
       }
       if (path === '/platform/tenants' && method === 'GET')
         return send(res, 200, { items: [...tenants.values()].map((t) => ({ tenant_id: t.id, plan: t.plan, status: t.status, chars_machine_translated: t.charUsed })) });
+      const limits = path.match(/^\/platform\/tenants\/([^/]+)\/limits$/);
+      if (limits && method === 'PATCH') {
+        const t = tenants.get(limits[1]); if (!t) return notFound(res);
+        t.charLimit = body.character_limit;
+        return send(res, 200, { tenant_id: t.id, character_limit: t.charLimit });
+      }
       const one = path.match(/^\/platform\/tenants\/([^/]+)$/);
       if (one && method === 'GET') {
         const t = tenants.get(one[1]); if (!t) return notFound(res);
         const extra = leaks.has('platform_tm') ? { sample: [...myTm(t.id).keys()] } : {};
-        return send(res, 200, { tenant_id: t.id, plan: t.plan, status: t.status, chars_machine_translated: t.charUsed, ...extra });
+        return send(res, 200, { tenant_id: t.id, plan: t.plan, status: t.status, character_limit: t.charLimit, ...extra });
       }
       if (path === '/platform/config') {
         if (method === 'GET') return send(res, 200, config);
@@ -214,11 +231,11 @@ export function startMock(opts: Opts = {}) {
         if (method === 'PATCH') return send(res, 200, { slug: hm[1], status: h.status });
         return send(res, 200, { slug: hm[1], status: (h as any).status });
       }
-      const jm = path.match(/^\/console\/(jobs|batch)\/([^/]+)$/);
+      const jm = path.match(/^\/console\/jobs\/([^/]+)$/);
       if (jm && method === 'GET') {
-        const j = jobs.get(jm[2]);
-        if (!j || (j.tenantId !== t.id && !(leaks.has('jobs') && jm[1] === 'jobs'))) return denyOther(res);
-        return send(res, 200, { job_id: jm[2], status: 'QUEUED', type: 'FILE' });
+        const j = jobs.get(jm[1]);
+        if (!j || (j.tenantId !== t.id && !leaks.has('jobs'))) return denyOther(res);
+        return send(res, 200, { job: { job_id: jm[1], status: 'QUEUED', type: 'FILE' } });
       }
       if (path === '/console/jobs') return send(res, 200, { items: [...jobs].filter(([, j]) => j.tenantId === t.id).map(([id]) => ({ job_id: id })) });
       if (path === '/console/translations' && method === 'GET') {
@@ -250,7 +267,7 @@ export function startMock(opts: Opts = {}) {
 
   const addTenant = (label: 'A' | 'B' | 'C'): TenantState => {
     const id = `t_${hex(12)}`;
-    tenants.set(id, { id, plan: 'free', status: 'ACTIVE', lockedAt: 0, charUsed: 0 });
+    tenants.set(id, { id, plan: 'free', status: 'ACTIVE', lockedAt: 0, charUsed: 0, charLimit: 200000 });
     const username = `user-${label.toLowerCase()}@example.com`, password = 'Passw0rd!';
     users.set(username, { password, kind: 'tenant', tenantId: id });
     const k: Key = { value: `tmk_${hex(12)}`, keyId: hex(5), tenantId: id, plan: 'basic', used: 0, win: [] };

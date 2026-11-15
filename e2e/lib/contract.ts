@@ -16,13 +16,14 @@ export const R = {
   tmPages: (hash: string) => `/console/tm/${hash}/pages?src=vi&tgt=en`, // endpoint chưa được tích hợp
   usage: (month: string) => `/console/usage?month=${month}`,
   apiKeys: '/console/api-keys',
-  consoleBatch: (id: string) => `/console/batch/${id}`,
+  batchSessionJob: (id: string) => `/translate/batch/session/${encodeURIComponent(id)}`,
   translate: '/translate/realtime',
   uploadUrl: '/translate/batch/upload-url',
   batch: '/translate/batch',
   batchJob: (id: string) => `/translate/batch/${id}`,
   platformTenants: '/platform/tenants',
   platformTenant: (id: string) => `/platform/tenants/${id}`,
+  platformTenantLimits: (id: string) => `/platform/tenants/${id}/limits`,
   tenantStatus: (id: string) => `/platform/tenants/${id}/status`,
   platformConfig: '/platform/config',
   /** Trang của Visitor qua CloudFront */
@@ -43,8 +44,6 @@ export const B = {
   // [GIẢ ĐỊNH]
   createKey: (name: string) => ({ name, plan: 'Basic' }),
   glossaryTerm: (src: string, tgt: string) => ({ source_term: src, target_term: tgt, mode: 'TRANSLATE_AS' }),
-  // [GIẢ ĐỊNH] cấu hình nền tảng: hạn mức ký tự theo gói. Dùng cho test CHAR_QUOTA_EXCEEDED.
-  platformQuota: (plan: string, chars: number) => ({ plan_limits: { [plan]: chars } }),
   // Bảng 2.8 (cố định trong báo cáo)
   translate: (text: string, extra: Record<string, unknown> = {}) =>
     ({ text, source_lang: 'vi', target_lang: 'en', ...extra }),
@@ -71,8 +70,3 @@ export const tenantIdOf = (b: any): string => b?.tenant_id ?? b?.tenantId ?? '';
 export const jobIdOf = (b: any): string => b?.job_id ?? b?.jobId ?? '';
 
 export const planOf = (b: any): string => b?.plan ?? b?.service_plan ?? b?.tenant_plan ?? 'free';
-/** Bỏ các trường chỉ đọc khi đặt lại cấu hình nền tảng về giá trị ban đầu */
-export const restorableConfig = (b: any): any => {
-  const { request_id, ...rest } = b ?? {};
-  return rest;
-};

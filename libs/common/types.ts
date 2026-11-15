@@ -42,6 +42,8 @@ export class AppError extends Error {
   }
 }
 
+export const PLATFORM_TENANT_INDEX = 'PLATFORM#TENANTS';
+
 export const keys = {
   config: (ctx: Ctx) => ({ PK: `TENANT#${ctx.tenantId}`, SK: 'CONFIG' }),
   member: (ctx: Ctx, sub: string) => ({ PK: `TENANT#${ctx.tenantId}`, SK: `MEMBER#${sub}` }),

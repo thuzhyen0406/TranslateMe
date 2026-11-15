@@ -138,7 +138,7 @@ export function tenantSessionPolicy(
   if (buckets.batchUploadBucketArn) {
     statements.push({
       Effect: 'Allow',
-      Action: ['s3:GetObject', 's3:PutObject'],
+      Action: ['s3:GetObject', 's3:GetObjectVersion', 's3:PutObject'],
       Resource: `${buckets.batchUploadBucketArn}/batch/${tenantId}/*`,
     });
     if (buckets.batchUploadKmsKeyArn) {

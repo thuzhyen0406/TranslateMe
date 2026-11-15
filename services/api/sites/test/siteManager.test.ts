@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { SLUG_RE, slugFromHostname } from '../../../../libs/common/siteSlug.js';
 import { describe, it } from 'node:test';
 import { AppError, type Ctx } from '../../../../libs/common/types.js';
-import type { SafeFetchOutcome } from '../../../../libs/common/safeFetch.js';
+import { safeFetch, type SafeFetchOutcome } from '../../../../libs/common/safeFetch.js';
 import {
   createSite,
   pauseSite,
@@ -48,34 +49,41 @@ function createHarness() {
     db: {
       async transact(_ctx, operations) {
         transactions.push(operations);
-        const puts = operations.map((operation) => operation.Put).filter(Boolean);
-        const hasConflict = puts.some((put) =>
-          put.ConditionExpression && records.has(keyOf(put.Item))
-        );
-        const configCheck = operations.find((operation) => operation.ConditionCheck)?.ConditionCheck;
-        const configLocked = configCheck &&
-          records.get(keyOf(configCheck.Key))?.status !== 'ACTIVE';
-        if (configLocked) {
+        const reasons = operations.map(({ Put, Update, ConditionCheck }) => {
+          let failed = false;
+          if (Put) {
+            const current = records.get(keyOf(Put.Item));
+            failed = Boolean(current && current.tenantId !== Put.ExpressionAttributeValues?.[':owner']);
+            if (current && !Put.ExpressionAttributeValues?.[':owner']) failed = true;
+          } else if (Update) {
+            const current = records.get(keyOf(Update.Key));
+            const values = Update.ExpressionAttributeValues;
+            failed = !current || (values[':pending'] !== undefined &&
+              (current.status !== values[':pending'] || current.homeUrl !== values[':url'] || current.verificationCode !== values[':code']));
+          } else if (ConditionCheck) {
+            failed = records.get(keyOf(ConditionCheck.Key))?.status !== 'ACTIVE';
+          }
+          return { Code: failed ? 'ConditionalCheckFailed' : 'None' };
+        });
+        if (reasons.some(({ Code }) => Code === 'ConditionalCheckFailed')) {
           throw Object.assign(new Error('Conditional transaction failed'), {
-            name: 'TransactionCanceledException',
-            CancellationReasons: [
-              { Code: 'Success' },
-              { Code: 'ConditionalCheckFailed' },
-            ],
+            name: 'TransactionCanceledException', CancellationReasons: reasons,
           });
         }
-        if (hasConflict) {
-          throw Object.assign(new Error('Conditional transaction failed'), {
-            name: 'TransactionCanceledException',
-            CancellationReasons: [
-              { Code: 'ConditionalCheckFailed' },
-              { Code: 'None' },
-              { Code: 'None' },
-            ],
-          });
+        for (const { Put, Update } of operations) {
+          if (Put) records.set(keyOf(Put.Item), { ...Put.Item });
+          if (Update) {
+            const current = records.get(keyOf(Update.Key))!;
+            if (Update.ExpressionAttributeValues[':pending'] !== undefined) {
+              Object.assign(current, { status: 'ACTIVE', updatedAt: Update.ExpressionAttributeValues[':now'] });
+            } else {
+              for (const [placeholder, value] of Object.entries(Update.ExpressionAttributeValues)) {
+                const attr = Update.ExpressionAttributeNames[placeholder.replace(':v', '#f')];
+                current[attr] = value;
+              }
+            }
+          }
         }
-
-        for (const put of puts) records.set(keyOf(put.Item), { ...put.Item });
       },
       async get(_ctx, key) {
         const record = records.get(keyOf(key));
@@ -135,7 +143,7 @@ describe('siteManager', () => {
     );
   });
 
-  it('tạo site PENDING và ghi HOST + SLUG nguyên tử với điều kiện không trùng', async () => {
+  it('tạo site PENDING chỉ trong tenant hiện tại', async () => {
     const harness = createHarness();
 
     const result = await createSite(tenantA, siteInput, harness.dependencies);
@@ -144,17 +152,17 @@ describe('siteManager', () => {
     assert.equal(result.status, 'PENDING');
     assert.match(result.verificationCode, /^translateme-verify-/);
     assert.equal(harness.transactions.length, 1);
-    assert.equal(harness.transactions[0].length, 3);
+    assert.equal(harness.transactions[0].length, 2);
     assert.deepEqual(
       harness.transactions[0].map((operation) => operation.Put?.ConditionExpression).filter(Boolean),
-      ['attribute_not_exists(PK)', 'attribute_not_exists(SK)'],
+      ['attribute_not_exists(PK)'],
     );
-    const tenantStatusCheck = harness.transactions[0][2].ConditionCheck;
+    const tenantStatusCheck = harness.transactions[0][1].ConditionCheck;
     assert.deepEqual(tenantStatusCheck.Key, { PK: 'TENANT#tenant-a', SK: 'CONFIG' });
     assert.equal(tenantStatusCheck.ConditionExpression, 'attribute_exists(PK) AND #status = :active');
     assert.deepEqual(tenantStatusCheck.ExpressionAttributeNames, { '#status': 'status' });
     assert.deepEqual(tenantStatusCheck.ExpressionAttributeValues, { ':active': 'ACTIVE' });
-    assert.equal(harness.records.get('TENANT#PLATFORM#SLUG#site-example::META')?.tenantId, 'tenant-a');
+    assert.equal(harness.records.has('TENANT#PLATFORM#SLUG#site-example::META'), false);
     assert.equal(hostFor(harness.records, 'tenant-a', result.slug)?.status, 'PENDING');
   });
 
@@ -200,10 +208,11 @@ describe('siteManager', () => {
     const harness = createHarness();
     const created = await createSite(tenantA, siteInput, harness.dependencies);
     harness.setFetchOutcome(successfulFetch(
-      `<meta name="translateme-site-verification" content="${created.verificationCode}">`,
+      `<HTML><HEAD><META content='${created.verificationCode}' NAME='translateme-site-verification'></HEAD></HTML>`,
     ));
 
     assert.deepEqual(await verifySite(tenantA, created.slug, 'META', harness.dependencies), { status: 'ACTIVE' });
+    assert.equal(harness.records.get('TENANT#PLATFORM#SLUG#site-example::META')?.tenantId, tenantA.tenantId);
     assert.equal(hostFor(harness.records, 'tenant-a', created.slug)?.status, 'ACTIVE');
     assert.deepEqual(harness.requestedUrls, [siteInput.homeUrl]);
   });
@@ -225,7 +234,17 @@ describe('siteManager', () => {
   it('xác minh FILE thành công tại đúng đường dẫn và chuyển sang ACTIVE', async () => {
     const harness = createHarness();
     const created = await createSite(tenantA, siteInput, harness.dependencies);
-    harness.setFetchOutcome(successfulFetch(`\n${created.verificationCode}\n`));
+    harness.dependencies.safeFetch = (url, options) => {
+      harness.requestedUrls.push(url);
+      return safeFetch(url, options, {
+        resolver: harness.dependencies.resolver,
+        transport: async () => ({
+          status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' },
+          body: (async function* () { yield Buffer.from(`\n${created.verificationCode}\n`); })(),
+          destroy() {},
+        }),
+      });
+    };
 
     assert.deepEqual(await verifySite(tenantA, created.slug, 'FILE', harness.dependencies), { status: 'ACTIVE' });
     assert.equal(hostFor(harness.records, 'tenant-a', created.slug)?.status, 'ACTIVE');
@@ -426,27 +445,67 @@ describe('siteManager', () => {
     assert.equal(attempts, 2);
   });
 
-  it('chỉ một tenant đăng ký thành công khi hai tenant cùng đăng ký slug', async () => {
+  it('hai tenant tạo được PENDING, chỉ một tenant giành được slug khi xác minh đồng thời', async () => {
     const harness = createHarness();
-
-    const results = await Promise.allSettled([
+    const [a, b] = await Promise.all([
       createSite(tenantA, siteInput, harness.dependencies),
       createSite(tenantB, siteInput, harness.dependencies),
     ]);
-    const succeeded = results.filter((result) => result.status === 'fulfilled');
-    const failed = results.filter((result) => result.status === 'rejected');
+    assert.equal(a.slug, b.slug);
+    assert.notEqual(a.verificationCode, b.verificationCode);
+    assert.equal(harness.records.has('TENANT#PLATFORM#SLUG#site-example::META'), false);
+    const proof = (code: string) => `<meta name="translateme-site-verification" content="${code}">`;
+    harness.setFetchOutcome(successfulFetch(proof(a.verificationCode) + proof(b.verificationCode)));
+    const results = await Promise.allSettled([
+      verifySite(tenantA, a.slug, 'META', harness.dependencies),
+      verifySite(tenantB, b.slug, 'META', harness.dependencies),
+    ]);
+    assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+    const failed = results.find((r) => r.status === 'rejected');
+    assert.equal(failed?.reason.code, 'DUPLICATE_SLUG');
+    const mapping = harness.records.get('TENANT#PLATFORM#SLUG#site-example::META')!;
+    assert.ok(mapping.verifiedAt);
+    assert.equal(hostFor(harness.records, mapping.tenantId, a.slug)?.status, 'ACTIVE');
+  });
 
-    assert.equal(succeeded.length, 1);
-    assert.equal(failed.length, 1);
-    if (failed[0].status === 'rejected') {
-      assert.ok(failed[0].reason instanceof AppError);
-      assert.equal(failed[0].reason.code, 'DUPLICATE_SLUG');
+  it('chấp nhận mapping cũ của chính tenant và xác minh lại ACTIVE theo kiểu idempotent', async () => {
+    const harness = createHarness();
+    const { slug, verificationCode } = await createSite(tenantA, siteInput, harness.dependencies);
+    const PK = `TENANT#PLATFORM#SLUG#${slug}`;
+    harness.records.set(`${PK}::META`, { PK, SK: 'META', tenantId: tenantA.tenantId });
+    harness.setFetchOutcome(successfulFetch(`<meta name="translateme-site-verification" content="${verificationCode}">`));
+    await verifySite(tenantA, slug, 'META', harness.dependencies);
+    assert.deepEqual(await verifySite(tenantA, slug, 'META', harness.dependencies), { status: 'ACTIVE' });
+    assert.equal(harness.requestedUrls.length, 1);
+    assert.ok(harness.records.get(`${PK}::META`)?.verifiedAt);
+  });
+
+  it('từ chối proof trong comment, body, phản hồi lỗi và chuyển hướng sang origin khác', async () => {
+    const harness = createHarness();
+    const { slug, verificationCode } = await createSite(tenantA, siteInput, harness.dependencies);
+    const proof = `<meta name="translateme-site-verification" content="${verificationCode}">`;
+    const cases = [
+      { res: successfulFetch(`<!-- ${proof} -->`), method: 'META', code: 'VERIFICATION_CODE_MISMATCH' },
+      { res: successfulFetch(`<body>${proof}</body>`), method: 'META', code: 'VERIFICATION_CODE_MISMATCH' },
+      { res: { ...successfulFetch(proof), status: 404 }, method: 'META', code: 'SITE_UNREACHABLE' },
+      { res: { ...successfulFetch(proof), finalUrl: 'https://other.example/' }, method: 'META', code: 'VERIFICATION_CODE_MISMATCH' },
+      { res: { ...successfulFetch(verificationCode), finalUrl: 'https://other.example/proof.txt' }, method: 'FILE', code: 'VERIFICATION_CODE_MISMATCH' },
+    ] as const;
+    for (const { res, method, code } of cases) {
+      harness.setFetchOutcome(res);
+      await assert.rejects(verifySite(tenantA, slug, method, harness.dependencies), { code });
     }
-    assert.equal(harness.records.has('TENANT#PLATFORM#SLUG#site-example::META'), true);
-    assert.equal(
-      [...harness.records.keys()].filter((key) => key.endsWith('::HOST#site-example')).length,
-      1,
-    );
+    assert.equal(hostFor(harness.records, tenantA.tenantId, slug)?.status, 'PENDING');
+    assert.equal(harness.records.has(`TENANT#PLATFORM#SLUG#${slug}::META`), false);
+  });
+
+  it('slug hostname dài phù hợp regex proxy và phân biệt hostname có dấu gạch nối', async () => {
+    const harness = createHarness();
+    const hostname = 'a'.repeat(50) + '.' + 'b'.repeat(15) + '.example';
+    const { slug } = await createSite(tenantA, { ...siteInput, homeUrl: `https://${hostname}/` }, harness.dependencies);
+    assert.match(slug, SLUG_RE);
+    assert.equal(slug, slugFromHostname(hostname.toUpperCase() + '.'));
+    assert.notEqual(slugFromHostname('a-b.c.example'), slugFromHostname('a.b-c.example'));
   });
 
   it('updateSite cập nhật thông tin chung nhưng cấm đổi status', async () => {

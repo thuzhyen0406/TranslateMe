@@ -34,6 +34,6 @@ API Gateway (`infra/modules/api-gateway.yaml`) gắn `/console/hosts`, `/console
 | `POST /console/hosts/{slug}/verify` (body `{ method: 'META' \| 'FILE' }`) | `{ host }`; lỗi `422 VERIFICATION_CODE_MISMATCH` hoặc `422 SITE_UNREACHABLE` (console có thông báo riêng cho từng mã) |
 | `POST` / `GET /console/hosts/{slug}/prewarm` | `services/api/prewarm/prewarmManager.ts` (4.5) |
 
-Lưu ý khi đặt thẻ xác minh META: `siteManager` so khớp nguyên chuỗi `<meta name="translateme-site-verification" content="<mã>"`, nên phải giữ đúng thứ tự thuộc tính `name` trước `content`.
+Đặt thẻ META trong `<head>`, hoặc phục vụ mã xác minh dưới dạng `text/plain` tại `/translateme-verification.txt`. Phản hồi xác minh cần có HTTP 2xx và cùng origin với URL đăng ký. Slug công khai chỉ được cấp khi xác minh thành công.
 
 `Host` = `{ slug, display_name, home_url, source_lang, target_langs, status, verification_code, no_translate_selectors, created_at }`. Console cũng hiểu các mã lỗi hiện tại của `siteManager` (`SITE_UNREACHABLE`, `VERIFICATION_CODE_MISMATCH`, `DUPLICATE_SLUG`, `FORBIDDEN`) cho tới khi đổi sang mã của Bảng 2.10.

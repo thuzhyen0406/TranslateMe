@@ -8,7 +8,7 @@ import { STACKS } from '../demo/aws';
 
 const infra = resolve(__dirname, '..', '..', 'infra');
 const ORDER = ['bootstrap', ...STACKS];
-const read = (p: string) => readFileSync(p, 'utf8');
+const read = (p: string) => readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 const stackFile = (s: string) => join(infra, 'stacks', `${s}.yaml`);
 
 /** Khóa cấp 2 trong một section cấp 1 (Parameters/Resources/Outputs) kèm khối nội dung của từng khóa. */
@@ -155,5 +155,67 @@ test('IAM: dynamodb:LeadingKeys (khóa nhiều giá trị) luôn dùng ForAllVal
       if (operator === "'Null':") return;
       assert.match(operator, /^ForAllValues:String(Like|Equals):$/, `${file}:${i + 1} dùng ${operator} cho dynamodb:LeadingKeys`);
     });
+  }
+});
+
+test('batch workflow streams lô từ manifest S3 và đối soát khi execution kết thúc lỗi', () => {
+  const workflow = section(read(join(infra, 'modules', 'workflow.yaml')), 'Resources');
+  const source = workflow.get('BatchStateMachine')!;
+  const definition = source.split('        - |-\n')[1].split('\n        - BatchWorkflowArn')[0];
+  const { States: states } = JSON.parse(definition);
+  assert.equal(states.ParseAndChunk.Parameters.distributed, true);
+  assert.equal(states.TranslateLots.ItemReader.Parameters['Key.$'], '$.lot_index_key');
+  assert.equal(states.TranslateLots.ItemProcessor.ProcessorConfig.Mode, 'DISTRIBUTED');
+  assert.ok(states.TranslateLots.ResultWriter.Parameters['Prefix.$'].includes('map-results'));
+  assert.match(workflow.get('BatchTerminalExecutionRule')!, /status: \[FAILED, TIMED_OUT, ABORTED\]/);
+  assert.match(workflow.get('BatchStateMachineRole')!, /lot-index\.json/);
+  const lambdas = section(read(join(infra, 'modules', 'lambdas.yaml')), 'Resources');
+  assert.match(lambdas.get('BatchWorkflowFunction')!, /DATA_KMS_KEY_ARN: !Ref KmsKeyArn/);
+  assert.match(lambdas.get('TranslateFunction')!, /AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED/);
+});
+
+test('các route batch và Platform có method rõ ràng bên dưới resource cụ thể', () => {
+  const resources = section(read(join(infra, 'modules', 'api-gateway.yaml')), 'Resources');
+  const methodNames = [
+    'ApiBatchMethod', 'ApiBatchUploadUrlMethod', 'ApiBatchJobMethod',
+    'BatchSessionJobMethod', 'PlatformTenantsGetMethod', 'PlatformTenantGetMethod', 'PlatformTenantLimitsMethod',
+  ];
+  const deployment = [...resources].find(([, body]) => body.includes('Type: AWS::ApiGateway::Deployment'))!;
+  for (const name of methodNames) {
+    const method = resources.get(name)!;
+    assert.match(method, name.startsWith('ApiBatch') ? /ApiKeyRequired: true/ : /AuthorizationType: COGNITO_USER_POOLS/);
+    assert.ok(deployment[1].includes('- ' + name));
+  }
+});
+
+test('preflight Platform trả CORS trên đúng resource và được đưa vào deployment', () => {
+  const resources = section(read(join(infra, 'modules', 'api-gateway.yaml')), 'Resources');
+  const [deploymentName, deployment] = [...resources].find(([, body]) => body.includes('Type: AWS::ApiGateway::Deployment'))!;
+  assert.ok(resources.get('ApiStage')?.includes(`DeploymentId: !Ref ${deploymentName}`));
+
+  for (const [name, resource, method] of [
+    ['PlatformTenantsOptionsMethod', 'PlatformTenantsResource', 'GET'],
+    ['PlatformTenantOptionsMethod', 'PlatformTenantResource', 'GET'],
+    ['PlatformTenantLimitsOptionsMethod', 'PlatformTenantLimitsResource', 'PATCH'],
+    ['PlatformTenantStatusOptionsMethod', 'PlatformTenantStatusResource', 'PATCH'],
+  ]) {
+    const preflight = resources.get(name);
+    assert.ok(preflight, `Thiếu OPTIONS cho ${resource}`);
+    assert.ok(preflight.includes(`ResourceId: !Ref ${resource}\n`));
+    assert.match(preflight, /HttpMethod: OPTIONS/);
+    assert.match(preflight, /AuthorizationType: NONE/);
+    assert.doesNotMatch(preflight, /AuthorizerId:|ApiKeyRequired: true/);
+    assert.match(preflight, /Type: MOCK/);
+    assert.match(preflight, /"statusCode":200/);
+    for (const [header, value] of [
+      ['Access-Control-Allow-Origin', '*'],
+      ['Access-Control-Allow-Headers', 'Authorization,Content-Type'],
+      ['Access-Control-Allow-Methods', `${method},OPTIONS`],
+    ]) {
+      const parameter = `method.response.header.${header}`;
+      assert.ok(preflight.includes(`${parameter}: "'${value}'"`));
+      assert.ok(preflight.includes(`${parameter}: true`));
+    }
+    assert.ok(deployment.includes(`- ${name}\n`));
   }
 });

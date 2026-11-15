@@ -46,7 +46,7 @@ test('A: trang quá lớn > 3 MB, có biểu mẫu/iframe/translate="no"; sitema
   assert.equal(build().B.has('sitemap.xml'), false);
 });
 
-test('mã xác minh: thẻ META đúng thứ tự name trước content (siteManager so khớp nguyên chuỗi) và tệp FILE', () => {
+test('mã xác minh: thẻ META trong head và tệp FILE', () => {
   const sites = build({ A: 'tm-a_1', C: 'tm-c' });
   assert.ok(sites.A.get('index.html')!.includes('<meta name="translateme-site-verification" content="tm-a_1">'));
   assert.equal(sites.A.get('translateme-verification.txt'), 'tm-a_1');

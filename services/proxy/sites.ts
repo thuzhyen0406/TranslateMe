@@ -2,6 +2,7 @@
  * Tra cứu website cho Lambda proxy bằng DynamoDB.
  * Resolver được lưu đệm tối đa 60 giây bởi cachedSiteResolver.
  */
+import { SLUG_RE } from '../../libs/common/siteSlug.js';
 import { BatchGetCommand, GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { keys } from '../../libs/common/types.js';
 
@@ -41,7 +42,7 @@ export const DEFAULT_CACHE_SECONDS = 3600;
 export const SITE_CACHE_TTL_MS = 60_000;
 
 /** slug: chữ thường, số, gạch nối; 1–63 ký tự; không bắt đầu/kết thúc bằng gạch nối (dùng được làm tên miền con). */
-export const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+export { SLUG_RE } from '../../libs/common/siteSlug.js';
 /** Mã ngôn ngữ ISO 639-1 (có thể kèm vùng), ví dụ en, ko, zh-TW */
 export const LANG_RE = /^[a-z]{2,3}(?:-[A-Za-z]{2,4})?$/;
 

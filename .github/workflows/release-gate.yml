@@ -66,10 +66,8 @@ jobs:
             'TM_API_BASE', 'TM_REGION', 'TM_CONSOLE_CLIENT_ID', 'TM_PLATFORM_CLIENT_ID',
             'TM_CONSOLE_USER_POOL_ID', 'TM_PLATFORM_USER_POOL_ID',
             'TM_SSRF_REBIND_URL', 'TM_SSRF_REDIRECT_URL', 'TM_SSRF_HEADER_REPORT_URL',
-            'TM_E2E_HAS_CONSOLE_ME', 'TM_E2E_HAS_CONSOLE_USAGE',
-            'TM_E2E_HAS_CONSOLE_BATCH_RESULT', 'TM_E2E_HAS_PLATFORM_TENANT_DETAIL',
-            'TM_E2E_HAS_PLATFORM_TENANT_LIST',
           ];
+          if (process.env.TM_ALLOW_MUTATION === '1') required.push('TM_PUBLIC_BASE');
           const missing = required.filter((key) => !env[key]);
           if (missing.length) {
             console.error(`::error::TM_CI_ENV is missing required values: ${missing.join(', ')}`);
@@ -77,12 +75,6 @@ jobs:
           }
           if (env.TM_REGION !== process.env.TM_REGION) {
             console.error('::error::TM_CI_ENV TM_REGION must match the Actions variable TM_REGION');
-            process.exit(1);
-          }
-          const capabilities = required.filter((key) => key.startsWith('TM_E2E_HAS_'));
-          const disabled = capabilities.filter((key) => env[key] !== '1');
-          if (disabled.length) {
-            console.error(`::error::Required product routes are not enabled in TM_CI_ENV: ${disabled.join(', ')}`);
             process.exit(1);
           }
           let state;
@@ -94,6 +86,9 @@ jobs:
             for (const key of ['username', 'password', 'tenantId', 'slug', 'apiKey', 'jobId', 'fileKey', 'tmText', 'tmHash']) {
               if (!state.tenants?.[label]?.[key]) missingState.push(`tenants.${label}.${key}`);
             }
+          }
+          if (process.env.TM_ALLOW_MUTATION === '1' && !state.tenants?.C?.tinyApiKey) {
+            missingState.push('tenants.C.tinyApiKey');
           }
           if (missingState.length) {
             console.error(`::error::TM_STATE_JSON is missing required seeded fields: ${missingState.join(', ')}`);

@@ -34,7 +34,7 @@ Test cần `.state/<stage>.json` có tài khoản tenant A/B/C, Platform Admin, 
 - Platform Admin thuộc Cognito group `PlatformAdmins`.
 - Body/các endpoint nghiệp vụ vẫn được gom ở `lib/contract.ts` để dễ cập nhật.
 
-Project hiện tại chưa đăng ký một số route mà bộ nghiệm thu tuần 5 cần, gồm `/console/me`, `/console/usage`, `/console/batch/{id}` và các route quản trị danh sách/chi tiết tenant cùng cấu hình platform. Các ca không có route tương đương được ghi `SKIP` kèm lý do; chúng không được tính là đạt. Khi route được tích hợp, bật capability tương ứng trong `.env.<stage>` (`TM_E2E_HAS_CONSOLE_ME`, `TM_E2E_HAS_CONSOLE_USAGE`, `TM_E2E_HAS_CONSOLE_BATCH_RESULT`, `TM_E2E_HAS_PLATFORM_TENANT_DETAIL`, `TM_E2E_HAS_PLATFORM_TENANT_LIST`, `TM_E2E_HAS_PLATFORM_CONFIG`) để suite chạy assertion thay vì bỏ qua.
+Release gate kiểm tra trực tiếp `GET /console/me`, `GET /console/usage`, `GET /translate/batch/session/{id}` và các route đọc tenant của Platform. Phép thử X4 dùng fixture B đã dịch xong và có link tải. Khi bật `run_limits`, L3 hạ hạn mức của riêng tenant C rồi khôi phục giá trị ban đầu.
 
 Các phép thử TM dùng route hiện có `GET /console/translations?tab=MACHINE` và bộ lọc `search`. `/console/tm/{hash}/pages` không được giả lập bằng fallback 404. `GET /console/jobs/{id}` chỉ trả metadata job; không thay cho endpoint tải kết quả batch.
 

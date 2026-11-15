@@ -109,12 +109,13 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
   const username = existing?.username ?? `tm-e2e-${stage}-${label.toLowerCase()}@${domain}`;
   const password = existing?.password ?? pw();
   const origin = need(`TM_DEMO_ORIGIN_${label}`);
-  const expectedSlug = new URL(origin).hostname.replace(/[^a-z0-9-]/gi, '-').toLowerCase();
-  if (Object.values(st.tenants).some((t) => t && t.label !== label && t.slug === expectedSlug)) {
-    throw new Error(`TM_DEMO_ORIGIN_${label} dùng hostname trùng với tenant khác: ${expectedSlug}`);
+  const homeUrl = new URL(origin);
+  if (Object.values(st.tenants).some((t) => t?.origin && t.label !== label &&
+      new URL(t.origin).hostname.replace(/\.$/, '') === homeUrl.hostname.replace(/\.$/, ''))) {
+    throw new Error(`TM_DEMO_ORIGIN_${label} dùng hostname trùng với tenant khác: ${homeUrl.hostname}`);
   }
   const t: TenantState = existing ?? {
-    label, username, password, tenantId: '', slug: expectedSlug, origin,
+    label, username, password, tenantId: '', slug: '', origin,
     apiKey: '', keyId: '', jobId: '', fileKey: '', tmText: '', tmHash: '',
   };
   t.origin = origin;
@@ -140,17 +141,21 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
   if (!t.tenantId) throw new Error(`Tenant ${label}: ID token chưa có custom:tenant_id; kiểm tra PostConfirmation và app client.`);
 
   const existingHosts = must(await call('GET', R.hosts, { token: tok }), 'GET /console/hosts');
-  const priorHost = listOf(existingHosts.body).find((h: any) => h?.slug === expectedSlug);
-  let slug = expectedSlug;
+  const priorHost = listOf(existingHosts.body).find((h: any) => {
+    const url = h?.home_url ?? h?.homeUrl;
+    return typeof url === 'string' && new URL(url).href === homeUrl.href &&
+      typeof h.slug === 'string' && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(h.slug);
+  });
+  let slug: string;
   let verificationCode = verificationCodeOf(priorHost);
   if (priorHost) {
     slug = String(priorHost.slug);
   } else {
     const created = must(await call('POST', R.hosts, { token: tok, body: B.addHost(`e2e-${label}`, origin) }), 'POST /console/hosts');
-    slug = created.body?.host?.slug;
+    slug = created.body?.host?.slug ?? created.body?.slug;
     verificationCode = verificationCodeOf(created.body?.host) || verificationCodeOf(created.body);
-    if (typeof slug !== 'string' || slug !== expectedSlug) {
-      throw new Error(`Tenant ${label}: API trả slug website không khớp hostname ${expectedSlug}`);
+    if (typeof slug !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug)) {
+      throw new Error(`Tenant ${label}: API trả slug website không hợp lệ`);
     }
   }
   t.slug = slug;
@@ -229,6 +234,20 @@ async function seedTenant(label: 'A' | 'B' | 'C', st: State): Promise<void> {
       }
       t.batchSubmissionState = 'SUBMITTED';
       saveState(st);
+    }
+  }
+
+  if (label === 'B') {
+    // X4 needs a downloadable result so the cross-tenant assertion tests an existing resource.
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      const result = must(await call('GET', R.batchSessionJob(t.jobId), { token: tok }), 'GET /translate/batch/session/{id}');
+      const job = result.body?.job;
+      if (job?.status === 'SUCCEEDED' && job.results?.some((item: any) => typeof item.download_url === 'string')) break;
+      if (job?.status === 'FAILED' || Date.now() >= deadline) {
+        throw new Error(`Batch fixture B chưa có kết quả tải xuống (job ${t.jobId}, trạng thái ${job?.status ?? 'UNKNOWN'}). Kiểm tra workflow hoặc seed lại với --force.`);
+      }
+      await sleep(3_000);
     }
   }
 

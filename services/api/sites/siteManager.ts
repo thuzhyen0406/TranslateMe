@@ -1,3 +1,7 @@
+import { randomBytes } from 'node:crypto';
+import { parse } from 'parse5';
+import { findFirst, getAttr, isElement } from '../../../libs/common/htmlDom.js';
+import { SLUG_RE, slugFromHostname } from '../../../libs/common/siteSlug.js';
 import { Ctx, AppError, keys, Lang } from '../../../libs/common/types.js';
 import { db, requireRole } from '../../../libs/common/db.js';
 import { assertTenantWritable } from '../../../libs/common/tenant.js';
@@ -101,6 +105,30 @@ async function updateSiteStatus(
   }
 }
 
+function activeTenantCheck(ctx: Ctx) {
+  return {
+    ConditionCheck: {
+      TableName: TABLE_NAME,
+      Key: keys.config(ctx),
+      ConditionExpression: 'attribute_exists(PK) AND #status = :active',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: { ':active': 'ACTIVE' },
+    },
+  };
+}
+
+function transactionConflict(error: unknown): boolean {
+  const e = error as { name?: string; CancellationReasons?: { Code?: string }[] } | null;
+  return e?.name === 'TransactionCanceledException' &&
+    (!e.CancellationReasons?.length || e.CancellationReasons.some(({ Code }) => Code === 'ConditionalCheckFailed'));
+}
+
+async function checkTenantAfterConflict(ctx: Ctx, deps: SiteManagerDependencies): Promise<void> {
+  const config = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
+  if (!config) throw new AppError('NOT_FOUND', 'Không tìm thấy cấu hình tenant');
+  if (config.status !== 'ACTIVE') throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị khóa');
+}
+
 export async function createSite(
   ctx: Ctx,
   input: CreateSiteInput,
@@ -109,78 +137,39 @@ export async function createSite(
   requireRole(ctx, ['TENANT_ADMIN']);
   await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
   const url = await validatePublicUrl(input.homeUrl, deps.resolver);
-  
-  // Sinh slug chuẩn hóa từ hostname
-  const slug = url.hostname.replace(/[^a-z0-9-]/gi, '-').toLowerCase();
-  const verificationCode = `translateme-verify-${Math.random().toString(36).substring(2, 10)}`;
-
-  // Tạo TransactWriteItems nguyên tử cho SLUG hệ thống và HOST tenant
-  const transactOps = [
-    {
-      Put: {
-        TableName: TABLE_NAME,
-        Item: {
-          PK: `TENANT#PLATFORM#SLUG#${slug}`,
-          SK: 'META',
-          tenantId: ctx.tenantId,
-          createdAt: new Date().toISOString()
-        },
-        ConditionExpression: 'attribute_not_exists(PK)' // Đảm bảo slug duy nhất toàn hệ thống
-      }
-    },
-    {
-      Put: {
-        TableName: TABLE_NAME,
-        Item: {
-          PK: `TENANT#${ctx.tenantId}`,
-          SK: `HOST#${slug}`,
-          slug,
-          homeUrl: input.homeUrl,
-          displayName: input.displayName,
-          sourceLang: input.sourceLang,
-          targetLangs: input.targetLangs,
-          noTranslateSelectors: input.noTranslateSelectors || [],
-          verificationCode,
-          status: 'PENDING',
-          createdAt: new Date().toISOString()
-        },
-        ConditionExpression: 'attribute_not_exists(SK)'
-      }
-    },
-    {
-      ConditionCheck: {
-        TableName: TABLE_NAME,
-        Key: keys.config(ctx),
-        ConditionExpression: 'attribute_exists(PK) AND #status = :active',
-        ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: { ':active': 'ACTIVE' },
-      },
-    },
-  ];
+  const slug = slugFromHostname(url.hostname);
+  const verificationCode = `translateme-verify-${randomBytes(16).toString('hex')}`;
+  const hostKey = keys.host(ctx, slug);
 
   try {
-    await deps.db.transact(ctx, transactOps, { platformSlugReservation: true });
-  } catch (err: any) {
-    if (err.name === 'TransactionCanceledException') {
-      const cancellationReasons = Array.isArray(err.CancellationReasons) ? err.CancellationReasons : [];
-      const configCheckFailed = cancellationReasons[2]?.Code === 'ConditionalCheckFailed';
-      if (configCheckFailed || cancellationReasons.length === 0) {
-        // Một số runtime/clients không trả CancellationReasons. Đọc CONFIG nhất quán
-        // để phân biệt tenant vừa bị khóa với lỗi trùng slug.
-        const currentConfig = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
-        if (!currentConfig) {
-          throw new AppError('NOT_FOUND', 'Không tìm thấy cấu hình tenant');
-        }
-        if (currentConfig.status !== 'ACTIVE') {
-          throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị khóa, không thể tạo website');
-        }
-        if (configCheckFailed) {
-          throw new AppError('VERSION_CONFLICT', 'Trạng thái tenant đã thay đổi, vui lòng thử lại');
-        }
-      }
-      throw new AppError('DUPLICATE_SLUG', 'Slug đã tồn tại trên hệ thống');
+    await deps.db.transact(ctx, [
+      {
+        Put: {
+          TableName: TABLE_NAME,
+          Item: {
+            ...hostKey,
+            slug,
+            homeUrl: input.homeUrl,
+            displayName: input.displayName,
+            sourceLang: input.sourceLang,
+            targetLangs: input.targetLangs,
+            noTranslateSelectors: input.noTranslateSelectors ?? [],
+            verificationCode,
+            status: 'PENDING',
+            createdAt: new Date().toISOString(),
+          },
+          ConditionExpression: 'attribute_not_exists(PK)',
+        },
+      },
+      activeTenantCheck(ctx),
+    ]);
+  } catch (error) {
+    if (!transactionConflict(error)) throw error;
+    await checkTenantAfterConflict(ctx, deps);
+    if (await deps.db.get(ctx, hostKey, { consistent: true })) {
+      throw new AppError('DUPLICATE_SLUG', 'Website đã tồn tại trong tenant');
     }
-    throw err;
+    throw error;
   }
 
   return { slug, status: 'PENDING' as const, verificationCode };
@@ -195,86 +184,89 @@ export async function verifySite(
   requireRole(ctx, ['TENANT_ADMIN']);
   await (deps.assertTenantWritable ?? assertTenantWritable)(ctx);
   const hostKey = keys.host(ctx, slug);
-  const host = await deps.db.get(ctx, hostKey);
-
-  if (!host) {
-    // Không phân biệt website của tenant khác với slug không tồn tại (QC-17).
-    throw new AppError('NOT_FOUND', 'Không tìm thấy website');
+  const host = await deps.db.get(ctx, hostKey, { consistent: true });
+  if (!host) throw new AppError('NOT_FOUND', 'Không tìm thấy website');
+  if (host.status === 'ACTIVE') return { status: 'ACTIVE' as const };
+  if (host.status !== 'PENDING') throw new AppError('VERSION_CONFLICT', 'Chỉ xác minh website đang chờ xác minh');
+  if (!SLUG_RE.test(slug)) throw new AppError('INVALID_REQUEST', 'Slug cũ không hợp lệ. Hãy đăng ký lại URL website.');
+  if (method !== 'META' && method !== 'FILE') throw new AppError('INVALID_REQUEST', 'Phương thức xác minh không hợp lệ');
+  const { verificationCode, homeUrl } = host;
+  if (typeof verificationCode !== 'string' || !verificationCode || typeof homeUrl !== 'string') {
+    throw new AppError('VERIFICATION_CODE_MISMATCH', 'Website chưa có mã xác minh hợp lệ');
   }
-
-  const verificationCode = host.verificationCode;
-  const homeUrl = host.homeUrl;
 
   try {
-    if (method === 'META') {
-      // Tải trang chủ thông qua safeFetch chống SSRF
-      const res = await deps.safeFetch(homeUrl, { maxSizeBytes: 3000000, timeoutMs: 5000, maxRedirects: 3 });
-      if (res.kind !== 'OK') {
-        throw new AppError('SITE_UNREACHABLE', `Không thể tải trang xác minh: ${res.kind}`, {
-          reason: res.kind
-        });
-      } 
-      const expectedMeta = `<meta name="translateme-site-verification" content="${verificationCode}"`;
-      
-      if (!res.html.includes(expectedMeta)) {
-        throw new AppError('VERIFICATION_CODE_MISMATCH', 'Không tìm thấy thẻ meta xác minh hoặc mã không khớp', {
-          reason: 'VERIFICATION_CODE_MISMATCH'
-        });
-      }
-    } else if (method === 'FILE') {
-      const fileUrl = new URL('/translateme-verification.txt', homeUrl).toString();
-      const res = await deps.safeFetch(fileUrl, { maxSizeBytes: 10000, timeoutMs: 5000, maxRedirects: 3 });
-      if (res.kind !== 'OK') {
-        throw new AppError('SITE_UNREACHABLE', `Không thể tải file xác minh: ${res.kind}`, {
-          reason: res.kind
-        });
-      }
-
-      if (res.html.trim() !== verificationCode) {
-        throw new AppError('VERIFICATION_CODE_MISMATCH', 'Nội dung file xác minh không chính xác', {
-          reason: 'VERIFICATION_CODE_MISMATCH'
-        });
-      }
-    }
-  } catch (err: any) {
-    if (err instanceof AppError) throw err;
-    throw new AppError('SITE_UNREACHABLE', `Lỗi truy cập website: ${err.message}`, {
-      reason: 'SITE_UNREACHABLE'
+    const originUrl = new URL(homeUrl);
+    const verificationUrl = method === 'FILE' ? new URL('/translateme-verification.txt', originUrl) : originUrl;
+    const res = await deps.safeFetch(verificationUrl.href, {
+      maxSizeBytes: method === 'FILE' ? 10_000 : 3_000_000,
+      timeoutMs: 5_000,
+      maxRedirects: 3,
+      allowedContentTypes: method === 'FILE' ? ['text/plain'] : ['text/html'],
     });
+    if (res.kind !== 'OK' || res.status < 200 || res.status >= 300) {
+      const reason = res.kind === 'OK' ? 'HTTP_STATUS' : res.kind;
+      throw new AppError('SITE_UNREACHABLE', 'Không thể tải nội dung xác minh website', { reason });
+    }
+    if (new URL(res.finalUrl).origin !== originUrl.origin) {
+      throw new AppError('VERIFICATION_CODE_MISMATCH', 'Nội dung xác minh phải thuộc cùng origin', { reason: 'CROSS_ORIGIN_REDIRECT' });
+    }
+
+    const head = method === 'META' ? findFirst(parse(res.html), (el) => el.tagName === 'head') : undefined;
+    const matches = method === 'FILE'
+      ? res.html.trim() === verificationCode
+      : head?.childNodes.some((node) =>
+        isElement(node) && node.tagName === 'meta' &&
+        getAttr(node, 'name')?.toLowerCase() === 'translateme-site-verification' &&
+        getAttr(node, 'content') === verificationCode,
+      );
+    if (!matches) {
+      throw new AppError('VERIFICATION_CODE_MISMATCH', 'Không tìm thấy mã xác minh hợp lệ', { reason: 'VERIFICATION_CODE_MISMATCH' });
+    }
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError('SITE_UNREACHABLE', 'Không thể tải nội dung xác minh website', { reason: 'SITE_UNREACHABLE' });
   }
 
+  const verifiedAt = new Date().toISOString();
   try {
     await deps.db.transact(ctx, [
       {
         Put: {
           TableName: TABLE_NAME,
-          Item: {
-            ...host,
-            status: 'ACTIVE',
-            updatedAt: new Date().toISOString(),
-          },
+          Item: { ...keys.slug(slug), tenantId: ctx.tenantId, createdAt: host.createdAt ?? verifiedAt, verifiedAt },
+          ConditionExpression: 'attribute_not_exists(PK) OR tenantId = :owner',
+          ExpressionAttributeValues: { ':owner': ctx.tenantId },
         },
       },
       {
-        ConditionCheck: {
+        Update: {
           TableName: TABLE_NAME,
-          Key: keys.config(ctx),
-          ConditionExpression: 'attribute_exists(PK) AND #status = :active',
+          Key: hostKey,
+          UpdateExpression: 'SET #status = :active, updatedAt = :now',
+          ConditionExpression: '#status = :pending AND homeUrl = :url AND verificationCode = :code',
           ExpressionAttributeNames: { '#status': 'status' },
-          ExpressionAttributeValues: { ':active': 'ACTIVE' },
+          ExpressionAttributeValues: {
+            ':active': 'ACTIVE', ':pending': 'PENDING', ':now': verifiedAt, ':url': homeUrl, ':code': verificationCode,
+          },
         },
       },
-    ]);
-  } catch (error: any) {
-    if (
-      error?.name === 'TransactionCanceledException' &&
-      error.CancellationReasons?.[1]?.Code === 'ConditionalCheckFailed'
-    ) {
-      throw new AppError('TENANT_SUSPENDED', 'Tenant đang bị khóa');
+      activeTenantCheck(ctx),
+    ], { platformSlugReservation: true });
+  } catch (error) {
+    if (!transactionConflict(error)) throw error;
+    await checkTenantAfterConflict(ctx, deps);
+    const current = await deps.db.get(ctx, hostKey, { consistent: true });
+    if (current?.status === 'ACTIVE' && current.verificationCode === verificationCode) return { status: 'ACTIVE' as const };
+    if (current?.status !== 'PENDING' || current.verificationCode !== verificationCode || current.homeUrl !== homeUrl) {
+      throw new AppError('VERSION_CONFLICT', 'Website đã thay đổi trong lúc xác minh');
+    }
+    const reasons = (error as { CancellationReasons?: { Code?: string }[] }).CancellationReasons;
+    if (!reasons?.length || reasons[0]?.Code === 'ConditionalCheckFailed') {
+      throw new AppError('DUPLICATE_SLUG', 'Slug đã được cấp cho website khác');
     }
     throw error;
   }
-
   return { status: 'ACTIVE' as const };
 }
 
@@ -326,24 +318,30 @@ export async function updateSite(
     throw new AppError('NOT_FOUND', 'Không tìm thấy website');
   }
 
-  const updated: Record<string, unknown> = { ...site };
-  if (Array.isArray(input.targetLangs)) {
-    updated.targetLangs = input.targetLangs;
-  }
-  if (Array.isArray(input.noTranslateSelectors)) {
-    updated.noTranslateSelectors = input.noTranslateSelectors;
-  }
-  if (typeof input.displayName === 'string') {
-    updated.displayName = input.displayName;
-  }
-  if (typeof input.cacheTTL === 'number') {
-    updated.cacheTTL = input.cacheTTL;
-  }
-  if (typeof input.cacheTtlSec === 'number') {
-    updated.cacheTtlSec = input.cacheTtlSec;
-  }
-  updated.updatedAt = new Date().toISOString();
-
-  await deps.db.put(ctx, updated);
-  return updated;
+  const changes = Object.fromEntries(Object.entries({
+    targetLangs: Array.isArray(input.targetLangs) ? input.targetLangs : undefined,
+    noTranslateSelectors: Array.isArray(input.noTranslateSelectors) ? input.noTranslateSelectors : undefined,
+    displayName: typeof input.displayName === 'string' ? input.displayName : undefined,
+    cacheTTL: typeof input.cacheTTL === 'number' ? input.cacheTTL : undefined,
+    cacheTtlSec: typeof input.cacheTtlSec === 'number' ? input.cacheTtlSec : undefined,
+    updatedAt: new Date().toISOString(),
+  }).filter(([, value]) => value !== undefined));
+  const entries = Object.entries(changes);
+  await deps.db.transact(ctx, [
+    {
+      Update: {
+        TableName: TABLE_NAME,
+        Key: keys.host(ctx, slug),
+        UpdateExpression: 'SET ' + entries.map((_, index) => `#f${index} = :v${index}`).join(', '),
+        ConditionExpression: 'attribute_exists(PK)',
+        ExpressionAttributeNames: Object.fromEntries(entries.map(([field], index) => [`#f${index}`, field])),
+        ExpressionAttributeValues: Object.fromEntries(entries.map(([, value], index) => [`:v${index}`, value])),
+      },
+    },
+    activeTenantCheck(ctx),
+  ]).catch(async (error: unknown) => {
+    if (transactionConflict(error)) await checkTenantAfterConflict(ctx, deps);
+    throw error;
+  });
+  return { ...site, ...changes };
 }

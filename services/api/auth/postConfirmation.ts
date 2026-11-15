@@ -23,6 +23,7 @@
  *    bước 5 (`AdminUpdateUserAttributes`) để hoàn tất gắn `custom:tenant_id` và `custom:role`.
  */
 
+import { PLATFORM_TENANT_INDEX } from '../../../libs/common/types.js';
 import { createHmac, randomBytes } from 'node:crypto';
 import {
   AdminUpdateUserAttributesCommand,
@@ -282,6 +283,8 @@ export function createPostConfirmationHandler(deps: PostConfirmationDeps = {}) {
               PK: { S: tenantPk },
               SK: { S: 'CONFIG' },
               tenantId: { S: tenantId },
+              GSI1PK: { S: PLATFORM_TENANT_INDEX },
+              GSI1SK: { S: tenantId },
               organizationName: { S: organizationName },
               plan: { S: DEFAULT_PLAN_NAME },
               charLimit: { N: String(charLimit) },

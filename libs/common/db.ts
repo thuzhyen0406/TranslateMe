@@ -227,7 +227,10 @@ export const db = {
       } else if (isPlatformSlug) {
         if (
           !op.Put ||
-          op.Put.ConditionExpression !== 'attribute_not_exists(PK)' ||
+          item.SK !== 'META' ||
+          (op.Put.ConditionExpression !== 'attribute_not_exists(PK)' &&
+            (op.Put.ConditionExpression !== 'attribute_not_exists(PK) OR tenantId = :owner' ||
+              op.Put.ExpressionAttributeValues?.[':owner'] !== ctx.tenantId)) ||
           !ctx.tenantId ||
           ctx.tenantId === 'PLATFORM' ||
           item.tenantId !== ctx.tenantId

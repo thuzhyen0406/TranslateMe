@@ -49,7 +49,8 @@ export async function setTenantStatus(
 
   await deps.db.updateTenantStatus(ctx, tenantId, status);
   const sites = await deps.db.listTenantSites(ctx);
-  const slugs = [...new Set(sites.map((site) => site.slug).filter((slug): slug is string => typeof slug === 'string' && slug.length > 0))];
+  const publishedSites = sites.filter((site) => site.status === 'ACTIVE' || site.status === 'PAUSED');
+  const slugs = [...new Set(publishedSites.map((site) => site.slug).filter((slug): slug is string => typeof slug === 'string' && slug.length > 0))];
 
   const invalidation = await deps.invalidateSites(ctx, { slugs });
   return { tenantId, status, invalidation };

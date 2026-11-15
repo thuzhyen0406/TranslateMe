@@ -1,13 +1,68 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { jobKey, type JobDb } from '../../../../libs/common/jobs.js';
-import { createBatchWorkflowHandler, splitBatchBlocks, splitOversizedBatchBlocks, type BatchWorkflowDeps } from '../batchWorkflow.js';
+import { createBatchWorkflowHandler, failedExecutionTask, splitBatchBlocks, splitOversizedBatchBlocks, type BatchWorkflowDeps } from '../batchWorkflow.js';
 import type { Ctx } from '../../../../libs/common/types.js';
 
 const ctx: Ctx = { tenantId: 't_batch', via: 'KEYMAP', requestId: 'batch-test', keyId: 'key-test' };
 const jobId = 'job-20261108-012345abcdef';
 
 describe('batch workflow', () => {
+  it('stores lots in S3 and emits bounded state for a document that exceeded the old Step Functions limit', async () => {
+    const text = 'Hello world.\n'.repeat(100_000);
+    const objects = new Map<string, Uint8Array>();
+    let total = 0;
+    const source = `batch/${ctx.tenantId}/input/source.txt`;
+    const run = createBatchWorkflowHandler({
+      jobs: {
+        async get() {
+          return { entityType: 'JOB', type: 'FILE', tenantId: ctx.tenantId, fileKey: source,
+            fileVersionId: 'validated-version', format: 'txt', fileName: 'source.txt', targetLangs: ['fr', 'vi'] };
+        },
+        async update(_ctx, input) { total = Number(input.ExpressionAttributeValues?.[':total']); },
+        async put() {},
+      },
+      objects: {
+        async get(_tenant, key, versionId) {
+          assert.equal(key, source);
+          assert.equal(versionId, 'validated-version');
+          return Buffer.from(text);
+        },
+        async put(_tenant, key, bytes) { objects.set(key, bytes); },
+        async signGet() { throw new Error('Unexpected output'); },
+      },
+      usage: {} as BatchWorkflowDeps['usage'],
+      tm: {} as BatchWorkflowDeps['tm'],
+      async getGlossaryState() { throw new Error('Unexpected translation'); },
+      async translate() { throw new Error('Unexpected translation'); },
+      async detectLanguage() { throw new Error('Unexpected translation'); },
+    });
+    const input = { mode: 'PARSE_AND_CHUNK' as const, tenant_id: ctx.tenantId, job_id: jobId };
+    await assert.rejects(run(input), { name: 'LegacyBatchWorkflowLimit' });
+    const output = await run({ ...input, distributed: true }) as { lot_index_key: string; lot_count: number };
+    assert.ok(Buffer.byteLength(JSON.stringify(output)) < 1_024);
+    assert.ok(!('lot_keys' in output));
+    const items = JSON.parse(Buffer.from(objects.get(output.lot_index_key)!).toString('utf8')) as Array<{ key: string }>;
+    assert.equal(items.length, Math.ceil(100_000 / 256));
+    assert.equal(items.length, output.lot_count);
+    assert.equal(total, items.length * 2);
+    assert.ok(items.every(({ key }) => objects.has(key)));
+  });
+
+  it('maps only terminal parent executions to a job reconciliation task', () => {
+    const event = {
+      source: 'aws.states' as const,
+      'detail-type': 'Step Functions Execution Status Change' as const,
+      detail: { status: 'TIMED_OUT', executionArn: `arn:aws:states:region:account:execution:batch:${jobId}`,
+        input: JSON.stringify({ job_id: jobId, tenant_id: ctx.tenantId }) },
+    };
+    assert.deepEqual(failedExecutionTask(event), {
+      mode: 'MARK_FAILED', job_id: jobId, tenant_id: ctx.tenantId, error: { Error: 'WORKFLOW_TIMED_OUT' },
+    });
+    assert.equal(failedExecutionTask({ ...event, detail: { ...event.detail, status: 'RUNNING' } }), null);
+    assert.equal(failedExecutionTask({ ...event, detail: { ...event.detail, executionArn: 'child-run' } }), null);
+  });
+
   it('splits at the byte and lot limits without splitting blocks', () => {
     const blocks = [
       { id: 0, text: 'a'.repeat(6) },
@@ -37,8 +92,23 @@ describe('batch workflow', () => {
       fileKey: `batch/${ctx.tenantId}/input/source.txt`, fileName: 'source.txt', format: 'txt', sourceLang: 'en',
       usageSource: { kind: 'API', keyId: 'key-test' }, sendEmail: false,
     };
-    const db: JobDb = {
-      async get(_ctx, lookup) { return lookup.PK === key.PK && lookup.SK === key.SK ? item : null; },
+    const markers = new Map<string, Record<string, unknown>>();
+    const db: BatchWorkflowDeps['jobs'] = {
+      async get(_ctx, lookup) {
+        if (lookup.PK !== key.PK) return null;
+        return lookup.SK === key.SK ? item : markers.get(lookup.SK) ?? null;
+      },
+      async transact(_ctx, operations) {
+        const [marker, progress] = operations;
+        const entry = marker.Put.Item as { PK: string; SK: string; ttl: number };
+        assert.equal(entry.PK, key.PK);
+        assert.match(entry.SK, /^LOT#/);
+        assert.ok(entry.ttl > 0);
+        assert.equal(progress.Update.ConditionExpression, '#status = :running');
+        if (markers.has(entry.SK)) throw Object.assign(new Error('Duplicate lot'), { name: 'TransactionCanceledException' });
+        markers.set(entry.SK, entry);
+        item.done += Number(progress.Update.ExpressionAttributeValues[':one']);
+      },
       async put(_ctx, value) { Object.assign(item, value); },
       async update(_ctx, update) {
         const values = update.ExpressionAttributeValues ?? {};
@@ -51,7 +121,7 @@ describe('batch workflow', () => {
         if (values[':running'] !== undefined && update.UpdateExpression.includes('#status = :running')) item.status = values[':running'];
         if (values[':done'] !== undefined) item.done += Number(values[':done']);
         if (values[':failed'] !== undefined) item.failed += Number(values[':failed']);
-        if (values[':failedRemaining'] !== undefined) item.failed += Number(values[':failedRemaining']);
+        if (update.UpdateExpression.includes('#failed = #total - #done')) item.failed = item.total - item.done;
         if (values[':warnings'] !== undefined) item.warnings = values[':warnings'];
         if (values[':reason'] !== undefined) item.reason = values[':reason'];
         if (values[':resultFiles'] !== undefined) item.resultFiles = values[':resultFiles'];
@@ -113,11 +183,11 @@ describe('batch workflow', () => {
       now: () => new Date('2026-11-08T00:00:00.000Z'),
     };
     const handler = createBatchWorkflowHandler(deps);
-    const parsed = await handler({ mode: 'PARSE_AND_CHUNK', tenant_id: ctx.tenantId, job_id: jobId }) as { lot_keys: string[] };
+    const parsed = await handler({ mode: 'PARSE_AND_CHUNK', tenant_id: ctx.tenantId, job_id: jobId, distributed: true }) as { lot_index_key: string };
     assert.equal(item.status, 'RUNNING');
     assert.equal(item.total, 1);
-    const lotKey = parsed.lot_keys[0];
-    const task = { mode: 'TRANSLATE_LOT' as const, tenant_id: ctx.tenantId, job_id: jobId, target_lang: 'fr', lot_key: lotKey };
+    const [{ key: lotKey }] = JSON.parse(new TextDecoder().decode(objects.get(parsed.lot_index_key)!));
+    const task = { mode: 'TRANSLATE_LOT' as const, tenant_id: ctx.tenantId, job_id: jobId, target_lang: 'fr', lot_key: lotKey, distributed: true };
     await assert.rejects(handler({ ...task, attempt: 0 }), /Temporary S3 result write failure/u);
     assert.equal(settlements.length, 0);
     await handler({ ...task, attempt: 1 });
@@ -126,8 +196,10 @@ describe('batch workflow', () => {
     assert.equal(reservations.length, 2);
     assert.equal(refunds, 1);
     assert.equal(item.done, 1);
+    assert.equal(markers.size, 1);
+    assert.deepEqual(item.lots, {});
 
-    const merged = await handler({ mode: 'MERGE_AND_WRITE', tenant_id: ctx.tenantId, job_id: jobId }) as { status: string };
+    const merged = await handler({ mode: 'MERGE_AND_WRITE', tenant_id: ctx.tenantId, job_id: jobId, distributed: true }) as { status: string };
     assert.equal(merged.status, 'SUCCEEDED');
     assert.equal(item.status, 'SUCCEEDED');
     assert.equal(item.done, item.total);
