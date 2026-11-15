@@ -187,3 +187,34 @@ test('các route batch và Platform có method rõ ràng bên dưới resource c
     assert.ok(deployment[1].includes('- ' + name));
   }
 });
+
+test('preflight Platform trả CORS trên đúng resource và được đưa vào deployment', () => {
+  const resources = section(read(join(infra, 'modules', 'api-gateway.yaml')), 'Resources');
+  const [deploymentName, deployment] = [...resources].find(([, body]) => body.includes('Type: AWS::ApiGateway::Deployment'))!;
+  assert.ok(resources.get('ApiStage')?.includes(`DeploymentId: !Ref ${deploymentName}`));
+
+  for (const [name, resource, method] of [
+    ['PlatformTenantsOptionsMethod', 'PlatformTenantsResource', 'GET'],
+    ['PlatformTenantOptionsMethod', 'PlatformTenantResource', 'GET'],
+    ['PlatformTenantLimitsOptionsMethod', 'PlatformTenantLimitsResource', 'PATCH'],
+  ]) {
+    const preflight = resources.get(name);
+    assert.ok(preflight, `Thiếu OPTIONS cho ${resource}`);
+    assert.ok(preflight.includes(`ResourceId: !Ref ${resource}\n`));
+    assert.match(preflight, /HttpMethod: OPTIONS/);
+    assert.match(preflight, /AuthorizationType: NONE/);
+    assert.doesNotMatch(preflight, /AuthorizerId:|ApiKeyRequired: true/);
+    assert.match(preflight, /Type: MOCK/);
+    assert.match(preflight, /"statusCode":200/);
+    for (const [header, value] of [
+      ['Access-Control-Allow-Origin', '*'],
+      ['Access-Control-Allow-Headers', 'Authorization,Content-Type'],
+      ['Access-Control-Allow-Methods', `${method},OPTIONS`],
+    ]) {
+      const parameter = `method.response.header.${header}`;
+      assert.ok(preflight.includes(`${parameter}: "'${value}'"`));
+      assert.ok(preflight.includes(`${parameter}: true`));
+    }
+    assert.ok(deployment.includes(`- ${name}\n`));
+  }
+});
