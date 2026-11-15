@@ -5,7 +5,7 @@ import { createPlatformHandler } from '../handler.js';
 test('Platform routes return tenant summaries only and require PlatformAdmins', async () => {
   const config = {
     GSI1SK: 't_fixture', status: 'ACTIVE', plan: 'Free', charLimit: 50000,
-    ownerSub: 'private-sub', sourceText: 'private source', organizationName: 'private name',
+    ownerSub: 'private-sub', sourceText: 'private source', organizationName: 'Homestay ABC Hội An',
   };
   let detailReads = 0;
   let lists = 0;
@@ -31,7 +31,13 @@ test('Platform routes return tenant summaries only and require PlatformAdmins', 
     requestContext, httpMethod: 'GET', resource: '/platform/tenants/{tenantId}', pathParameters: { tenantId: 't_fixture' },
   };
   const list = { requestContext, httpMethod: 'GET', resource: '/platform/tenants', queryStringParameters: { cursor: 't_previous' } };
-  const expected = { tenant_id: 't_fixture', status: 'ACTIVE', plan: 'Free', character_limit: 50000 };
+  const expected = {
+    tenant_id: 't_fixture',
+    organization_name: 'Homestay ABC Hội An',
+    status: 'ACTIVE',
+    plan: 'Free',
+    character_limit: 50000,
+  };
   assert.deepEqual(JSON.parse((await handler(detail)).body), { ...expected, request_id: 'req-1' });
   assert.deepEqual(JSON.parse((await handler(list)).body), { items: [expected], next_cursor: 't_fixture', request_id: 'req-1' });
   assert.equal((await handler({ ...detail, requestContext: { authorizer: { claims: { 'custom:role': 'tenant_admin' } } } })).statusCode, 403);

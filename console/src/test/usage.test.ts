@@ -245,7 +245,15 @@ describe('Usage & Cost Avoided calculation (Q5 / KB2)', () => {
       if (!url.includes('cursor=')) {
         return new Response(
           JSON.stringify({
-            items: [{ tenant_id: 't_page_1', plan: 'FREE', status: 'ACTIVE', character_limit: 150_000 }],
+            items: [
+              {
+                tenant_id: 't_page_1',
+                organization_name: 'Homestay Phố Cổ',
+                plan: 'FREE',
+                status: 'ACTIVE',
+                character_limit: 150_000,
+              },
+            ],
             next_cursor: 't_page_1',
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
@@ -254,7 +262,15 @@ describe('Usage & Cost Avoided calculation (Q5 / KB2)', () => {
       assert.ok(url.includes('cursor=t_page_1'));
       return new Response(
         JSON.stringify({
-          items: [{ tenant_id: 't_page_2', plan: 'PRO', status: 'ACTIVE', character_limit: 900_000 }],
+          items: [
+            {
+              tenant_id: 't_page_2',
+              organization_name: 'Đà Nẵng Resort',
+              plan: 'PRO',
+              status: 'ACTIVE',
+              character_limit: 900_000,
+            },
+          ],
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
@@ -270,8 +286,11 @@ describe('Usage & Cost Avoided calculation (Q5 / KB2)', () => {
     const allTenants = await listPlatformTenants(platformSession, mockFetch);
     assert.equal(requestedUrls.length, 2);
     assert.deepEqual(
-      allTenants.map((t) => t.tenant_id),
-      ['t_page_1', 't_page_2'],
+      allTenants.map((t) => ({ id: t.tenant_id, name: t.organization_name })),
+      [
+        { id: 't_page_1', name: 'Homestay Phố Cổ' },
+        { id: 't_page_2', name: 'Đà Nẵng Resort' },
+      ],
     );
     assert.equal(
       resolveTenantCharacterLimit({ ...platformSession, tenantId: 't_page_2', plan: 'PRO' }, null),
