@@ -197,6 +197,7 @@ test('preflight Platform trả CORS trên đúng resource và được đưa và
     ['PlatformTenantsOptionsMethod', 'PlatformTenantsResource', 'GET'],
     ['PlatformTenantOptionsMethod', 'PlatformTenantResource', 'GET'],
     ['PlatformTenantLimitsOptionsMethod', 'PlatformTenantLimitsResource', 'PATCH'],
+    ['PlatformTenantStatusOptionsMethod', 'PlatformTenantStatusResource', 'PATCH'],
   ]) {
     const preflight = resources.get(name);
     assert.ok(preflight, `Thiếu OPTIONS cho ${resource}`);

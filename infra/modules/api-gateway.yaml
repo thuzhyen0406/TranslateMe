@@ -639,6 +639,31 @@ Resources:
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Origin: true
 
+  PlatformTenantStatusOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref PlatformTenantStatusResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: NEVER
+        RequestTemplates:
+          application/json: '{"statusCode":200}'
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Authorization,Content-Type'"
+              method.response.header.Access-Control-Allow-Methods: "'PATCH,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
   WebsitesOptionsMethod:
     Type: AWS::ApiGateway::Method
     Properties:
@@ -955,9 +980,9 @@ Resources:
       ResponseTemplates:
         application/json: '{"request_id":"$context.requestId","error":{"code":"INTERNAL_ERROR","message":"Lỗi tạm thời phía hệ thống."}}'
 
-  # Đổi tên logical ID (V5 -> V6) mỗi khi method/gateway response thay đổi: CloudFormation chỉ tạo
+  # Đổi tên logical ID (V6 -> V7) mỗi khi method/gateway response thay đổi: CloudFormation chỉ tạo
   # Deployment mới khi tài nguyên này bị thay, nếu giữ tên cũ thay đổi không lên stage.
-  ApiDeploymentV6:
+  ApiDeploymentV7:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - ConsoleMethod
@@ -972,6 +997,7 @@ Resources:
       - HostSlugProxyOptionsMethod
       - HostPrewarmOptionsMethod
       - PlatformTenantStatusMethod
+      - PlatformTenantStatusOptionsMethod
       - WebsitesMethod
       - WebsitesProxyMethod
       - ApiBatchMethod
@@ -1012,7 +1038,7 @@ Resources:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref RestApi
-      DeploymentId: !Ref ApiDeploymentV6
+      DeploymentId: !Ref ApiDeploymentV7
       StageName: !Ref StageName
 
   BasicUsagePlan:
