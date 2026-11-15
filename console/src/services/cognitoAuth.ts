@@ -469,6 +469,7 @@ export interface ConsoleTenantProfile {
   tenantLocked: boolean;
   organizationName?: string;
   plan?: AuthenticatedSession['plan'];
+  characterLimit?: number;
 }
 
 function parseTenantStatusFromProfilePayload(
@@ -501,7 +502,10 @@ function normalizeConsolePlan(raw: unknown): AuthenticatedSession['plan'] | unde
  * của tổ chức trước khi bật thao tác ghi trên Web Console.
  */
 export async function fetchConsoleTenantProfile(
-  session: Pick<AuthenticatedSession, 'tenantId' | 'role' | 'idToken' | 'organizationName' | 'plan'>,
+  session: Pick<
+    AuthenticatedSession,
+    'tenantId' | 'role' | 'idToken' | 'organizationName' | 'plan' | 'characterLimit'
+  >,
   opts: FetchConsoleTenantProfileOptions = {},
 ): Promise<ConsoleTenantProfile> {
   const demoMode = opts.demoMode ?? IS_DEMO_AUTH_MODE;
@@ -514,6 +518,9 @@ export async function fetchConsoleTenantProfile(
       tenantLocked: status === 'LOCKED',
       organizationName: session.organizationName,
       plan: session.plan,
+      ...(typeof session.characterLimit === 'number'
+        ? { characterLimit: session.characterLimit }
+        : {}),
     };
   }
 
@@ -586,6 +593,11 @@ export async function fetchConsoleTenantProfile(
       ? orgNameRaw.trim()
       : undefined;
   const plan = normalizeConsolePlan(data.plan);
+  const rawLimit = data.character_limit ?? data.characterLimit ?? data.charLimit;
+  const characterLimit =
+    typeof rawLimit === 'number' && Number.isSafeInteger(rawLimit) && rawLimit >= 0
+      ? rawLimit
+      : undefined;
 
   return {
     tenantId:
@@ -598,6 +610,7 @@ export async function fetchConsoleTenantProfile(
     tenantLocked: tenantStatus === 'LOCKED',
     ...(organizationName ? { organizationName } : {}),
     ...(plan ? { plan } : {}),
+    ...(characterLimit !== undefined ? { characterLimit } : {}),
   };
 }
 
@@ -609,6 +622,12 @@ export async function hydrateSessionTenantStatus(
   session: AuthenticatedSession,
   opts: FetchConsoleTenantProfileOptions = {},
 ): Promise<AuthenticatedSession> {
+  if (session.role === 'PLATFORM_ADMIN') {
+    return {
+      ...session,
+      tenantStatus: 'ACTIVE',
+    };
+  }
   try {
     const profile = await fetchConsoleTenantProfile(session, opts);
     return {
@@ -618,6 +637,7 @@ export async function hydrateSessionTenantStatus(
       tenantStatus: profile.tenantStatus,
       ...(profile.organizationName ? { organizationName: profile.organizationName } : {}),
       ...(profile.plan ? { plan: profile.plan } : {}),
+      ...(profile.characterLimit !== undefined ? { characterLimit: profile.characterLimit } : {}),
     };
   } catch (err) {
     if (err instanceof ConsoleAuthError && err.code === 'TENANT_SUSPENDED') {

@@ -648,12 +648,12 @@ describe('Console Lambda router (/console/{proxy+})', () => {
       assert.equal(body.plan, 'Pro');
     }
 
-    // CONFIG ACTIVE -> tenant_status = ACTIVE, tenant_locked = false
+    // CONFIG ACTIVE + characterLimit -> tenant_status = ACTIVE, tenant_locked = false, character_limit được trả kèm
     const activeHandler = createConsoleHandler(undefined, {
       db: {
         get: async (_c, key) => {
           if (key.SK.startsWith('MEMBER#')) return { status: 'ACTIVE', role: 'TENANT_ADMIN' };
-          if (key.SK === 'CONFIG') return { ...keys.config(adminCtx), status: 'ACTIVE' };
+          if (key.SK === 'CONFIG') return { ...keys.config(adminCtx), status: 'ACTIVE', characterLimit: 75000 };
           return null;
         },
       },
@@ -665,6 +665,7 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     const activeBody = JSON.parse(activeRes.body);
     assert.equal(activeBody.tenant_status, 'ACTIVE');
     assert.equal(activeBody.tenant_locked, false);
+    assert.equal(activeBody.character_limit, 75000);
 
     // Thiếu CONFIG -> 404 NOT_FOUND; trạng thái CONFIG không hợp lệ -> 500 INTERNAL_ERROR
     const missingRes = await handleConsoleMeApiGatewayRoute(

@@ -601,6 +601,10 @@ export async function handleConsoleMeApiGatewayRoute(
     if (typeof config.plan === 'string' && config.plan.trim()) {
       payload.plan = config.plan;
     }
+    const rawLimit = config.characterLimit ?? config.charLimit ?? config.character_limit;
+    if (typeof rawLimit === 'number' && Number.isSafeInteger(rawLimit) && rawLimit >= 0) {
+      payload.character_limit = rawLimit;
+    }
 
     return {
       statusCode: 200,
@@ -637,6 +641,11 @@ async function handleConsoleUsageRoute(
     const usage = await usageDb.get(ctx, total, { consistent: true });
     const fromMemory = Number(usage?.sentFromTM ?? usage?.memoryChars ?? 0);
     const quotaUsed = Number(usage?.machineChars ?? 0);
+    const rawLimit =
+      usage?.characterLimit ??
+      usage?.charLimit ??
+      usage?.character_limit ??
+      usage?.limit;
     return {
       statusCode: 200,
       headers: HEADERS,
@@ -649,6 +658,9 @@ async function handleConsoleUsageRoute(
         chars_quota_used: quotaUsed,
         requests: Number(usage?.requests ?? 0),
         pages_served: Number(usage?.pagesServed ?? 0),
+        ...(typeof rawLimit === 'number' && Number.isSafeInteger(rawLimit) && rawLimit >= 0
+          ? { character_limit: rawLimit }
+          : {}),
       }),
     };
   } catch (error) {

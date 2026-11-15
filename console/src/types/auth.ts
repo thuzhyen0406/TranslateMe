@@ -60,6 +60,8 @@ export interface AuthenticatedSession {
   tokenRefreshedAt: string;
   /** Trạng thái tenant bắt buộc trên phiên: ACTIVE (được ghi), LOCKED (chỉ xem), hoặc UNKNOWN (chờ xác minh -> fail-closed khóa ghi) */
   tenantStatus: TenantStatus;
+  /** Hạn mức ký tự riêng của tenant (nếu được Platform Admin cấu hình khác mức mặc định của gói) */
+  characterLimit?: number;
 }
 
 export interface SignUpFormInput {

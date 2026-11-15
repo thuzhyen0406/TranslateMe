@@ -202,7 +202,7 @@ export async function fetchTenantCustomLimit(
   session: SessionWithOptionalLimit,
   fetchImpl: typeof fetch = fetch,
 ): Promise<number | undefined> {
-  if (IS_DEMO_AUTH_MODE) {
+  if (IS_DEMO_AUTH_MODE && fetchImpl === fetch) {
     return (
       getMockTenantCharacterLimit(session.tenantId) ??
       (isValidCharacterLimit(session.character_limit) ? session.character_limit : undefined) ??
@@ -235,7 +235,7 @@ export async function fetchTenantUsage(
   month: string = currentMonthUtc(),
   fetchImpl: typeof fetch = fetch,
 ): Promise<TenantUsageSummary> {
-  if (IS_DEMO_AUTH_MODE) {
+  if (IS_DEMO_AUTH_MODE && fetchImpl === fetch) {
     return getDefaultMockUsage(session.tenantId, month);
   }
   const response = await fetchImpl(
@@ -256,40 +256,63 @@ export async function fetchTenantUsage(
 
 export async function listPlatformTenants(
   session: AuthenticatedSession,
+  fetchImpl: typeof fetch = fetch,
 ): Promise<PlatformTenantSummary[]> {
-  if (IS_DEMO_AUTH_MODE) {
+  if (IS_DEMO_AUTH_MODE && fetchImpl === fetch) {
     return mockPlatformTenants.map((t) => ({ ...t }));
   }
-  const response = await fetch(`${baseUrl}/platform/tenants`, {
-    method: 'GET',
-    headers: jsonHeaders(session),
-  });
-  if (!response.ok) {
-    const data = (await response.json().catch(() => null)) as {
-      error?: { message?: string };
-    } | null;
-    throw new Error(data?.error?.message ?? `Không thể tải danh sách tenant (${response.status}).`);
-  }
-  const payload = (await response.json()) as { items?: PlatformTenantSummary[] };
-  for (const item of payload.items ?? []) {
-    if (isValidCharacterLimit(item.character_limit)) {
-      customTenantLimits.set(item.tenant_id, item.character_limit);
+  const allItems: PlatformTenantSummary[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  while (true) {
+    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+    const response = await fetchImpl(`${baseUrl}/platform/tenants${query}`, {
+      method: 'GET',
+      headers: jsonHeaders(session),
+    });
+    if (!response.ok) {
+      const data = (await response.json().catch(() => null)) as {
+        error?: { message?: string };
+      } | null;
+      throw new Error(data?.error?.message ?? `Không thể tải danh sách tenant (${response.status}).`);
     }
+    const payload = (await response.json()) as {
+      items?: PlatformTenantSummary[];
+      next_cursor?: string;
+    };
+    for (const item of payload.items ?? []) {
+      if (isValidCharacterLimit(item.character_limit)) {
+        customTenantLimits.set(item.tenant_id, item.character_limit);
+      }
+      allItems.push(item);
+    }
+    const nextCursor =
+      typeof payload.next_cursor === 'string' && payload.next_cursor.trim()
+        ? payload.next_cursor.trim()
+        : undefined;
+    if (!nextCursor || seenCursors.has(nextCursor)) {
+      break;
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
   }
-  return payload.items ?? [];
+
+  return allItems;
 }
 
 export async function updatePlatformTenantStatus(
   session: AuthenticatedSession,
   tenantId: string,
   status: 'ACTIVE' | 'LOCKED',
+  fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  if (IS_DEMO_AUTH_MODE) {
+  if (IS_DEMO_AUTH_MODE && fetchImpl === fetch) {
     const target = mockPlatformTenants.find((t) => t.tenant_id === tenantId);
     if (target) target.status = status;
     return;
   }
-  const response = await fetch(
+  const response = await fetchImpl(
     `${baseUrl}/platform/tenants/${encodeURIComponent(tenantId)}/status`,
     {
       method: 'PATCH',
@@ -309,17 +332,18 @@ export async function updatePlatformTenantLimit(
   session: AuthenticatedSession,
   tenantId: string,
   characterLimit: number,
+  fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
   if (!isValidCharacterLimit(characterLimit)) {
     throw new Error('Hạn mức ký tự phải là số nguyên không âm.');
   }
-  customTenantLimits.set(tenantId, characterLimit);
-  if (IS_DEMO_AUTH_MODE) {
+  if (IS_DEMO_AUTH_MODE && fetchImpl === fetch) {
+    customTenantLimits.set(tenantId, characterLimit);
     const target = mockPlatformTenants.find((t) => t.tenant_id === tenantId);
     if (target) target.character_limit = characterLimit;
     return;
   }
-  const response = await fetch(
+  const response = await fetchImpl(
     `${baseUrl}/platform/tenants/${encodeURIComponent(tenantId)}/limits`,
     {
       method: 'PATCH',
@@ -333,4 +357,11 @@ export async function updatePlatformTenantLimit(
     } | null;
     throw new Error(data?.error?.message ?? `Không thể cập nhật hạn mức ký tự (${response.status}).`);
   }
+  const payload = (await response.json().catch(() => null)) as {
+    character_limit?: number;
+  } | null;
+  const savedLimit = isValidCharacterLimit(payload?.character_limit)
+    ? payload.character_limit
+    : characterLimit;
+  customTenantLimits.set(tenantId, savedLimit);
 }

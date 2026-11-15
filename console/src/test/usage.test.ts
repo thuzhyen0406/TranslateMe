@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { AuthenticatedSession } from '../types/auth.js';
 import {
+  fetchConsoleTenantProfile,
+  hydrateSessionTenantStatus,
+} from '../services/cognitoAuth.js';
+import {
   computeUsageMetrics,
+  fetchTenantCustomLimit,
+  listPlatformTenants,
   resolveTenantCharacterLimit,
   updatePlatformTenantLimit,
 } from '../services/usageApi.js';
@@ -144,5 +150,181 @@ describe('Usage & Cost Avoided calculation (Q5 / KB2)', () => {
     // Khi Platform Admin cập nhật hạn mức riêng cho tenant, resolveTenantCharacterLimit phản ánh ngay
     await updatePlatformTenantLimit(baseSession, 't_custom_sync', 75_000);
     assert.equal(resolveTenantCharacterLimit(baseSession, null), 75_000);
+  });
+
+  it('fetchTenantCustomLimit và fetchConsoleTenantProfile đọc character_limit từ GET /console/me cho tenant có hạn mức riêng', async () => {
+    const session = {
+      tenantId: 't_api_custom',
+      plan: 'FREE',
+      role: 'TENANT_ADMIN',
+      idToken: 'jwt-token',
+      organizationName: 'Resort Custom Limit',
+    } as AuthenticatedSession;
+
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      assert.ok(url.endsWith('/console/me'));
+      return new Response(
+        JSON.stringify({
+          request_id: 'req-me-custom',
+          tenant_id: 't_api_custom',
+          role: 'TENANT_ADMIN',
+          tenant_status: 'ACTIVE',
+          tenant_locked: false,
+          organization_name: 'Resort Custom Limit',
+          plan: 'FREE',
+          character_limit: 120_000,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+
+    const profile = await fetchConsoleTenantProfile(session, {
+      demoMode: false,
+      baseUrl: 'https://api.example.com',
+      fetchFn: mockFetch,
+    });
+    assert.equal(profile.characterLimit, 120_000);
+
+    const fetchedLimit = await fetchTenantCustomLimit(session, mockFetch);
+    assert.equal(fetchedLimit, 120_000);
+
+    const effective = resolveTenantCharacterLimit(session, null, fetchedLimit);
+    const metrics = computeUsageMetrics(
+      {
+        tenant_id: 't_api_custom',
+        month: '2026-11',
+        chars_machine_translated: 30_000,
+        chars_from_memory: 30_000,
+        chars_quota_used: 30_000,
+        requests: 100,
+        pages_served: 5,
+      },
+      session.plan,
+      effective,
+    );
+    assert.equal(metrics.character_limit, 120_000);
+    assert.equal(metrics.is_custom_limit, true);
+    assert.equal(metrics.quota_used_percent, 25);
+  });
+
+  it('hydrateSessionTenantStatus bỏ qua /console/me cho PLATFORM_ADMIN và giữ trạng thái ACTIVE', async () => {
+    let called = false;
+    const platformSession = {
+      email: 'ops@translateme.example',
+      fullName: 'Platform Ops',
+      sub: 'sub-ops',
+      tenantId: 'platform',
+      organizationName: 'TranslateMe Platform',
+      plan: 'BUSINESS',
+      role: 'PLATFORM_ADMIN',
+      tenantStatus: 'UNKNOWN',
+      idToken: 'jwt-ops',
+      accessToken: 'at-ops',
+      refreshToken: 'rt-ops',
+      tokenRefreshedAt: '2026-11-16T00:00:00.000Z',
+    } as AuthenticatedSession;
+
+    const hydrated = await hydrateSessionTenantStatus(platformSession, {
+      demoMode: false,
+      baseUrl: 'https://api.example.com',
+      fetchFn: async () => {
+        called = true;
+        return new Response(null, { status: 403 });
+      },
+    });
+    assert.equal(called, false);
+    assert.equal(hydrated.tenantStatus, 'ACTIVE');
+  });
+
+  it('listPlatformTenants tải đầy đủ các trang tiếp theo qua next_cursor khi có nhiều trang tenant', async () => {
+    const requestedUrls: string[] = [];
+    const mockFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (!url.includes('cursor=')) {
+        return new Response(
+          JSON.stringify({
+            items: [{ tenant_id: 't_page_1', plan: 'FREE', status: 'ACTIVE', character_limit: 150_000 }],
+            next_cursor: 't_page_1',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      assert.ok(url.includes('cursor=t_page_1'));
+      return new Response(
+        JSON.stringify({
+          items: [{ tenant_id: 't_page_2', plan: 'PRO', status: 'ACTIVE', character_limit: 900_000 }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+
+    const platformSession = {
+      tenantId: 'platform',
+      plan: 'BUSINESS',
+      role: 'PLATFORM_ADMIN',
+      idToken: 'jwt-ops',
+    } as AuthenticatedSession;
+
+    const allTenants = await listPlatformTenants(platformSession, mockFetch);
+    assert.equal(requestedUrls.length, 2);
+    assert.deepEqual(
+      allTenants.map((t) => t.tenant_id),
+      ['t_page_1', 't_page_2'],
+    );
+    assert.equal(
+      resolveTenantCharacterLimit({ ...platformSession, tenantId: 't_page_2', plan: 'PRO' }, null),
+      900_000,
+    );
+  });
+
+  it('updatePlatformTenantLimit chỉ cập nhật cache sau khi PATCH thành công; giữ nguyên khi lỗi API hoặc lỗi mạng', async () => {
+    const tenantSession = {
+      tenantId: 't_atomic_cache',
+      plan: 'FREE',
+      role: 'TENANT_ADMIN',
+      idToken: 'jwt-admin',
+    } as AuthenticatedSession;
+
+    // 1. Lỗi HTTP 500 từ API -> không cập nhật cache (vẫn giữ mặc định gói FREE = 200.000)
+    await assert.rejects(
+      () =>
+        updatePlatformTenantLimit(
+          tenantSession,
+          't_atomic_cache',
+          500_000,
+          async () =>
+            new Response(
+              JSON.stringify({ error: { message: 'Lỗi máy chủ khi lưu hạn mức.' } }),
+              { status: 500, headers: { 'content-type': 'application/json' } },
+            ),
+        ),
+      /Lỗi máy chủ khi lưu hạn mức/,
+    );
+    assert.equal(resolveTenantCharacterLimit(tenantSession, null), 200_000);
+
+    // 2. Lỗi mạng -> không cập nhật cache
+    await assert.rejects(
+      () =>
+        updatePlatformTenantLimit(tenantSession, 't_atomic_cache', 400_000, async () => {
+          throw new Error('Network failure');
+        }),
+      /Network failure/,
+    );
+    assert.equal(resolveTenantCharacterLimit(tenantSession, null), 200_000);
+
+    // 3. PATCH 200 OK -> cập nhật cache với hạn mức mới
+    await updatePlatformTenantLimit(
+      tenantSession,
+      't_atomic_cache',
+      320_000,
+      async () =>
+        new Response(
+          JSON.stringify({ tenant_id: 't_atomic_cache', character_limit: 320_000 }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    assert.equal(resolveTenantCharacterLimit(tenantSession, null), 320_000);
   });
 });
