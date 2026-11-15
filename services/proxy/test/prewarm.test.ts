@@ -211,6 +211,25 @@ describe('PrewarmPages (C13 chế độ trang)', () => {
     assert.deepEqual([r.pages_done, r.pages_failed], [1, 1]);
   });
 
+  it('thử lại trang dịch dở một lần và chỉ tính trang đã dịch đủ', async () => {
+    const s = setup();
+    const attempts = new Map<string, number>();
+    s.deps.renderPage = async ({ rawPath }) => {
+      const path = rawPath!;
+      const calls = (attempts.get(path) ?? 0) + 1;
+      attempts.set(path, calls);
+      const complete = path.endsWith('/recovered/') && calls === 2;
+      const headers: Record<string, string> = complete ? {} : { 'x-translateme-partial': '1' };
+      return { statusCode: 200, headers, body: '' };
+    };
+
+    const result = await prewarmPages(await lot(s, ['recovered/', 'partial/'], ['en']), s.deps);
+    assert.deepEqual([...attempts.values()], [2, 2]);
+    assert.deepEqual(result, { pages_done: 1, pages_failed: 1, quota_exceeded: false, timed_out: false });
+    const finished = await finishPrewarm({ job_id: JOB, tenant_id: SITE.tenantId, slug: SITE.slug, results: [result] }, s.deps);
+    assert.deepEqual(finished.warnings.map(({ code, count }) => [code, count]), [['PAGES_FAILED', 1]]);
+  });
+
   it('hết hạn mức ký tự -> dừng lô, trang còn lại tính là lỗi', async () => {
     const s = setup({ quotaLimit: 0 });
     const r = await prewarmPages(await lot(s, ['', 'a/', 'b/'], ['en']), s.deps);

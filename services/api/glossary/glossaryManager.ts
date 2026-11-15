@@ -17,6 +17,7 @@
  */
 
 import {
+  DeleteTerminologyCommand,
   ImportTerminologyCommand,
   TranslateClient,
   type ImportTerminologyCommandOutput,
@@ -122,6 +123,7 @@ export interface TranslateTerminologyClient {
 export interface GlossaryDependencies {
   db: Pick<typeof db, 'get' | 'put' | 'query' | 'transact' | 'listTenantSites'> & Partial<Pick<typeof db, 'update'>>;
   translateClient: TranslateTerminologyClient;
+  deleteTerminology?: (name: string) => Promise<unknown>;
   now: () => number;
   invalidateSites?: typeof invalidateForSitesSubmitOnly;
   getInvalidationStatus?: typeof getCloudFrontInvalidationStatus;
@@ -140,6 +142,7 @@ const defaultDependencies: GlossaryDependencies = {
   translateClient: {
     send: (cmd) => getDefaultTranslateClient().send(cmd),
   },
+  deleteTerminology: (name) => getDefaultTranslateClient().send(new DeleteTerminologyCommand({ Name: name })),
   now: () => Date.now(),
   invalidateSites: invalidateForSitesSubmitOnly,
   getInvalidationStatus: getCloudFrontInvalidationStatus,
@@ -395,13 +398,13 @@ async function markTerminologySyncedOnConfig(
   terminologyName: string | null,
   syncedVersion: number,
   deps: GlossaryDependencies,
-): Promise<void> {
+): Promise<boolean> {
   const updatedAt = new Date(deps.now()).toISOString();
   const updateParams = {
     UpdateExpression:
       'SET terminologyName = :tname, terminologySyncedVersion = :v, updatedAt = :now',
     ConditionExpression:
-      'attribute_exists(PK) AND (attribute_not_exists(terminologySyncedVersion) OR terminologySyncedVersion < :v)',
+      'attribute_exists(PK) AND glossaryVersion = :v AND (attribute_not_exists(terminologySyncedVersion) OR terminologySyncedVersion < :v)',
     ExpressionAttributeValues: {
       ':tname': terminologyName,
       ':v': syncedVersion,
@@ -423,15 +426,23 @@ async function markTerminologySyncedOnConfig(
         },
       ]);
     }
+    return true;
   } catch (err: any) {
-    if (
-      err?.name === 'ConditionalCheckFailedException' ||
-      err?.name === 'TransactionCanceledException'
-    ) {
-      // Đã có một phiên bản mới hơn cập nhật terminologySyncedVersion -> bỏ qua an toàn
-      return;
-    }
+    if (err?.name !== 'ConditionalCheckFailedException' && err?.name !== 'TransactionCanceledException') throw err;
+    const current = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
+    if (current?.terminologySyncedVersion === syncedVersion && current.terminologyName === terminologyName) return true;
+    if (Number(current?.glossaryVersion) > syncedVersion) return false;
     throw err;
+  }
+}
+
+async function removeTerminology(name: string, deps: GlossaryDependencies): Promise<void> {
+  try {
+    await deps.deleteTerminology?.(name);
+  } catch (error) {
+    if ((error as { name?: string })?.name !== 'ResourceNotFoundException') {
+      console.warn(JSON.stringify({ event: 'DELETE_OLD_TERMINOLOGY_FAILED', name }));
+    }
   }
 }
 
@@ -446,12 +457,13 @@ async function syncTerminologyToTranslate(
   if (!csv) {
     // Khi không còn thuật ngữ hiệu lực nào -> xóa terminologyName trên CONFIG (đặt về null)
     // để F2/F9/F10 không truyền TerminologyNames vào TranslateText.
-    await markTerminologySyncedOnConfig(ctx, null, newVersion, deps);
+    const published = await markTerminologySyncedOnConfig(ctx, null, newVersion, deps);
     clearGlossaryCache(ctx.tenantId);
-    return true;
+    if (published && newVersion > 2) await removeTerminology(terminologyNameOf(ctx, newVersion - 2), deps);
+    return published;
   }
 
-  const targetName = terminologyNameOf(ctx);
+  const targetName = terminologyNameOf(ctx, newVersion);
   try {
     await deps.translateClient.send(
       new ImportTerminologyCommand({
@@ -481,9 +493,16 @@ async function syncTerminologyToTranslate(
     return false;
   }
 
-  await markTerminologySyncedOnConfig(ctx, targetName, newVersion, deps);
+  const published = await markTerminologySyncedOnConfig(ctx, targetName, newVersion, deps);
   clearGlossaryCache(ctx.tenantId);
-  return true;
+  if (!published) {
+    // A delayed import may still be the last published version while the new one is importing.
+    const current = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
+    if (current?.terminologyName !== targetName) await removeTerminology(targetName, deps);
+  } else if (newVersion > 2) {
+    await removeTerminology(terminologyNameOf(ctx, newVersion - 2), deps);
+  }
+  return published;
 }
 
 // ============================================================================
@@ -494,7 +513,7 @@ async function loadConfigAndAssertWritable(
   ctx: Ctx,
   deps: GlossaryDependencies,
 ): Promise<Record<string, any>> {
-  const config = await deps.db.get(ctx, keys.config(ctx));
+  const config = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
   if (!config) {
     throw new AppError('NOT_FOUND', 'Không tìm thấy cấu hình tenant');
   }
@@ -517,7 +536,7 @@ function buildConfigVersionUpdateOp(
     Update: {
       TableName: TABLE_NAME,
       Key: keys.config(ctx),
-      UpdateExpression: 'SET glossaryVersion = :new, updatedAt = :now',
+      UpdateExpression: 'SET glossaryVersion = :new, terminologySyncedVersion = if_not_exists(terminologySyncedVersion, :old), updatedAt = :now',
       ConditionExpression:
         'attribute_exists(PK) AND (attribute_not_exists(glossaryVersion) OR glossaryVersion = :old) AND #st = :active',
       ExpressionAttributeNames: {

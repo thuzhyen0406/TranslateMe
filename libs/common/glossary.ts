@@ -47,6 +47,7 @@ export interface GlossaryState {
   version: number;
   /** Tên Custom Terminology trên Amazon Translate đã đồng bộ thành công; null khi chưa có hoặc chưa đồng bộ */
   terminologyName: string | null;
+  pendingTerminology?: boolean;
   /** Danh sách thuật ngữ (gồm cả mục đã đánh dấu xóa để `isStale` phát hiện bản dịch MACHINE cũ) */
   terms: {
     normalized: string;
@@ -89,7 +90,7 @@ export function createDynamoGlossaryReader(
     db: {
       async get(ctx, key) {
         assertTenant(ctx, key.PK);
-        const res = await doc.send(new GetCommand({ TableName: tableName, Key: key }));
+        const res = await doc.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }));
         return (res.Item as Record<string, any> | undefined) ?? null;
       },
       async query(ctx, pk, skPrefix) {
@@ -100,6 +101,7 @@ export function createDynamoGlossaryReader(
           const res = await doc.send(
             new QueryCommand({
               TableName: tableName,
+              ConsistentRead: true,
               KeyConditionExpression: skPrefix ? 'PK = :pk AND begins_with(SK, :skPrefix)' : 'PK = :pk',
               ExpressionAttributeValues: skPrefix ? { ':pk': pk, ':skPrefix': skPrefix } : { ':pk': pk },
               ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
@@ -162,9 +164,20 @@ export function normalizeTerm(text: string): string {
  * Công thức duy nhất tạo tên Custom Terminology trên Amazon Translate cho mỗi tenant (B.7 & Mục 2.6.5).
  * Chỉ chứa các ký tự hợp lệ của AWS Translate `^([A-Za-z0-9-]_?)+$`.
  */
-export function terminologyNameOf(ctx: Ctx): string {
+export function terminologyNameOf(ctx: Ctx, version?: number): string {
   const safeId = ctx.tenantId.replace(/[^A-Za-z0-9-_]/g, '-');
-  return `tm-${safeId}`;
+  return version === undefined ? `tm-${safeId}` : `tm-${safeId}-v${version}`;
+}
+
+export function syncedTerminologyName(config: Record<string, unknown> | null, version: number): string | null {
+  const name = config?.terminologyName;
+  const synced = config?.terminologySyncedVersion;
+  return typeof name === 'string' && (synced === undefined || synced === version) ? name.trim() || null : null;
+}
+
+/** A fallback without the latest terminology must be eligible for translation again after sync. */
+export function machineGlossaryVersion(glossary: GlossaryState): number {
+  return glossary.pendingTerminology ? 0 : glossary.version;
 }
 
 // ============================================================================
@@ -181,12 +194,9 @@ export async function getGlossaryState(
   ctx: Ctx,
   deps: GlossaryReadDependencies = defaultReadDeps,
 ): Promise<GlossaryState> {
-  const config = await deps.db.get(ctx, keys.config(ctx));
+  const config = await deps.db.get(ctx, keys.config(ctx), { consistent: true });
   const currentVersion = Number(config?.glossaryVersion ?? 0);
-  const syncedTerminologyName =
-    typeof config?.terminologyName === 'string' && config.terminologyName.trim() !== ''
-      ? config.terminologyName.trim()
-      : null;
+  const terminologyName = syncedTerminologyName(config, currentVersion);
 
   const now = deps.now();
   const cached = glossaryCache.get(ctx.tenantId);
@@ -194,7 +204,7 @@ export async function getGlossaryState(
   if (
     cached &&
     cached.version === currentVersion &&
-    cached.terminologyName === syncedTerminologyName &&
+    cached.terminologyName === terminologyName &&
     now < cached.expiresAt
   ) {
     return cached.state;
@@ -216,7 +226,7 @@ export async function getGlossaryState(
   }
 
   const glossPk = `TENANT#${ctx.tenantId}#GLOSS`;
-  const rawItems = await deps.db.query(ctx, glossPk, 'TERM#');
+  const rawItems = await deps.db.query(ctx, glossPk, 'TERM#', { consistent: true });
 
   const terms: GlossaryState['terms'] = rawItems.map((item: Record<string, any>) => ({
     normalized: String(item.normalized ?? String(item.SK ?? '').replace(/^TERM#/, '')),
@@ -231,12 +241,18 @@ export async function getGlossaryState(
     deleted: Boolean(item.deleted),
   }));
 
+  if (terms.some((term) => term.sinceVersion > currentVersion)) {
+    throw new Error('Glossary changed while reading its terms.');
+  }
   const hasActiveTerms = terms.some((t) => !t.deleted);
-  const effectiveTerminologyName = hasActiveTerms ? syncedTerminologyName : null;
+  const effectiveTerminologyName = hasActiveTerms ? terminologyName : null;
 
   const state: GlossaryState = {
     version: currentVersion,
     terminologyName: effectiveTerminologyName,
+    ...(hasActiveTerms && !effectiveTerminologyName && config?.terminologySyncedVersion !== currentVersion
+      ? { pendingTerminology: true }
+      : {}),
     terms,
   };
 

@@ -11,7 +11,7 @@
  *  4. Dịch, hậu kiểm thuật ngữ (postCheckGlossary, 3.9), ghi TM bản MACHINE, settleUsage với Source = { kind: 'WEB', slug }.
  * Không throw khi lỗi (tránh Lambda tự gọi lại 2 lần làm dịch và tính phí trùng); kết quả nằm trong log.
  */
-import { postCheckGlossary } from '../../libs/common/glossary.js';
+import { postCheckGlossary, machineGlossaryVersion } from '../../libs/common/glossary.js';
 import { createTM, type GlossaryState, type SentenceWithHash } from '../../libs/common/tm.js';
 import type { TranslateRequest, TranslateResult } from '../../libs/common/translator.js';
 import type { Ctx } from '../../libs/common/types.js';
@@ -206,7 +206,7 @@ export function createWorkerHandler(deps: WorkerDeps) {
               hash: item.hash,
               sourceText: item.text,
               tgt: t.tgt,
-              glossaryVersion: glossary.version,
+              glossaryVersion: machineGlossaryVersion(glossary),
               needsReview: t.needsReview || postCheck.needsReview,
             };
           }),

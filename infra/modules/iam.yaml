@@ -522,6 +522,10 @@ Resources:
                 Effect: Allow
                 Action: translate:ImportTerminology
                 Resource: '*'
+              - Sid: DeleteVersionedTerminology
+                Effect: Allow
+                Action: translate:DeleteTerminology
+                Resource: !Sub 'arn:${AWS::Partition}:translate:${AWS::Region}:${AWS::AccountId}:terminology/tm-*-v*/LATEST'
               - Sid: InvalidateWebsiteCache
                 Effect: Allow
                 Action:

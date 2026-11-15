@@ -6,7 +6,7 @@ import { GetObjectCommand, PutObjectCommand, type S3Client } from '@aws-sdk/clie
 import { TranslateClient } from '@aws-sdk/client-translate';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createTenantDocumentClientRouter, createTenantS3Client } from '../../../libs/common/tenantAws.js';
-import { createDynamoGlossaryReader, postCheckGlossary, type GlossaryState } from '../../../libs/common/glossary.js';
+import { createDynamoGlossaryReader, postCheckGlossary, machineGlossaryVersion, type GlossaryState } from '../../../libs/common/glossary.js';
 import { createJobStore, JOB_ID_RE, JOB_TTL_DAYS, jobKey, type JobDb, type JobWarning } from '../../../libs/common/jobs.js';
 import { countChars, parse, rebuild, translatedFileName, type DocFormat } from '../../../libs/common/parsers.js';
 import { normalize_hash } from '../../../libs/common/text-utils.js';
@@ -14,7 +14,8 @@ import { createDynamoTmDb, createTM, type SentenceWithHash, type TmEntry } from 
 import type { Ctx } from '../../../libs/common/types.js';
 import type { db } from '../../../libs/common/db.js';
 import { UsageService, type UsageReservation, type UsageSource } from '../../../libs/common/usage/usage.js';
-import { createTranslator } from '../../../libs/common/translator.js';
+import { createTranslator, TRANSLATE_MAX_BYTES } from '../../../libs/common/translator.js';
+import { escapeHtmlText, markersToSpanHtml, serializeMarkers, tokenizeMarkers } from '../../../libs/common/markers.js';
 
 export const BATCH_BLOCK_BYTES = 10_000;
 export const BATCH_LOT_BLOCKS = 20;
@@ -25,7 +26,7 @@ const OBJECT_IO_CONCURRENCY = 16;
 const BATCH_LANGUAGE_CONFIDENCE_THRESHOLD = 0.70;
 const BATCH_SUPPORTED_LANGUAGES = new Set(['ar', 'de', 'en', 'es', 'fr', 'hi', 'id', 'it', 'ja', 'ko', 'nl', 'pl', 'pt', 'ru', 'sv', 'th', 'tr', 'vi', 'zh']);
 
-export interface BatchBlock { id: number; text: string; sourceId?: number; partIndex?: number }
+export interface BatchBlock { id: number; text: string; sourceId?: number; partIndex?: number; verbatim?: boolean }
 export interface BatchManifest {
   format: DocFormat;
   fileName: string;
@@ -111,34 +112,52 @@ export function splitBatchBlocks(blocks: readonly BatchBlock[], options: { maxBy
   return lots;
 }
 
-/** Keep parser sentence ids so pieces can be reassembled before rebuilding the document. */
+/** Split by the encoded TranslateText size and leave inline structure out of split requests. */
 export function splitOversizedBatchBlocks(blocks: readonly BatchBlock[], maxBytes = BATCH_BLOCK_BYTES): BatchBlock[] {
+  const limit = Math.min(maxBytes, TRANSLATE_MAX_BYTES - 64); // Space for the sentence wrapper.
   const expanded: BatchBlock[] = [];
-  let nextId = 0;
   for (const block of blocks) {
-    if (Buffer.byteLength(block.text, 'utf8') <= maxBytes) {
-      expanded.push({ id: nextId++, text: block.text, sourceId: block.id, partIndex: 0 });
+    let partIndex = 0;
+    const append = (text: string, verbatim = false) => expanded.push({
+      id: expanded.length, text, sourceId: block.id, partIndex: partIndex++, ...(verbatim ? { verbatim: true } : {}),
+    });
+    if (Buffer.byteLength(block.text, 'utf8') <= maxBytes &&
+        Buffer.byteLength(markersToSpanHtml(block.text.normalize('NFC')), 'utf8') <= limit) {
+      append(block.text);
       continue;
     }
-    const tokens = block.text.match(/\{\/?\d+\}|\{\{|\}\}|[^{}]|\{[^{}]*\}/gu) ?? [];
-    const pieces: string[] = [];
-    let current = '';
-    for (const token of tokens) {
-      if (Buffer.byteLength(token, 'utf8') > maxBytes) {
-        for (const point of Array.from(token)) {
-          if (Buffer.byteLength(current + point, 'utf8') > maxBytes) { pieces.push(current); current = ''; }
-          current += point;
+
+    for (const token of tokenizeMarkers(block.text)) {
+      if (token.type !== 'text') {
+        append(serializeMarkers([token]), true);
+        continue;
+      }
+      let chunk = '';
+      let size = 0;
+      const flush = () => {
+        if (chunk) append(serializeMarkers([{ type: 'text', value: chunk }]), !chunk.trim());
+        chunk = '';
+        size = 0;
+      };
+      for (const match of token.value.matchAll(/\s+|\S+/gu)) {
+        const word = match[0];
+        const bytes = Math.max(Buffer.byteLength(serializeMarkers([{ type: 'text', value: word }]), 'utf8'), Buffer.byteLength(escapeHtmlText(word.normalize('NFC')), 'utf8'));
+        if (bytes <= limit) {
+          if (size + bytes > limit) flush();
+          chunk += word;
+          size += bytes;
+          continue;
         }
-      } else if (Buffer.byteLength(current + token, 'utf8') > maxBytes) {
-        pieces.push(current);
-        current = token;
-      } else current += token;
+        for (const point of word) {
+          const pointBytes = Math.max(Buffer.byteLength(serializeMarkers([{ type: 'text', value: point }]), 'utf8'), Buffer.byteLength(escapeHtmlText(point.normalize('NFC')), 'utf8'));
+          if (pointBytes > limit) throw Object.assign(new Error('Batch block byte limit is too small.'), { name: 'BlockTooLarge' });
+          if (size + pointBytes > limit) flush();
+          chunk += point;
+          size += pointBytes;
+        }
+      }
+      flush();
     }
-    if (current) pieces.push(current);
-    if (pieces.some((piece) => !piece || Buffer.byteLength(piece, 'utf8') > maxBytes) || pieces.join('') !== block.text) {
-      throw Object.assign(new Error(`Block ${block.id} could not be safely split.`), { name: 'BlockTooLarge' });
-    }
-    pieces.forEach((text, partIndex) => expanded.push({ id: nextId++, text, sourceId: block.id, partIndex }));
   }
   return expanded;
 }
@@ -296,17 +315,19 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
     const file = job;
     const source = job.usageSource as UsageSource | undefined;
     if (!source) throw Object.assign(new Error('Job is missing usage source.'), { name: 'InvalidJob' });
+    const translatable = blocks.filter((block) => !block.verbatim && block.text.trim());
     let sourceLang = typeof file.sourceLang === 'string' ? file.sourceLang : undefined;
-    if (!sourceLang) {
-      const detected = await deps.detectLanguage(blocks.map((b) => b.text).join('\n').slice(0, 5000));
+    if (!sourceLang && translatable.length) {
+      const detected = await deps.detectLanguage(translatable.map((b) => b.text).join('\n').slice(0, 5000));
       if (!detected.language || !BATCH_SUPPORTED_LANGUAGES.has(detected.language) ||
           (detected.confidence ?? 0) < BATCH_LANGUAGE_CONFIDENCE_THRESHOLD) {
         throw Object.assign(new Error('Source language could not be detected with confidence of at least 0.70.'), { name: 'LanguageNotDetected' });
       }
       sourceLang = detected.language;
     }
+    sourceLang ??= 'und'; // A lot containing only verbatim pieces has no language to detect.
     const glossary = await deps.getGlossaryState(ctx);
-    const sentences: SentenceWithHash[] = blocks.map(({ id, text }) => {
+    const sentences: SentenceWithHash[] = translatable.map(({ id, text }) => {
       const normalized = normalize_hash(text);
       return { id, text: normalized.normalizedText, hash: normalized.hash };
     });
@@ -315,6 +336,16 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
       await deps.tm.markHumanNeedsReview(ctx, sourceLang, event.target_lang, lookup.reviewFlags.map((hash) => ({ hash, tgt: lookup.hits.get(hash)!.tgt })));
     }
     const translations: Record<string, string> = {};
+    const outputTranslations = () => Object.fromEntries(blocks.map(({ id, text, verbatim }) => {
+      const translated = translations[id];
+      if (verbatim || !text.trim()) return [id, text];
+      if (translated === undefined) {
+        throw Object.assign(new Error('Translation lot was incomplete.'), { name: 'BatchTranslationIncomplete' });
+      }
+      const leading = /^\s*/u.exec(text)![0];
+      const trailing = /\s*$/u.exec(text)![0];
+      return [id, leading + translated.trim() + trailing];
+    }));
     let memoryChars = 0;
     for (const sentence of sentences) {
       const hit = lookup.hits.get(sentence.hash);
@@ -336,19 +367,19 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
           src: sourceLang, tgt: event.target_lang, sentences: lookup.misses.map(({ id, text }) => ({ id, text })),
           terminologyName: glossary.terminologyName, deadlineAt: now().getTime() + 240_000, concurrency: 4,
         });
-        if (translated.failed.length || translated.pending.length) {
+        if (translated.failed.length || translated.pending.length || translated.translated.length !== lookup.misses.length) {
           throw Object.assign(new Error('Translation lot was incomplete.'), { name: 'BatchTranslationIncomplete' });
         }
         const byId = new Map(lookup.misses.map((s) => [s.id, s]));
         const tmEntries = translated.translated.map((t) => ({
           hash: byId.get(t.id)!.hash, sourceText: byId.get(t.id)!.text, tgt: t.tgt,
-          glossaryVersion: glossary.version, needsReview: t.needsReview || postCheckGlossary(byId.get(t.id)!.text, t.tgt, event.target_lang!, glossary).needsReview,
+          glossaryVersion: machineGlossaryVersion(glossary), needsReview: t.needsReview || postCheckGlossary(byId.get(t.id)!.text, t.tgt, event.target_lang!, glossary).needsReview,
         }));
         for (const item of translated.translated) translations[String(item.id)] = item.tgt;
         machineChars = translated.translated.reduce((total, t) => total + countChars(byId.get(t.id)!.text), 0);
         const result: BatchLotResult = {
           checkpointVersion: 1,
-          translations,
+          translations: outputTranslations(),
           sources: Object.fromEntries(blocks.map((block) => [String(block.id), { sourceId: block.sourceId ?? block.id, partIndex: block.partIndex ?? 0 }])),
           machineChars,
           memoryChars,
@@ -374,7 +405,7 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
 
       const result: BatchLotResult = {
         checkpointVersion: 1,
-        translations,
+        translations: outputTranslations(),
         sources: Object.fromEntries(blocks.map((block) => [String(block.id), { sourceId: block.sourceId ?? block.id, partIndex: block.partIndex ?? 0 }])),
         machineChars,
         memoryChars,

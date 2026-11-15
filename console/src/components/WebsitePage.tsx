@@ -541,7 +541,8 @@ const PrewarmPanel: React.FC<{ api: WebsiteApi; canWrite: boolean; site: Website
     }
   };
 
-  const progress = job?.progress ?? 0;
+  const finishedWithMissingPages = job?.status === 'SUCCEEDED' && job.done < job.total;
+  const progress = finishedWithMissingPages ? Math.round(100 * job.done / job.total) : (job?.progress ?? 0);
   return (
     <div className="mt-5">
       <ErrorAlert
@@ -587,8 +588,8 @@ const PrewarmPanel: React.FC<{ api: WebsiteApi; canWrite: boolean; site: Website
       </div>
       {job?.status === 'SUCCEEDED' && (
         <div className="mt-3 text-xs text-gray-600">
-          <p className="text-[#146c54] font-semibold">
-            Đã dịch trước {job.done}/{job.total} trang.
+          <p className={finishedWithMissingPages ? 'text-amber-700 font-semibold' : 'text-[#146c54] font-semibold'}>
+            {finishedWithMissingPages ? 'Dịch trước chưa đầy đủ.' : 'Đã dịch trước.'} {job.done}/{job.total} trang.
           </p>
           {job.warnings.length > 0 && (
             <ul className="mt-1 list-disc pl-5 space-y-0.5">

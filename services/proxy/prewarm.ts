@@ -337,23 +337,23 @@ export async function prewarmPages(event: PrewarmPagesEvent, deps: PrewarmDeps):
         res.timed_out = true;
         break outer;
       }
-      if (!enabled.includes(lang)) {
-        res.pages_failed++;
-        continue;
-      }
+      if (!enabled.includes(lang)) continue;
       try {
-        const out = await deps.renderPage({
+        const request = {
           rawPath: `/${site.slug}/${lang}/${path}`,
           rawQueryString: q.join('?'),
           requestContext: { requestId: `prewarm-${event.job_id}`, http: { method: 'GET' } },
-        });
-        if (out.statusCode === 200 && out.headers['x-translateme-partial'] === 'quota') {
-          res.quota_exceeded = true;
-          res.pages_failed++;
-        } else if (out.statusCode === 200) res.pages_done++;
-        else res.pages_failed++;
+        };
+        let out = await deps.renderPage(request);
+        if (out.statusCode === 200 && out.headers['x-translateme-partial'] === '1' &&
+            now() - started + pageBudget + 15_000 <= workerBudget) {
+          out = await deps.renderPage(request);
+        }
+        const partial = out.headers['x-translateme-partial'];
+        if (out.statusCode === 200 && partial === 'quota') res.quota_exceeded = true;
+        if (out.statusCode === 200 && !partial) res.pages_done++;
       } catch {
-        res.pages_failed++;
+        // Mọi trang chưa dịch đủ được tính vào pages_failed ở cuối lô.
       }
     }
   }
@@ -390,7 +390,7 @@ export async function finishPrewarm(event: FinishPrewarmEvent, deps: PrewarmDeps
   const warnings: JobWarning[] = [...(Array.isArray(event.warnings) ? event.warnings : [])];
   if (results.some((r) => r?.quota_exceeded)) warnings.push(warning('QUOTA', 1, 'Hết hạn mức ký tự tháng, bỏ qua các trang còn lại', 'pages'));
   if (results.some((r) => r?.timed_out)) warnings.push(warning('LOT_TIMEOUT', results.filter((r) => r?.timed_out).length, 'Có lô hết thời gian, một số trang chưa dịch trước', 'pages'));
-  if (failed) warnings.push(warning('PAGES_FAILED', failed, 'Một số trang không dịch trước được (lỗi tải trang, hết hạn mức hoặc hết thời gian)', 'pages'));
+  if (failed) warnings.push(warning('PAGES_FAILED', failed, 'Một số trang chưa được dịch đầy đủ', 'pages'));
   await createJobStore(deps.jobDb, deps.now).finish(ctxOf(event.tenant_id, event.job_id, event.slug), event.job_id, { status: 'SUCCEEDED', warnings });
   (deps.logger ?? defaultPrewarmLogger).info({ action: 'PREWARM_DONE', jobId: event.job_id, tenantId: event.tenant_id, done: sum('pages_done'), failed });
   return { status: 'SUCCEEDED', warnings };

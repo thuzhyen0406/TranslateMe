@@ -1387,7 +1387,7 @@ function markerTextToSpans(
       }
     }
     return {
-      rPrXml: top.rPrXml || baseRPrXml,
+      rPrXml: top.rPrXml ?? baseRPrXml,
       ...(hyperlinkAttrs !== undefined ? { hyperlinkAttrs } : {}),
     };
   };

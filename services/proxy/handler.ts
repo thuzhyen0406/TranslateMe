@@ -37,7 +37,7 @@ import { TranslateClient } from '@aws-sdk/client-translate';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { createTenantDocumentClientRouter, createTenantS3Client } from '../../libs/common/tenantAws.js';
 import { extract } from '../../libs/common/extract.js';
-import { createDynamoGlossaryReader, postCheckGlossary } from '../../libs/common/glossary.js';
+import { createDynamoGlossaryReader, postCheckGlossary, machineGlossaryVersion } from '../../libs/common/glossary.js';
 import { DEFAULT_PUBLIC_BASE_URL, rebuildDetailed, type BaseMode } from '../../libs/common/rebuild.js';
 import { safe_fetch as realSafeFetch, type SafeFetchCompatResult } from '../../libs/common/safeFetch.js';
 import { safe_fetch as stubSafeFetch } from '../../libs/common/safeFetch.stub.js';
@@ -372,7 +372,7 @@ export function createProxyHandler(deps: ProxyDeps) {
       // Ghi bản MACHINE mới vào TM (không đè HUMAN, kèm hậu kiểm thuật ngữ 3.9) và ghi cờ "Cần xem lại" cho HUMAN lỗi thời, song song
       if (deps.tm && glossary) {
         const tm = deps.tm;
-        const glossaryVersion = glossary.version;
+        const glossaryVersion = machineGlossaryVersion(glossary);
         const writeMachine = async () => {
           if (!tr.translated.length) return;
           try {
@@ -517,7 +517,7 @@ export function createProxyHandler(deps: ProxyDeps) {
         'content-type': 'text/html; charset=utf-8',
         'content-language': parsed.lang,
         'x-content-type-options': 'nosniff',
-        'cache-control': `public, max-age=0, s-maxage=${sMaxAge}`,
+        'cache-control': glossary?.pendingTerminology ? 'no-store' : `public, max-age=0, s-maxage=${sMaxAge}`,
       };
       if (partial) headers['x-translateme-partial'] = partial;
       return finish(

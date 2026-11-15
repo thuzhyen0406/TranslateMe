@@ -1,3 +1,4 @@
+import { compareMarkers, hasAtomicMarkers } from './markers.js';
 /**
  * tm – Translation Memory F3 (Nhiệm vụ 2.4 – TV2; nối Thuật ngữ 3.9 – TV4). Đúng hợp đồng B.8 (Phần B, phiên bản 1.1).
  * Dùng chung cho F2 (proxy), F9 (realtime), F10 (batch) và worker C13.
@@ -179,9 +180,11 @@ export function createTM(deps: TmDeps) {
       if (!item || typeof item.tgt !== 'string' || !item.tgt) continue;
       const label: Label = item.label === 'HUMAN' ? 'HUMAN' : 'MACHINE';
       const glossaryVersion = typeof item.glossaryVersion === 'number' ? item.glossaryVersion : 0;
-      const sourceText = typeof item.src === 'string' ? item.src : byHash.get(hash)!.text;
+      const requestedText = byHash.get(hash)!.text;
+      const sourceText = typeof item.src === 'string' ? item.src : requestedText;
       const stale = isStale(sourceText, glossaryVersion, g);
-      if (label === 'MACHINE' && stale) continue; // lỗi thời -> dịch lại
+      const losesAtomic = hasAtomicMarkers(requestedText) && !compareMarkers(requestedText, item.tgt).restorable;
+      if (label === 'MACHINE' && (stale || losesAtomic)) continue;
       if (label === 'HUMAN' && stale && item.needsReview !== true) reviewFlags.push(hash);
       hits.set(hash, {
         tgt: item.tgt,

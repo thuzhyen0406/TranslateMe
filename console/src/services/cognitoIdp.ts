@@ -75,6 +75,7 @@ export async function callCognito<T = Record<string, unknown>>(
   try {
     res = await doFetch(cognitoEndpoint(cfg), {
       method: 'POST',
+      ...(operation === 'RevokeToken' ? { keepalive: true } : {}),
       headers: {
         'content-type': 'application/x-amz-json-1.1',
         'x-amz-target': `AWSCognitoIdentityProviderService.${operation}`,
