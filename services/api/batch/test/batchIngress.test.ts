@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { S3Client } from '@aws-sdk/client-s3';
 import { describe, it } from 'node:test';
 import { AppError, keys, type Ctx } from '../../../../libs/common/types.js';
 import { countChars } from '../../../../libs/common/parsers.js';
 import { CharacterQuotaExceededError } from '../../../../libs/common/usage/usage.js';
-import { createBatchIngressHandler, type BatchIngressDependencies, type BatchObjectStore } from '../batchIngress.js';
+import { createBatchIngressHandler, signBatchUpload, type BatchIngressDependencies, type BatchObjectStore } from '../batchIngress.js';
 
 const ctx: Ctx = { tenantId: 'tenant-a', via: 'KEYMAP', keyId: 'key-a', requestId: 'req-batch' };
 const NOW = new Date('2026-11-02T10:00:00.000Z');
@@ -13,6 +14,9 @@ function setup(options: {
   actualSize?: number;
   contentType?: string;
   omitHeadSize?: boolean;
+  omitVersion?: boolean;
+  replacementBytes?: Uint8Array;
+  executionStatus?: string;
   missing?: boolean;
   charLimit?: number;
   text?: string;
@@ -61,12 +65,13 @@ function setup(options: {
       return {
         ...(options.omitHeadSize ? {} : { contentLength: options.actualSize ?? bytes.length }),
         contentType: options.contentType ?? 'text/plain',
+        ...(options.omitVersion ? {} : { versionId: 'uploaded-v1' }),
       };
     },
     async get(input) {
       s3Calls.push({ operation: 'get', input });
       if (options.getError) throw options.getError;
-      return downloadedBytes;
+      return input.versionId === 'uploaded-v1' ? downloadedBytes : options.replacementBytes ?? downloadedBytes;
     },
     async signGet(input) {
       s3Calls.push({ operation: 'signGet', input });
@@ -87,6 +92,11 @@ function setup(options: {
       const item = records.get(storageKey);
       if (!item) return;
       if (params.ExpressionAttributeNames?.['#workflowStarted']) item.workflowStarted = params.ExpressionAttributeValues?.[':started'];
+      if (params.ExpressionAttributeValues?.[':status'] === 'FAILED') {
+        item.status = 'FAILED';
+        item.reason = params.ExpressionAttributeValues?.[':reason'];
+        if (params.UpdateExpression.includes('#failed = #total - #done')) item.failed = item.total - item.done;
+      }
     },
   };
   const usage: BatchIngressDependencies['usage'] = {
@@ -116,6 +126,7 @@ function setup(options: {
     usage,
     s3,
     bucket: 'translateme-batch-test',
+    describeExecution: async () => options.executionStatus,
     startExecution: async ({ name, input }) => {
       startCalls.push({ name, input });
       const error = startErrors.shift();
@@ -180,6 +191,56 @@ function storedUpload(h: ReturnType<typeof setup>, fileKey: string) {
 }
 
 describe('batch upload ingress', () => {
+  it('includes content length and MIME type in the actual S3 PUT signature', async () => {
+    const client = new S3Client({
+      region: 'ap-southeast-1', credentials: { accessKeyId: 'test-access', secretAccessKey: 'test-secret' },
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+    });
+    try {
+      const url = new URL(await signBatchUpload(client, {
+        bucket: 'translateme-batch-test', key: 'batch/t_demo/input/file.txt',
+        contentType: 'text/plain', contentLength: 18, expiresIn: 900,
+      }));
+      const signed = new Set(url.searchParams.get('X-Amz-SignedHeaders')?.split(';'));
+      assert.ok(signed.has('content-length'));
+      assert.ok(signed.has('content-type'));
+      assert.ok(![...url.searchParams.keys()].some((name) => name.startsWith('x-amz-checksum-')));
+    } finally {
+      client.destroy();
+    }
+  });
+  it('pins the object version checked by HEAD even if the upload key is replaced', async () => {
+    const h = setup({ replacementBytes: new TextEncoder().encode('Replaced after HEAD') });
+    const upload = await createUpload(h);
+    const result = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
+    assert.equal(result.statusCode, 202);
+    assert.equal(h.s3Calls.find((entry) => entry.operation === 'get')?.input.versionId, 'uploaded-v1');
+    assert.equal([...h.records.values()].find((record) => record.entityType === 'JOB')?.fileVersionId, 'uploaded-v1');
+  });
+
+  it('rejects new jobs when S3 cannot provide an immutable version ID', async () => {
+    const h = setup({ omitVersion: true });
+    const upload = await createUpload(h);
+    const result = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
+    assert.equal(result.statusCode, 500);
+    assert.equal(h.startCalls.length, 0);
+    assert.ok(h.s3Calls.every((entry) => entry.operation !== 'get'));
+  });
+
+  it('reconciles a stale running job when the state machine aborted', async () => {
+    const h = setup({ executionStatus: 'ABORTED' });
+    const upload = await createUpload(h);
+    const started = await request(h, 'POST', '/translate/batch', { file_key: upload.payload.file_key, target_langs: ['en'] });
+    const job = [...h.records.values()].find((record) => record.entityType === 'JOB')!;
+    Object.assign(job, { status: 'RUNNING', total: 7, done: 2, updatedAt: new Date(NOW.getTime() - 60_000).toISOString() });
+    const response = await request(h, 'GET', `/translate/batch/${started.payload.job_id}`, undefined);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.payload.job.status, 'FAILED');
+    assert.equal(response.payload.job.reason, 'WORKFLOW_ABORTED');
+    assert.equal(response.payload.job.failed, 5);
+    assert.equal(job.status, 'FAILED');
+  });
+
   it('issues a 15-minute PUT URL for a tenant-scoped key and creates a valid QUEUED JOB after HeadObject', async () => {
     const h = setup();
     const upload = await request(h, 'POST', '/translate/batch/upload-url', { file_name: 'guide.txt', size_bytes: h.bytes.length, tenant_id: 'other-tenant' });
@@ -201,6 +262,7 @@ describe('batch upload ingress', () => {
     assert.equal(h.s3Calls[0].input.bucket, 'translateme-batch-test');
     assert.equal(h.s3Calls[0].input.key, upload.payload.file_key);
     assert.equal(h.s3Calls[0].input.contentType, 'text/plain');
+    assert.equal(h.s3Calls[0].input.contentLength, h.bytes.length);
 
     const jobResponse = await request(h, 'POST', '/translate/batch', {
       file_key: upload.payload.file_key,
@@ -216,6 +278,8 @@ describe('batch upload ingress', () => {
     const job = [...h.records.values()].find((item) => item.entityType === 'JOB');
     assert.equal(job?.tenantId, 'tenant-a');
     assert.equal(job?.fileKey, upload.payload.file_key);
+    assert.equal(job?.fileVersionId, 'uploaded-v1');
+    assert.equal(h.s3Calls.find((entry) => entry.operation === 'get')?.input.versionId, job?.fileVersionId);
     assert.equal(job?.type, 'FILE');
     assert.deepEqual(job?.targetLangs, ['en', 'ko']);
     assert.equal(job?.sourceLang, 'fr');

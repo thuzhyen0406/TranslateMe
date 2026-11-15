@@ -37,7 +37,6 @@ async function main() {
       TM_STAGE: 'mock', TM_API_BASE: `http://127.0.0.1:${m.port}`, TM_PUBLIC_BASE: `http://127.0.0.1:${m.port}/site`,
       TM_COGNITO_ENDPOINT: `http://127.0.0.1:${m.port}/cognito`, TM_ALLOW_MUTATION: '1',
       TM_LOCK_DEADLINE_S: '4', TM_LOCK_MAX_S: '3', TM_POLL_MS: '300', TM_FLOOD_N: '30', TM_RUN_ID: run,
-      TM_E2E_ASSUME_ALL_ROUTES: '1',
     };
     const out = await new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
       // Phải dùng spawn bất đồng bộ: mock chạy trong tiến trình này, spawnSync sẽ chặn nó

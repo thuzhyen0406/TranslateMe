@@ -27,6 +27,7 @@
  *    chạy trong Lambda thì ném CACHE_INVALIDATION_FAILED (cấu hình thiếu không được im lặng bỏ qua), chạy local/test
  *    thì trả status NOT_CONFIGURED và ghi log cảnh báo.
  */
+import { SLUG_RE } from './siteSlug.js';
 import { createSEG } from './seg.js';
 import { AppError, type Ctx, type Lang, type Sha256Hex } from './types.js';
 
@@ -148,7 +149,6 @@ export interface InvalidationDeps {
 
 const HASH_RE = /^[0-9a-f]{64}$/;
 const LANG_RE = /^[a-z]{2,3}(?:-[A-Za-z]{2,4})?$/;
-const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const INVALIDATION_ID_RE = /^[A-Z0-9]{1,64}$/;
 
 const errName = (e: unknown): string =>

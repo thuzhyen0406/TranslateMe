@@ -129,7 +129,7 @@ describe('tenant-scoped AWS sessions', () => {
     assert.deepEqual(payloadObjects.Action, ['s3:GetObject', 's3:PutObject']);
     assert.deepEqual(payloadKms.Action, ['kms:Decrypt', 'kms:GenerateDataKey']);
     assert.equal(payloadKms.Condition.StringEquals['kms:EncryptionContext:aws:s3:arn'], 'arn:aws:s3:::payloads');
-    assert.deepEqual(batchObjects.Action, ['s3:GetObject', 's3:PutObject']);
+    assert.deepEqual(batchObjects.Action, ['s3:GetObject', 's3:GetObjectVersion', 's3:PutObject']);
     assert.deepEqual(batchKms.Action, ['kms:Decrypt', 'kms:GenerateDataKey']);
     assert.equal(batchKms.Condition.StringEquals['kms:EncryptionContext:aws:s3:arn'], 'arn:aws:s3:::uploads');
   });
@@ -233,7 +233,7 @@ describe('tenant-scoped AWS sessions', () => {
     const tenantRole = iamTemplate.match(/  TenantDataAccessRole:[\s\S]*?(?=\n  TenantPayloadAccessRole:)/);
     assert.ok(tenantRole);
     assert.match(tenantRole[0], /dynamodb:LeadingKeys:[\s\S]*?- 'TENANT#PLATFORM#KEY#\*'/);
-    const lambdas = readFileSync(resolve(repositoryRoot, 'infra/modules/lambdas.yaml'), 'utf8');
+    const lambdas = readFileSync(resolve(repositoryRoot, 'infra/modules/lambdas.yaml'), 'utf8').replace(/\r\n/g, '\n');
     const consoleFn = lambdas.match(/  ConsoleFunction:[\s\S]*?(?=\n  [A-Z][A-Za-z]+:\n)/);
     assert.ok(consoleFn);
     assert.match(consoleFn[0], /ALLOW_PLATFORM_KEY_MAPPING: 'true'/);

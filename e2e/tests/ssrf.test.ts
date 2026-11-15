@@ -37,8 +37,6 @@ const TARGETS: Array<{ id: string; name: string; url: string }> = [
 const METADATA_MARKERS = /ami-id|instance-id|security-credentials|AccessKeyId|SecretAccessKey/i;
 // POST /hosts trả FORBIDDEN/SITE_UNREACHABLE; verify route chuẩn hóa lỗi safeFetch thành VERIFICATION_FAILED.
 const ALLOWED_CODES = ['FORBIDDEN', 'SITE_UNREACHABLE', 'VERIFICATION_FAILED'];
-const fixtureSlug = (rawUrl: string): string =>
-  new URL(rawUrl).hostname.replace(/[^a-z0-9-]/gi, '-').toLowerCase();
 const canonicalUrl = (rawUrl: string): string => new URL(rawUrl).href;
 
 describe('Kịch bản 6 – SSRF: 9 đích phải bị chặn', () => {
@@ -46,15 +44,17 @@ describe('Kịch bản 6 – SSRF: 9 đích phải bị chặn', () => {
     const skip = !t.url && 'thiếu fixture của TV4 (đặt biến môi trường TM_SSRF_*_URL)';
     it(`${t.id} ${t.name}`, { skip }, async (ctx) => {
       const run = ev(SC, t.id, `SSRF ${t.name}`, async (note) => {
-        const slug = fixtureSlug(t.url);
+        const isFixture = (host: any) => {
+          const url = host?.home_url ?? host?.homeUrl;
+          return typeof url === 'string' && canonicalUrl(url) === canonicalUrl(t.url);
+        };
         const before = await call('GET', R.hosts, { token: tokC });
         assert.equal(before.status, 200, 'phải đọc được danh sách website trước khi chạy SSRF');
-        const existing = listOf(before.body).find((host: any) => host?.slug === slug);
+        const existing = listOf(before.body).find(isFixture);
+        let slug = existing?.slug;
 
         let verdict: Resp | undefined;
         if (existing) {
-          assert.equal(canonicalUrl(String(existing.home_url ?? existing.homeUrl ?? '')), canonicalUrl(t.url),
-            `slug ${slug} đã được dùng bởi origin khác; hãy cấp hostname fixture riêng`);
           assert.equal(existing.status, 'PENDING',
             `website fixture ${slug} có status ${existing.status}; chỉ tái sử dụng được bản ghi PENDING`);
           note('website_fixture', 'dùng lại bản ghi chưa ACTIVE của fixture từ lượt chạy trước');
@@ -63,17 +63,16 @@ describe('Kịch bản 6 – SSRF: 9 đích phải bị chặn', () => {
           const add = await call('POST', R.hosts, { token: tokC, body: B.addHost(requestedSlug, t.url) });
           note('them_website', `${add.status} ${errCode(add) ?? ''}`.trim());
           if (add.status >= 200 && add.status < 300) {
-            // API sinh slug từ hostname; requestedSlug chỉ là display_name.
-            const createdSlug = add.body?.host?.slug ?? add.body?.slug;
-            assert.equal(createdSlug, slug, 'POST /console/hosts phải trả slug sinh từ hostname fixture');
+            slug = add.body?.host?.slug ?? add.body?.slug;
+            assert.ok(typeof slug === 'string' && slug.length > 0, 'POST /console/hosts phải trả slug của fixture');
             verdict = add;
           } else if (errCode(add) === 'DUPLICATE_SLUG') {
             // Xử lý race giữa lần GET danh sách và POST tạo fixture.
             const afterRace = await call('GET', R.hosts, { token: tokC });
             assert.equal(afterRace.status, 200);
-            const raced = listOf(afterRace.body).find((host: any) => host?.slug === slug);
-            assert.ok(raced, `slug ${slug} bị trùng nhưng không tìm thấy website fixture để tái sử dụng`);
-            assert.equal(canonicalUrl(String(raced.home_url ?? raced.homeUrl ?? '')), canonicalUrl(t.url));
+            const raced = listOf(afterRace.body).find(isFixture);
+            assert.ok(raced, 'slug bị trùng nhưng không tìm thấy website fixture để tái sử dụng');
+            slug = raced.slug;
             assert.equal(raced.status, 'PENDING', `website fixture có status ngoài dự kiến: ${raced.status}`);
             note('website_fixture', 'tái sử dụng bản ghi được tạo đồng thời');
             verdict = undefined;
@@ -85,6 +84,7 @@ describe('Kịch bản 6 – SSRF: 9 đích phải bị chặn', () => {
         if (!verdict || verdict.status >= 200 && verdict.status < 300) {
           // Bản ghi PENDING cùng origin được tái sử dụng sau lần verify bị chặn;
           // không có DELETE route để dọn nên không tạo website trùng slug.
+          assert.ok(typeof slug === 'string' && slug.length > 0);
           verdict = await call('POST', R.hostVerify(slug), { token: tokC, body: { method: 'META' } });
           note('xac_minh', `${verdict.status} ${errCode(verdict) ?? ''}`.trim());
         }
@@ -94,7 +94,7 @@ describe('Kịch bản 6 – SSRF: 9 đích phải bị chặn', () => {
         assert.ok(!METADATA_MARKERS.test(verdict.text), 'phản hồi không được chứa nội dung từ địa chỉ nội bộ');
         assert.ok(verdict.ms < 20_000, `phản hồi quá chậm (${verdict.ms} ms)`);
         const hosts = listOf((await call('GET', R.hosts, { token: tokC })).body);
-        const mine = hosts.find((h: any) => h?.slug === slug);
+        const mine = hosts.find(isFixture);
         assert.ok(!mine || mine.status !== 'ACTIVE', 'website SSRF không được ở trạng thái ACTIVE');
 
         // TV4 có thể expose side-channel chỉ trả tên header mà endpoint redirect

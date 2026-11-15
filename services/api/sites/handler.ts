@@ -2,6 +2,7 @@ import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
 import { db } from '../../../libs/common/db.js';
 import { withCors } from '../../../libs/common/cors.js';
 import { contextFromIdTokenClaims } from '../auth/context.js';
+import { createConsoleHandler, handleSitesApiGatewayRoute } from '../console/handler.js';
 import { createSite, pauseSite, resumeSite, verifySite, updateSite } from './siteManager.js';
 
 export type WebsiteEvent = {
@@ -33,7 +34,7 @@ export interface WebsiteHandlerDependencies {
 const defaultDependencies: WebsiteHandlerDependencies = {
   contextFromClaims: contextFromIdTokenClaims,
   listTenantSites: (ctx) => db.listTenantSites(ctx),
-  getHost: (ctx, slug) => db.get(ctx, keys.host(ctx, slug)),
+  getHost: (ctx, slug) => db.get(ctx, keys.host(ctx, slug), { consistent: true }),
   create: createSite,
   pause: pauseSite,
   resume: resumeSite,
@@ -151,8 +152,16 @@ return async function handler(event: WebsiteEvent) {
 };
 }
 
-// Bọc CORS: Web Console gọi /console/hosts* từ origin khác.
-export const handler = withCors(createWebsiteHandler());
+const hostsHandler = createWebsiteHandler();
+const websiteAliasHandler = createConsoleHandler([handleSitesApiGatewayRoute]);
+
+// Alias cũ vẫn dùng định dạng phản hồi của Console, dưới role có quyền xác minh slug.
+export const handler = withCors((event: WebsiteEvent) => {
+  const path = normalizedRequestPath(event);
+  return /^\/console\/websites(?:\/|$)/.test(path)
+    ? websiteAliasHandler({ ...event, path })
+    : hostsHandler(event);
+});
 
 async function loadHost(
   ctx: Awaited<ReturnType<typeof contextFromIdTokenClaims>>,

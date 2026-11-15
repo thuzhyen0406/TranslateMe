@@ -18,11 +18,11 @@
  * Step Functions được truyền vào qua cổng `startExecution` (bản thật: stepFunctionsStarter), nên services/api không
  * phụ thuộc @aws-sdk/client-sfn cho tới khi nối hạ tầng.
  */
+import { SLUG_RE } from '../../../libs/common/siteSlug.js';
 import { createJobStore, newJobId, type JobDb, type JobSummary } from '../../../libs/common/jobs.js';
 import { AppError, keys, type Ctx, type Role } from '../../../libs/common/types.js';
 
 export const PREWARM_STALE_MS = 6 * 3600_000;
-const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const LANG_RE = /^[a-z]{2,3}(?:-[A-Za-z]{2,4})?$/;
 
 export interface PrewarmManagerDeps {

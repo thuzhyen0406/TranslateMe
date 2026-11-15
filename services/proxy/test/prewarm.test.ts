@@ -339,7 +339,7 @@ describe('state machine PREWARM (ASL)', () => {
 });
 
 describe('IaC PREWARM: Lambda trong infra/modules/lambdas.yaml, state machine trong infra/modules/workflow.yaml (F6)', () => {
-  const read = (rel: string) => readFileSync(fileURLToPath(new URL(`../../../../../../${rel}`, import.meta.url)), 'utf8');
+  const read = (rel: string) => readFileSync(fileURLToPath(new URL(`../../../../../../${rel}`, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
   const templates = ['infra/modules/lambdas.yaml', 'infra/modules/workflow.yaml'].map((f) => read(f).split('\n'));
 
   /** Khối tài nguyên `  <name>:` tới tài nguyên kế tiếp (cùng thụt lề 2), tìm trong cả hai template. */

@@ -19,12 +19,6 @@ export function skipCase(scenario: number, id: string, title: string, reason: st
   return reason;
 }
 
-/** Capability flags allow a mixed product/API deployment to skip only missing routes. */
-export function skipUnlessFeature(scenario: number, id: string, title: string, flag: string, reason: string): string | false {
-  if (process.env.TM_E2E_ASSUME_ALL_ROUTES === '1' || process.env[flag] === '1') return false;
-  return skipCase(scenario, id, title, `${reason} (đặt ${flag}=1 sau khi tích hợp)`);
-}
-
 /** Bọc thân phép thử: ghi pass/fail kèm các giá trị quan sát được, rồi ném lại lỗi nếu có */
 export const ev =
   (scenario: number, id: string, title: string, fn: (note: (k: string, v: unknown) => void) => Promise<void>) =>

@@ -8,6 +8,12 @@ Parameters:
     AllowedPattern: '[A-Za-z0-9_-]+'
   BatchWorkflowFunctionArn:
     Type: String
+  BatchFilesBucketName:
+    Type: String
+  BatchFilesBucketArn:
+    Type: String
+  BatchFilesKmsKeyArn:
+    Type: String
   ReadSitemapFunctionArn:
     Type: String
   PrewarmPagesFunctionArn:
@@ -39,6 +45,33 @@ Resources:
                 Action: lambda:InvokeFunction
                 Resource: !Ref BatchWorkflowFunctionArn
               - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:translateme-${StageName}-batch'
+              - Effect: Allow
+                Action:
+                  - states:DescribeExecution
+                  - states:StopExecution
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:translateme-${StageName}-batch:*'
+                  - !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:translateme-${StageName}-batch/TranslateLots:*'
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${BatchFilesBucketArn}/batch/t_*/results/job-*/lot-index.json'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListMultipartUploadParts
+                  - s3:AbortMultipartUpload
+                Resource: !Sub '${BatchFilesBucketArn}/batch/t_*/results/job-*/map-results/*'
+              - Effect: Allow
+                Action: [kms:Decrypt, kms:GenerateDataKey]
+                Resource: !Ref BatchFilesKmsKeyArn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 's3.${AWS::Region}.${AWS::URLSuffix}'
+                    kms:EncryptionContext:aws:s3:arn: !Ref BatchFilesBucketArn
+              - Effect: Allow
                 Action: sns:CreateTopic
                 Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:translateme-batch-${StageName}-*'
               - Effect: Allow
@@ -65,16 +98,26 @@ Resources:
             "States": {
               "ParseAndChunk": {
                 "Type": "Task", "Resource": "${BatchWorkflowArn}", "TimeoutSeconds": 300,
-                "Parameters": { "mode": "PARSE_AND_CHUNK", "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id" },
+                "Parameters": { "mode": "PARSE_AND_CHUNK", "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id", "distributed": true },
                 "Retry": [{ "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 3 }],
                 "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
-                "Next": "TranslateLots"
+                "Next": "HasLots"
+              },
+              "HasLots": {
+                "Type": "Choice",
+                "Choices": [{ "Variable": "$.lot_count", "NumericGreaterThan": 0, "Next": "TranslateLots" }],
+                "Default": "MergeAndWrite"
               },
               "TranslateLots": {
-                "Type": "Map", "ItemsPath": "$.lot_keys", "MaxConcurrency": 5,
-                "ItemSelector": { "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id", "target_langs.$": "$.target_langs", "lot_key.$": "$$.Map.Item.Value" },
+                "Type": "Map", "Label": "TranslateLots", "MaxConcurrency": 5,
+                "ItemReader": {
+                  "Resource": "arn:${AWS::Partition}:states:::s3:getObject",
+                  "ReaderConfig": { "InputType": "JSON" },
+                  "Parameters": { "Bucket": "${BatchFilesBucketName}", "Key.$": "$.lot_index_key" }
+                },
+                "ItemSelector": { "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id", "target_langs.$": "$.target_langs", "lot_key.$": "$$.Map.Item.Value.key" },
                 "ItemProcessor": {
-                  "ProcessorConfig": { "Mode": "INLINE" }, "StartAt": "TranslateLanguages",
+                  "ProcessorConfig": { "Mode": "DISTRIBUTED", "ExecutionType": "STANDARD" }, "StartAt": "TranslateLanguages",
                   "States": {
                     "TranslateLanguages": {
                       "Type": "Map", "ItemsPath": "$.target_langs", "MaxConcurrency": 1,
@@ -84,8 +127,8 @@ Resources:
                         "States": {
                           "TranslateLot": {
                             "Type": "Task", "Resource": "${BatchWorkflowArn}", "TimeoutSeconds": 300,
-                            "Parameters": { "mode": "TRANSLATE_LOT", "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id", "lot_key.$": "$.lot_key", "target_lang.$": "$.target_lang", "attempt.$": "$$.State.RetryCount" },
-                            "Retry": [{ "ErrorEquals": ["ThrottlingException", "TooManyRequestsException", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "BatchTranslationIncomplete"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 3 }],
+                            "Parameters": { "mode": "TRANSLATE_LOT", "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id", "lot_key.$": "$.lot_key", "target_lang.$": "$.target_lang", "attempt.$": "$$.State.RetryCount", "distributed": true },
+                            "Retry": [{ "ErrorEquals": ["ThrottlingException", "TooManyRequestsException", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException", "TransactionConflictException", "TransactionCanceledException", "BatchTranslationIncomplete"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 3 }],
                             "End": true
                           }
                         }
@@ -95,13 +138,21 @@ Resources:
                     }
                   }
                 },
+                "ResultWriter": {
+                  "Resource": "arn:${AWS::Partition}:states:::s3:putObject",
+                  "Parameters": {
+                    "Bucket": "${BatchFilesBucketName}",
+                    "Prefix.$": "States.Format('batch/{}/results/{}/map-results', $.tenant_id, $.job_id)"
+                  }
+                },
                 "ResultPath": null,
-                "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+                "Catch": [{ "ErrorEquals": ["States.DataLimitExceeded"], "ResultPath": "$.error", "Next": "MarkFailed" },
+                          { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
                 "Next": "MergeAndWrite"
               },
               "MergeAndWrite": {
                 "Type": "Task", "Resource": "${BatchWorkflowArn}", "TimeoutSeconds": 300,
-                "Parameters": { "mode": "MERGE_AND_WRITE", "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id" },
+                "Parameters": { "mode": "MERGE_AND_WRITE", "job_id.$": "$.job_id", "tenant_id.$": "$.tenant_id", "distributed": true },
                 "Retry": [{ "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 3 }],
                 "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
                 "Next": "NotifyResult"
@@ -171,6 +222,27 @@ Resources:
             }
           }
         - BatchWorkflowArn: !Ref BatchWorkflowFunctionArn
+
+  BatchTerminalExecutionRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source: [aws.states]
+        detail-type: [Step Functions Execution Status Change]
+        detail:
+          stateMachineArn: [!Ref BatchStateMachine]
+          status: [FAILED, TIMED_OUT, ABORTED]
+      Targets:
+        - Id: ReconcileBatchJob
+          Arn: !Ref BatchWorkflowFunctionArn
+
+  BatchTerminalExecutionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BatchWorkflowFunctionArn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BatchTerminalExecutionRule.Arn
 
   PrewarmStateMachineRole:
     Type: AWS::IAM::Role

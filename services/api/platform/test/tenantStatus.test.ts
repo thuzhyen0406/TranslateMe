@@ -34,7 +34,10 @@ describe('platform tenant status', () => {
           updated = { tenantId, status };
         },
         async listTenantSites() {
-          return [{ slug: 'site-a' }, { slug: 'site-b' }, { slug: 'site-a' }];
+          return [
+            { slug: 'site-a', status: 'ACTIVE' }, { slug: 'site-b', status: 'PAUSED' },
+            { slug: 'site-a', status: 'ACTIVE' }, { slug: 'other-tenant-site', status: 'PENDING' },
+          ];
         },
       },
       async invalidateSites(_ctx, { slugs }) {

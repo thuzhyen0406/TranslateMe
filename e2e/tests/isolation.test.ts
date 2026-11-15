@@ -9,7 +9,7 @@ import { login } from '../lib/auth';
 import { call, errCode } from '../lib/http';
 import { B, R, hashSentence, listOf } from '../lib/contract';
 import { assertDenied, lookalike } from '../lib/compare';
-import { ev, skipUnlessFeature } from '../lib/evidence';
+import { ev } from '../lib/evidence';
 
 const SC = 4;
 let S: State;
@@ -26,7 +26,7 @@ before(async () => {
 });
 
 describe('Kịch bản 4 – phép thử dương: tenant A đọc dữ liệu của chính mình', () => {
-  it('P1 /console/me trả vai trò và trạng thái ACTIVE', { skip: skipUnlessFeature(SC, 'P1', 'GET /console/me', 'TM_E2E_HAS_CONSOLE_ME', 'API chưa triển khai /console/me') }, ev(SC, 'P1', 'GET /console/me', async (note) => {
+  it('P1 /console/me trả vai trò và trạng thái ACTIVE', ev(SC, 'P1', 'GET /console/me', async (note) => {
     const r = await call('GET', R.me, { token: tokA });
     note('status', r.status);
     assert.equal(r.status, 200);
@@ -64,10 +64,10 @@ describe('Kịch bản 4 – phép thử dương: tenant A đọc dữ liệu c�
     const r = await call('GET', R.job(A().jobId), { token: tokA });
     note('status', r.status);
     assert.equal(r.status, 200);
-    assert.ok(r.body?.status, 'job phải có status');
+    assert.ok(r.body?.job?.status, 'job phải có status');
   }));
 
-  it('P6 lượng dùng của A', { skip: skipUnlessFeature(SC, 'P6', 'GET /console/usage', 'TM_E2E_HAS_CONSOLE_USAGE', 'API chưa triển khai /console/usage') }, ev(SC, 'P6', 'GET /console/usage', async (note) => {
+  it('P6 lượng dùng của A', ev(SC, 'P6', 'GET /console/usage', async (note) => {
     const r = await call('GET', R.usage(cfg().platformKeyMonth), { token: tokA });
     note('status', r.status);
     assert.equal(r.status, 200);
@@ -115,10 +115,13 @@ describe('Kịch bản 4 – phép thử chéo: A truy cập tài nguyên của 
     assert.ok(!x.text.includes(Bt().tmHash) && !x.text.includes(Bt().tmText));
   }));
 
-  it('X4 JWT của A tải kết quả batch của B', { skip: skipUnlessFeature(SC, 'X4', 'GET /console/batch/{job B}', 'TM_E2E_HAS_CONSOLE_BATCH_RESULT', 'API chưa triển khai route đọc kết quả batch theo JWT') }, ev(SC, 'X4', 'JWT A -> GET /console/batch/{job B}', async (note) => {
-    const run = (id: string) => call('GET', R.consoleBatch(id), { token: tokA });
-    const own = await call('GET', R.consoleBatch(Bt().jobId), { token: tokB });
+  it('X4 JWT của A tải kết quả batch của B', ev(SC, 'X4', 'JWT A -> GET /translate/batch/session/{job B}', async (note) => {
+    const run = (id: string) => call('GET', R.batchSessionJob(id), { token: tokA });
+    const own = await call('GET', R.batchSessionJob(Bt().jobId), { token: tokB });
     assert.equal(own.status, 200, 'tenant B phải đọc được kết quả batch của chính mình trước khi thử truy cập chéo');
+    assert.equal(own.body?.job?.status, 'SUCCEEDED', 'fixture batch của B phải dịch xong');
+    assert.ok(own.body?.job?.results?.some((item: any) => typeof item.download_url === 'string'),
+      'fixture batch của B phải có kết quả tải xuống');
     const [x, base] = [await run(Bt().jobId), await run(lookalike(Bt().jobId))];
     note('status', x.status); note('code', errCode(x));
     assertDenied(x, base, { forbidden: [Bt().jobId, 'download_url', Bt().fileKey] });
@@ -179,18 +182,23 @@ describe('Kịch bản 4 – phép thử phụ: xác thực và Platform Admin',
     assert.ok(!r.text.includes(A().tmHash));
   }));
 
-  it('E3 Platform Admin không đọc được nội dung TM của tenant', { skip: skipUnlessFeature(SC, 'E3', 'GET /platform/tenants/{A}', 'TM_E2E_HAS_PLATFORM_TENANT_DETAIL', 'API chưa triển khai GET /platform/tenants/{id}') }, ev(SC, 'E3', 'Platform JWT -> GET /platform/tenants/{A}', async (note) => {
+  it('E3 Platform Admin không đọc được nội dung TM của tenant', ev(SC, 'E3', 'Platform JWT -> GET /platform/tenants/{A}', async (note) => {
     const r = await call('GET', R.platformTenant(A().tenantId), { token: tokPlat });
     note('status', r.status);
     assert.equal(r.status, 200);
+    assert.equal(r.body?.tenant_id, A().tenantId);
     for (const f of [A().tmHash, A().tmText, A().slug, A().apiKey]) {
       assert.ok(!r.text.includes(f), 'chỉ được có số liệu tổng hợp và cấu hình');
     }
   }));
 
-  it('E4 token tenant không dùng được trên /platform/*', { skip: skipUnlessFeature(SC, 'E4', 'GET /platform/tenants', 'TM_E2E_HAS_PLATFORM_TENANT_LIST', 'API chưa triển khai GET /platform/tenants; không dùng 403 gateway mặc định làm bằng chứng phân quyền') }, ev(SC, 'E4', 'JWT A -> GET /platform/tenants', async (note) => {
+  it('E4 token tenant không dùng được trên /platform/*', ev(SC, 'E4', 'JWT A -> GET /platform/tenants', async (note) => {
+    const allowed = await call('GET', R.platformTenants, { token: tokPlat });
+    assert.equal(allowed.status, 200, 'Platform Admin phải đọc được danh sách tenant');
+    assert.ok(Array.isArray(allowed.body?.items) && allowed.body.items.length > 0, 'danh sách phải có tenant đã seed');
     const r = await call('GET', R.platformTenants, { token: tokA });
     note('status', r.status);
-    assert.ok([401, 403].includes(r.status), `nhận ${r.status}`);
+    assert.equal(r.status, 403);
+    assert.equal(errCode(r), 'PERMISSION_DENIED');
   }));
 });

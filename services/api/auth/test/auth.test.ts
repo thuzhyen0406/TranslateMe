@@ -170,6 +170,8 @@ describe('PostConfirmation Trigger Handler', () => {
     assert.ok(configPut.ConditionExpression?.includes('attribute_not_exists'));
     assert.equal(configPut.Item?.PK?.S, expectedPk);
     assert.equal(configPut.Item?.SK?.S, 'CONFIG');
+    assert.equal(configPut.Item?.GSI1PK?.S, 'PLATFORM#TENANTS');
+    assert.equal(configPut.Item?.GSI1SK?.S, expectedTenantId);
     assert.equal(configPut.Item?.organizationName?.S, 'Acme Corp');
     assert.equal(configPut.Item?.plan?.S, DEFAULT_PLAN_NAME);
     assert.equal(configPut.Item?.charLimit?.N, String(FREE_TIER_CHAR_LIMIT));

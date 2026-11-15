@@ -11,6 +11,11 @@ batch web-session resources below.
 | `GET /translate/batch/{job_id}` | API key | Translate Lambda | Tenant-scoped job polling; read-only polling is allowed while tenant is locked |
 | `POST /translate/batch/session/upload-url` | Cognito ID token | Translate Lambda | Browser session; no API key required |
 | `POST /translate/batch/session` | Cognito ID token | Translate Lambda | Browser session; no API key required |
+| `GET /translate/batch/session/{job_id}` | Cognito ID token | Translate Lambda | Tenant-scoped job and result links |
+| `GET /console/usage?month=YYYY-MM` | Cognito ID token | Console Lambda | Tenant Admin or Developer. Defaults to the current UTC month |
+| `GET /platform/tenants` | Cognito ID token | Platform Lambda | PlatformAdmins. Use `cursor` with the returned `next_cursor` |
+| `GET /platform/tenants/{tenantId}` | Cognito ID token | Platform Lambda | PlatformAdmins. Tenant metadata and limit |
+| `PATCH /platform/tenants/{tenantId}/limits` | Cognito ID token | Platform Lambda | PlatformAdmins. JSON body with a nonnegative `character_limit` |
 | `GET/POST /console/api-keys` | Cognito ID token | Console Lambda | Member must be active; role checked by key manager |
 | `POST /console/api-keys/{keyId}/rotate` | Cognito ID token | Console Lambda | Returns the new secret once |
 | `POST /console/api-keys/{keyId}/revoke` | Cognito ID token | Console Lambda | Revoke key |
@@ -42,12 +47,4 @@ role for S3 operations; the STS session policy restricts each request to
 
 ## Batch integration dependencies
 
-The shared parser in this checkout registers TXT and HTML only. Batch upload
-therefore rejects DOCX until the DOCX parser from task 4.9 is merged and
-registered in `libs/common/parsers.ts`; this keeps the batch estimate aligned
-with the workflow parser. Batch creates FILE jobs through the shared
-`createJobStore` schema (`total`, `done`, and `failed`) and reserves estimated
-machine characters atomically before queueing. The reservation ticket is stored
-on the job for the batch workflow to settle against actual usage or refund if
-translation fails. Until task 4.7 is integrated, queued jobs remain input
-records and do not start a state machine.
+The parser handles TXT, HTML and DOCX. Submission validates the uploaded file, checks its estimated quota and stores the S3 `VersionId` on the job. Workers read that version. Step Functions uses a Distributed Map over a lot index in S3 and writes Map Run results to the job's S3 prefix. The terminal execution rule and job polling reconcile failures with the JOB record.

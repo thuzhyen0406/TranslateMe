@@ -307,12 +307,13 @@ export class UsageService {
               TableName: this.options.tableName,
               Key: keys.total,
               UpdateExpression: "ADD #machineChars :n",
-              ConditionExpression:
-                "attribute_not_exists(#machineChars) OR #machineChars <= :remaining",
+              ...(input.n > 0 ? {
+                ConditionExpression: "attribute_not_exists(#machineChars) OR #machineChars <= :remaining",
+              } : {}),
               ExpressionAttributeNames: { "#machineChars": "machineChars" },
               ExpressionAttributeValues: {
                 ":n": input.n,
-                ":remaining": limit - input.n,
+                ...(input.n > 0 ? { ":remaining": limit - input.n } : {}),
               },
             },
           },
@@ -361,7 +362,7 @@ export class UsageService {
           ExpressionAttributeNames: { "#machineChars": "machineChars" },
         }));
         const used = Number(read.Item?.machineChars ?? 0);
-        if (used + input.n > limit) throw new CharacterQuotaExceededError(input.n, limit);
+        if (input.n > 0 && used + input.n > limit) throw new CharacterQuotaExceededError(input.n, limit);
       }
       throw error;
     }

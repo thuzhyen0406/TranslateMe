@@ -20,6 +20,9 @@ Resources:
       Parameters:
         StageName: !Ref StageName
         BatchWorkflowFunctionArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-BatchWorkflowFunctionArn' }
+        BatchFilesBucketName: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-BatchFilesBucketName' }
+        BatchFilesBucketArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-BatchFilesBucketArn' }
+        BatchFilesKmsKeyArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-KeyArn' }
         ReadSitemapFunctionArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-ReadSitemapFunctionArn' }
         PrewarmPagesFunctionArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-PrewarmPagesFunctionArn' }
         FinishPrewarmFunctionArn: { 'Fn::ImportValue': !Sub 'translateme-${StageName}-FinishPrewarmFunctionArn' }

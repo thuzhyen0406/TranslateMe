@@ -88,3 +88,14 @@ Xóa theo thứ tự ngược (stack sau import output stack trước): `ops`, `
 - Web console mặc định build ở chế độ `cognito`: đăng ký, xác nhận email, đăng nhập, mời thành viên đi qua Cognito và API thật. Mã xác nhận và mật khẩu tạm thời do Cognito gửi bằng email mặc định của Cognito (giới hạn khoảng 50 email/ngày, đủ cho demo).
 - Console (CloudFront riêng) gọi API ở `execute-api` khác origin: Lambda console/website trả header CORS (`libs/common/cors.ts`), lỗi do API Gateway tự trả (401/403/429/5XX) có CORS qua `GatewayResponse`. Khi đổi method hoặc gateway response trong `infra/modules/api-gateway.yaml`, phải đổi tên logical ID `ApiDeploymentV<n>` để stage nhận bản deploy mới.
 - `dynamodb:TransactWriteItems` trong policy không phải action IAM thật (cfn-lint W3037); quyền giao dịch tính theo từng thao tác trên item nên không ảnh hưởng.
+
+## Cập nhật dữ liệu khi nâng cấp từ bản trước bản sửa P1
+
+Sau khi triển khai code API và đợi các invocation verify cũ kết thúc, chạy migration trên bảng DynamoDB của stage. Script thêm CONFIG hiện có vào GSI1 để Platform Admin có thể liệt kê tenant và giải phóng mapping slug cũ nếu website tương ứng vẫn `PENDING` hoặc đã mất. Các giao dịch kiểm tra lại trạng thái và chủ mapping khi ghi.
+
+```bash
+python infra/tools/migrate_p1.py --account <account-id> --region <region> --table <table-name>
+python infra/tools/migrate_p1.py --account <account-id> --region <region> --table <table-name> --apply
+```
+
+Hai lệnh lần lượt xem trước và áp dụng. Có thể chạy lại an toàn. Sau khi GSI1 cập nhật, seed lại fixture và chạy release gate trên stack mới. Website cũ có slug dài hơn 63 ký tự cần đăng ký lại URL để nhận slug hợp lệ. Batch được tạo sau lần nâng cấp lưu `VersionId`. Các job đã nhận trước đó tiếp tục đọc theo key đã lưu.

@@ -266,7 +266,7 @@ paths:
           - `.docx` → `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
           - *Lưu ý*: `validateFileName` trong `batchIngress.ts` kiểm tra phần mở rộng thuộc `txt | html | docx` và xác nhận parser tương ứng đã được đăng ký trong `FORMAT_PARSERS` (`libs/common/parsers.ts`).
         - **Dữ liệu trả về**: Trả về `request_id`, `file_key` (định dạng `batch/{tenantId}/input/{uuid}.{format}`), `upload_url` (Presigned S3 PUT URL), `expires_in: 900` (15 phút) và `required_headers` (`{ "Content-Type": "<mime_type>" }`).
-        - **Tải tệp lên S3**: Client dùng `upload_url` để `PUT` tệp trực tiếp lên Amazon S3 kèm đúng header `Content-Type` trong `required_headers` (chữ ký S3 ràng buộc `content-type` qua `signableHeaders`; bước `POST /translate/batch` sẽ đối chiếu lại `ContentLength === size_bytes` và `ContentType` bằng `HeadObject`).
+        - **Tải tệp lên S3**: Client dùng `upload_url` để `PUT` tệp trực tiếp lên Amazon S3 kèm đúng header `Content-Type` trong `required_headers` (chữ ký S3 ràng buộc cả `Content-Type` và `Content-Length`; trình duyệt tự đặt độ dài từ `File` hoặc `Blob`). Bước `POST /translate/batch` đối chiếu kích thước và MIME, rồi cố định phiên bản object bằng `VersionId` để workflow đọc đúng nội dung đã kiểm tra.
 
         #### Ví dụ 1: Gọi API xin Presigned Upload URL qua cURL:
         ```bash
@@ -415,7 +415,7 @@ paths:
         2. Hệ thống đối chiếu tiền tố `batch/{tenantId}/input/`, kiểm tra bản ghi `BATCH_UPLOAD` và gọi `HeadObject` + `GetObject` trên S3. Nếu tệp chưa tồn tại hoặc đã hết hạn, trả `400 FILE_NOT_UPLOADED`.
         3. Xác minh kích thước thực tế trên S3 khớp `size_bytes` đã khai báo (1 byte – 10 MB), `Content-Type` khớp định dạng và phân tích nội dung qua `inspectBatchFile` (`TXT`, `HTML`, `DOCX`) để ước tính tổng ký tự `estimated_characters = sourceCharacters * target_langs.length`.
         4. Đặt trước hạn mức ký tự (`usage.reserve`); nếu vượt hạn mức còn lại trong tháng của tenant, trả `429 CHAR_QUOTA_EXCEEDED` và chưa trừ ký tự nào.
-        5. Tạo bản ghi `JOB` trạng thái `QUEUED` (mã `job-YYYYMMDD-xxxxxxxxxxxx`) và trả về HTTP `202 Accepted` kèm `job_id`, `status: "QUEUED"`, `estimated_characters`. (Bước kích hoạt Step Functions workflow xử lý bất đồng bộ thuộc Hạng mục 4.7/5.7).
+        5. Tạo bản ghi `JOB` trạng thái `QUEUED` (mã `job-YYYYMMDD-xxxxxxxxxxxx`) và trả về HTTP `202 Accepted` kèm `job_id`, `status: "QUEUED"`, `estimated_characters`. Workflow Step Functions đọc manifest lô từ S3 và xử lý bất đồng bộ.
 
         #### Ví dụ gọi qua cURL:
         ```bash

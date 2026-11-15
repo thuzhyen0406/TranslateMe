@@ -251,6 +251,34 @@ describe('Console Lambda router (/console/{proxy+})', () => {
     assert.equal(getJobBody.job.status, 'QUEUED');
   });
 
+  it('GET /console/usage reads only the authenticated tenant and separates quota holds from translated chars', async () => {
+    let role: Ctx['role'] = 'DEVELOPER';
+    let reads = 0;
+    const route = createConsoleHandler(undefined, {
+      contextFromClaims: async () => ({ tenantId: 't_usage', via: 'JWT', requestId: 'usage', role }),
+      db: {
+        async get(ctx, key, options) {
+          reads++;
+          assert.equal(ctx.tenantId, 't_usage');
+          assert.deepEqual(key, { PK: 'TENANT#t_usage#USAGE', SK: 'MONTH#2026-11' });
+          assert.equal(options?.consistent, true);
+          return { machineChars: 60, sentTotal: 40, sentFromTM: 10, requests: 3 };
+        },
+      },
+    });
+    const request = { ...event('/console/usage'), queryStringParameters: { month: '2026-11', tenant_id: 't_other' } };
+    const response = await route(request);
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(JSON.parse(response.body), {
+      request_id: 'req-console', tenant_id: 't_usage', month: '2026-11',
+      chars_machine_translated: 30, chars_from_memory: 10, chars_quota_used: 60, requests: 3, pages_served: 0,
+    });
+    assert.equal((await route({ ...request, queryStringParameters: { month: '2026-13' } })).statusCode, 400);
+    role = 'REVIEWER';
+    assert.equal((await route(request)).statusCode, 403);
+    assert.equal(reads, 1);
+  });
+
   it('GET /console/members chỉ cho phép TENANT_ADMIN; từ chối REVIEWER và DEVELOPER với 403 PERMISSION_DENIED', async () => {
     const reviewerCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'req-rev', role: 'REVIEWER', sub: 'u_rev' };
     const developerCtx: Ctx = { tenantId: 't_a', via: 'JWT', requestId: 'req-dev', role: 'DEVELOPER', sub: 'u_dev' };

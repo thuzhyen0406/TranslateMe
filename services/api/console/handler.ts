@@ -37,6 +37,7 @@ import { inviteMember, type InviteMemberDeps } from '../auth/inviteMember.js';
 import { contextFromIdTokenClaims } from '../auth/context.js';
 import { db, requireRole } from '../../../libs/common/db.js';
 import { withCors } from '../../../libs/common/cors.js';
+import { monthUtc, usageKeys } from '../../../libs/common/usage/usage.js';
 import { AppError, keys, type Ctx } from '../../../libs/common/types.js';
 
 export type ConsoleEvent = ReviewApiGatewayEvent;
@@ -296,7 +297,7 @@ export async function handleSitesApiGatewayRoute(
       try {
         const verified = await verifySite(ctx, slug, verifyMethod, deps);
         const getFn = deps?.db?.get ?? db.get;
-        const rawHost = await getFn(ctx, keys.host(ctx, slug));
+        const rawHost = await getFn(ctx, keys.host(ctx, slug), { consistent: true });
         const host = rawHost ? toHostResponse(rawHost) : { slug, status: 'ACTIVE' as const };
         return {
           statusCode: 200,
@@ -615,6 +616,47 @@ export async function handleConsoleMeApiGatewayRoute(
   }
 }
 
+async function handleConsoleUsageRoute(
+  event: ConsoleEvent,
+  ctx: Ctx,
+  usageDb: Pick<typeof db, 'get'>,
+): Promise<ConsoleResponse | null> {
+  const path = normalizeConsolePath(event.path ?? event.rawPath ?? '').replace(/\/$/, '');
+  if (path !== '/console/usage') return null;
+  const requestId = event.requestContext?.requestId ?? ctx.requestId;
+  if ((event.httpMethod ?? event.requestContext?.http?.method ?? 'GET').toUpperCase() !== 'GET') {
+    return errorResponse(404, 'NOT_FOUND', 'Không tìm thấy endpoint.', requestId);
+  }
+  try {
+    requireRole(ctx, ['TENANT_ADMIN', 'DEVELOPER']);
+    const month = event.queryStringParameters?.month ?? monthUtc();
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      throw new AppError('INVALID_REQUEST', 'month phải có định dạng YYYY-MM.');
+    }
+    const { total } = usageKeys(ctx.tenantId, month, { kind: 'CONSOLE' });
+    const usage = await usageDb.get(ctx, total, { consistent: true });
+    const fromMemory = Number(usage?.sentFromTM ?? usage?.memoryChars ?? 0);
+    const quotaUsed = Number(usage?.machineChars ?? 0);
+    return {
+      statusCode: 200,
+      headers: HEADERS,
+      body: JSON.stringify({
+        request_id: requestId,
+        tenant_id: ctx.tenantId,
+        month,
+        chars_machine_translated: usage?.sentTotal === undefined ? quotaUsed : Math.max(0, Number(usage.sentTotal) - fromMemory),
+        chars_from_memory: fromMemory,
+        chars_quota_used: quotaUsed,
+        requests: Number(usage?.requests ?? 0),
+        pages_served: Number(usage?.pagesServed ?? 0),
+      }),
+    };
+  } catch (error) {
+    if (error instanceof AppError) return errorResponse(statusForConsoleError(error.code), error.code, error.message, requestId);
+    return errorResponse(500, 'INTERNAL_ERROR', 'Lỗi tạm thời phía hệ thống.', requestId);
+  }
+}
+
 export interface ConsoleHandlerDeps {
   contextFromClaims?: (claims: Record<string, unknown>, requestId: string) => Promise<Ctx>;
   db?: Pick<typeof db, 'get'>;
@@ -658,6 +700,8 @@ export function createConsoleHandler(
           deps?.db ? { db: deps.db } : undefined,
         );
         if (meResponse) return meResponse;
+        const usageResponse = await handleConsoleUsageRoute(event, ctx, deps?.db ?? db);
+        if (usageResponse) return usageResponse;
       }
       for (const route of effectiveModules) {
         const response = await route(event, ctx);

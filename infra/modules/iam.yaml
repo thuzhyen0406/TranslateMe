@@ -148,6 +148,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - s3:GetObject
+                  - s3:GetObjectVersion
                   - s3:PutObject
                 Resource:
                   - !Sub '${BatchUploadBucketArn}/batch/${!aws:PrincipalTag/TenantId}/input/*'
@@ -316,6 +317,19 @@ Resources:
                       - 'TENANT#${aws:PrincipalTag/TenantId}'
                       - 'TENANT#${aws:PrincipalTag/TenantId}#*'
                       - 'TENANT#PLATFORM#SLUG#*'
+                  'Null':
+                    dynamodb:LeadingKeys: 'false'
+              - Sid: UpdateWebsiteHostInTenant
+                Effect: Allow
+                Action: dynamodb:UpdateItem
+                Resource: !Ref TableArn
+                Condition:
+                  ForAllValues:StringLike:
+                    dynamodb:LeadingKeys: ['TENANT#${aws:PrincipalTag/TenantId}']
+                  StringEquals:
+                    dynamodb:EnclosingOperation: TransactWriteItems
+                  'Null':
+                    dynamodb:LeadingKeys: 'false'
               - Sid: WebsiteTenantDataKmsUse
                 Effect: Allow
                 Action:
@@ -616,6 +630,10 @@ Resources:
                 Effect: Allow
                 Action: comprehend:DetectDominantLanguage
                 Resource: '*'
+              - Sid: DescribeBatchExecution
+                Effect: Allow
+                Action: states:DescribeExecution
+                Resource: !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:translateme-${StageName}-batch:job-*'
               - Sid: StartBatchExecution
                 Effect: Allow
                 Action: states:StartExecution
@@ -645,6 +663,28 @@ Resources:
                   - sts:SetSourceIdentity
                   - sts:TagSession
                 Resource: !GetAtt TenantDataAccessRole.Arn
+              - Sid: ReadTenantDirectory
+                Effect: Allow
+                Action: dynamodb:Query
+                Resource: !Sub '${TableArn}/index/GSI1'
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:LeadingKeys: ['PLATFORM#TENANTS']
+                    dynamodb:Attributes: [PK, SK, GSI1PK, GSI1SK, tenantId, plan, status, createdAt, characterLimit, charLimit]
+                  StringEquals:
+                    dynamodb:Select: SPECIFIC_ATTRIBUTES
+                  'Null':
+                    dynamodb:LeadingKeys: 'false'
+                    dynamodb:Attributes: 'false'
+              - Sid: ReadTenantDirectoryKms
+                Effect: Allow
+                Action: [kms:Decrypt, kms:DescribeKey]
+                Resource: !Ref KmsKeyArn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub 'dynamodb.${AWS::Region}.${AWS::URLSuffix}'
+                    kms:EncryptionContext:aws:dynamodb:tableName: !Select [1, !Split ['/', !Ref TableArn]]
+                    kms:EncryptionContext:aws:dynamodb:subscriberId: !Ref AWS::AccountId
               - Sid: InvalidateWebsiteCache
                 Effect: Allow
                 Action: cloudfront:CreateInvalidation

@@ -7,17 +7,21 @@ import { TranslateClient } from '@aws-sdk/client-translate';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createTenantDocumentClientRouter, createTenantS3Client } from '../../../libs/common/tenantAws.js';
 import { createDynamoGlossaryReader, postCheckGlossary, type GlossaryState } from '../../../libs/common/glossary.js';
-import { createJobStore, JOB_ID_RE, jobKey, type JobDb, type JobWarning } from '../../../libs/common/jobs.js';
+import { createJobStore, JOB_ID_RE, JOB_TTL_DAYS, jobKey, type JobDb, type JobWarning } from '../../../libs/common/jobs.js';
 import { countChars, parse, rebuild, translatedFileName, type DocFormat } from '../../../libs/common/parsers.js';
 import { normalize_hash } from '../../../libs/common/text-utils.js';
 import { createDynamoTmDb, createTM, type SentenceWithHash, type TmEntry } from '../../../libs/common/tm.js';
 import type { Ctx } from '../../../libs/common/types.js';
+import type { db } from '../../../libs/common/db.js';
 import { UsageService, type UsageReservation, type UsageSource } from '../../../libs/common/usage/usage.js';
 import { createTranslator } from '../../../libs/common/translator.js';
 
 export const BATCH_BLOCK_BYTES = 10_000;
 export const BATCH_LOT_BLOCKS = 20;
 export const BATCH_RETRY_LIMIT = 3;
+const DISTRIBUTED_LOT_BLOCKS = 256;
+const DISTRIBUTED_LOT_BYTES = 40_000;
+const OBJECT_IO_CONCURRENCY = 16;
 const BATCH_LANGUAGE_CONFIDENCE_THRESHOLD = 0.70;
 const BATCH_SUPPORTED_LANGUAGES = new Set(['ar', 'de', 'en', 'es', 'fr', 'hi', 'id', 'it', 'ja', 'ko', 'nl', 'pl', 'pt', 'ru', 'sv', 'th', 'tr', 'vi', 'zh']);
 
@@ -34,6 +38,7 @@ export interface BatchTaskEvent {
   mode: 'PARSE_AND_CHUNK' | 'TRANSLATE_LOT' | 'MERGE_AND_WRITE' | 'MARK_FAILED' | 'SET_NOTIFICATION_STATUS';
   tenant_id: string;
   job_id: string;
+  distributed?: boolean;
   lot_key?: string;
   target_lang?: string;
   attempt?: number;
@@ -42,9 +47,9 @@ export interface BatchTaskEvent {
   error?: { Error?: string; Cause?: string };
 }
 export interface BatchWorkflowDeps {
-  jobs: JobDb;
+  jobs: JobDb & Partial<Pick<typeof db, 'transact'>>;
   objects: {
-    get(tenantId: string, key: string): Promise<Uint8Array | null>;
+    get(tenantId: string, key: string, versionId?: string): Promise<Uint8Array | null>;
     put(tenantId: string, key: string, bytes: Uint8Array, contentType: string): Promise<void>;
     signGet(tenantId: string, key: string, expiresIn: number): Promise<string>;
   };
@@ -84,20 +89,23 @@ const resultKey = (tenantId: string, jobId: string, name: string) => `${prefixOf
 const jsonBytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 const jsonValue = <T>(bytes: Uint8Array): T => JSON.parse(new TextDecoder().decode(bytes)) as T;
 
-export function splitBatchBlocks(blocks: readonly BatchBlock[], options: { maxBytes?: number; lotBlocks?: number } = {}): BatchBlock[][] {
+export function splitBatchBlocks(blocks: readonly BatchBlock[], options: { maxBytes?: number; lotBlocks?: number; lotBytes?: number } = {}): BatchBlock[][] {
   const maxBytes = options.maxBytes ?? BATCH_BLOCK_BYTES;
   const lotBlocks = options.lotBlocks ?? BATCH_LOT_BLOCKS;
   const lots: BatchBlock[][] = [];
   let current: BatchBlock[] = [];
+  let size = 0;
   for (const block of blocks) {
     const bytes = Buffer.byteLength(block.text, 'utf8');
     if (!Number.isSafeInteger(block.id) || block.id < 0 || typeof block.text !== 'string') throw new TypeError('Invalid batch block.');
     if (bytes > maxBytes) throw Object.assign(new Error(`Block ${block.id} exceeds ${maxBytes} UTF-8 bytes.`), { name: 'BlockTooLarge' });
-    if (current.length >= lotBlocks) {
+    if (current.length && (current.length >= lotBlocks || size + bytes > (options.lotBytes ?? Infinity))) {
       lots.push(current);
       current = [];
+      size = 0;
     }
     current.push(block);
+    size += bytes;
   }
   if (current.length) lots.push(current);
   return lots;
@@ -135,6 +143,18 @@ export function splitOversizedBatchBlocks(blocks: readonly BatchBlock[], maxByte
   return expanded;
 }
 
+async function processObjectPages<T, R>(
+  items: readonly T[],
+  process: (item: T, index: number) => Promise<R>,
+  consume?: (result: R, index: number) => void,
+): Promise<void> {
+  for (let start = 0; start < items.length; start += OBJECT_IO_CONCURRENCY) {
+    const page = items.slice(start, start + OBJECT_IO_CONCURRENCY);
+    const results = await Promise.all(page.map((item, index) => process(item, start + index)));
+    results.forEach((result, index) => consume?.(result, start + index));
+  }
+}
+
 function assertTaskEvent(event: BatchTaskEvent): void {
   if (!event || !event.tenant_id || event.tenant_id === 'PLATFORM' || !JOB_ID_RE.test(event.job_id)) {
     throw Object.assign(new Error('Invalid batch task identity.'), { name: 'InvalidEvent' });
@@ -159,17 +179,16 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
     const fileKey = job.fileKey;
     const fileFormat = job.format;
     if (typeof fileKey !== 'string' || !['txt', 'html', 'docx'].includes(String(fileFormat))) throw Object.assign(new Error('Invalid job file metadata.'), { name: 'InvalidJob' });
-    const bytes = await deps.objects.get(ctx.tenantId, fileKey);
+    // Jobs accepted before version pinning stored only the key.
+    const versionId = typeof job.fileVersionId === 'string' ? job.fileVersionId : undefined;
+    const bytes = await deps.objects.get(ctx.tenantId, fileKey, versionId);
     if (!bytes) throw Object.assign(new Error('Uploaded batch file is missing.'), { name: 'FileNotFound' });
     const parsed = parse(String(fileFormat).toUpperCase(), bytes);
     const blocks = splitOversizedBatchBlocks(parsed.blocks);
-    const grouped = splitBatchBlocks(blocks);
-    const lots: string[] = [];
-    for (let i = 0; i < grouped.length; i++) {
-      const key = lotKey(ctx.tenantId, event.job_id, i);
-      await deps.objects.put(ctx.tenantId, key, jsonBytes(grouped[i]), 'application/json');
-      lots.push(key);
-    }
+    const grouped = splitBatchBlocks(blocks, event.distributed
+      ? { lotBlocks: DISTRIBUTED_LOT_BLOCKS, lotBytes: DISTRIBUTED_LOT_BYTES }
+      : {});
+    const lots = grouped.map((_, index) => lotKey(ctx.tenantId, event.job_id, index));
     const manifest: BatchManifest = {
       format: String(fileFormat).toUpperCase() as DocFormat,
       fileName: String(job.fileName),
@@ -178,9 +197,59 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
       lots,
       targetLangs: Array.isArray(job.targetLangs) ? job.targetLangs.map(String) : [],
     };
-    await deps.objects.put(ctx.tenantId, manifestKey(ctx.tenantId, event.job_id), jsonBytes(manifest), 'application/json');
-    await jobs.markRunning(ctx, event.job_id, lots.length * manifest.targetLangs.length, { warnings: parsed.warnings });
-    return { job_id: event.job_id, tenant_id: ctx.tenantId, manifest_key: manifestKey(ctx.tenantId, event.job_id), lot_keys: lots, target_langs: manifest.targetLangs, send_email: job.sendEmail === true, notification_email: job.notificationEmail };
+    const result = {
+      job_id: event.job_id,
+      tenant_id: ctx.tenantId,
+      manifest_key: manifestKey(ctx.tenantId, event.job_id),
+      target_langs: manifest.targetLangs,
+    };
+    const total = lots.length * manifest.targetLangs.length;
+    const lotIndex = `${prefixOf(ctx.tenantId, event.job_id)}lot-index.json`;
+    // Old state-machine executions can still call the new Lambda during rollout.
+    const output = event.distributed ? { ...result, lot_index_key: lotIndex, lot_count: lots.length }
+      : { ...result, lot_keys: lots, send_email: job.sendEmail === true, notification_email: job.notificationEmail };
+    if (!event.distributed && (total > 800 || jsonBytes(output).length > 200_000)) {
+      throw Object.assign(new Error('Batch exceeds legacy workflow limits. Submit the file to the updated workflow.'), { name: 'LegacyBatchWorkflowLimit' });
+    }
+
+    await processObjectPages(grouped, (group, index) =>
+      deps.objects.put(ctx.tenantId, lots[index], jsonBytes(group), 'application/json'));
+    await deps.objects.put(ctx.tenantId, result.manifest_key, jsonBytes(manifest), 'application/json');
+    if (event.distributed) {
+      await deps.objects.put(ctx.tenantId, lotIndex, jsonBytes(lots.map((key) => ({ key }))), 'application/json');
+    }
+    await jobs.markRunning(ctx, event.job_id, total, { warnings: parsed.warnings });
+    return output;
+  }
+
+  async function recordProgress(ctx: Ctx, event: BatchTaskEvent, job: Record<string, unknown>, progressId: string) {
+    if (!event.distributed) {
+      await jobs.addProgress(ctx, event.job_id, 1, 0, progressId);
+      return;
+    }
+    if (!deps.jobs.transact) throw new Error('Distributed batch requires transactional job progress.');
+    const jobRecord = jobKey(ctx, event.job_id);
+    // Store each completed lot as a separate item to keep JOB below DynamoDB's 400 KiB limit.
+    const marker = { PK: jobRecord.PK, SK: `LOT#${event.job_id}#${progressId}` };
+    const ttl = Number(job.ttl) || Math.floor(now().getTime() / 1_000) + JOB_TTL_DAYS * 86_400;
+    try {
+      await deps.jobs.transact(ctx, [
+        { Put: { TableName: tableName, Item: { ...marker, ttl }, ConditionExpression: 'attribute_not_exists(PK)' } },
+        {
+          Update: {
+            TableName: tableName,
+            Key: jobRecord,
+            UpdateExpression: 'SET #updatedAt = :at ADD #done :one',
+            ConditionExpression: '#status = :running',
+            ExpressionAttributeNames: { '#status': 'status', '#updatedAt': 'updatedAt', '#done': 'done' },
+            ExpressionAttributeValues: { ':at': now().toISOString(), ':one': 1, ':running': 'RUNNING' },
+          },
+        },
+      ]);
+    } catch (error) {
+      if ((error as { name?: string })?.name !== 'TransactionCanceledException' ||
+          !(await deps.jobs.get(ctx, marker, { consistent: true }))) throw error;
+    }
   }
 
   async function translateLot(event: BatchTaskEvent) {
@@ -189,7 +258,7 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
     if (typeof event.lot_key !== 'string' || !event.lot_key.startsWith(`${prefixOf(ctx.tenantId, event.job_id)}lots/`) || typeof event.target_lang !== 'string') {
       throw Object.assign(new Error('Invalid batch lot key or language.'), { name: 'InvalidEvent' });
     }
-    const matched = /\/lot-(\d{4})\.json$/u.exec(event.lot_key);
+    const matched = /\/lot-(\d{4,})\.json$/u.exec(event.lot_key);
     if (!matched) throw Object.assign(new Error('Invalid batch lot identifier.'), { name: 'InvalidEvent' });
     const lotNo = Number(matched[1]);
     const outputKey = lotResultKey(ctx.tenantId, event.job_id, event.target_lang, lotNo);
@@ -205,7 +274,7 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
             typeof result.memoryChars !== 'number' || !Number.isFinite(result.memoryChars) || !Array.isArray(result.warnings)) {
           throw Object.assign(new Error('Legacy batch lot result is invalid.'), { name: 'InvalidBatchCheckpoint' });
         }
-        await jobs.addProgress(ctx, event.job_id, 1, 0, progressId);
+        await recordProgress(ctx, event, job, progressId);
         return { lot_key: event.lot_key, target_lang: event.target_lang, result_key: outputKey };
       }
       if (result.checkpointVersion !== 1 || !result.reservation || !result.usage || !Array.isArray(result.tmEntries) || !Array.isArray(result.warnings) ||
@@ -220,7 +289,7 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
         await deps.objects.put(ctx.tenantId, outputKey, jsonBytes(result), 'application/json');
       }
       await deps.usage.settle(result.reservation, result.usage);
-      await jobs.addProgress(ctx, event.job_id, 1, 0, progressId);
+      await recordProgress(ctx, event, job, progressId);
       return { lot_key: event.lot_key, target_lang: event.target_lang, result_key: outputKey };
     }
     const blocks = jsonValue<BatchBlock[]>(await deps.objects.get(ctx.tenantId, event.lot_key) ?? new Uint8Array());
@@ -299,7 +368,7 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
         }
         await deps.usage.settle(reservation, result.usage);
         reservation = undefined;
-        await jobs.addProgress(ctx, event.job_id, 1, 0, progressId);
+        await recordProgress(ctx, event, job, progressId);
         return { lot_key: event.lot_key, target_lang: event.target_lang, result_key: outputKey };
       }
 
@@ -320,7 +389,7 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
       checkpointPersisted = true;
       await deps.usage.settle(reservation, result.usage);
       reservation = undefined;
-      await jobs.addProgress(ctx, event.job_id, 1, 0, progressId);
+      await recordProgress(ctx, event, job, progressId);
       return { lot_key: event.lot_key, target_lang: event.target_lang, result_key: outputKey };
     } catch (error) {
       if (reservation && !checkpointPersisted) {
@@ -343,13 +412,15 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
     const manifest = jsonValue<BatchManifest>(manifestBytes);
     const resultFiles: Record<string, string> = {};
     const warnings = [...manifest.warnings];
+    const groupedWarnings = new Map<string, JobWarning>();
     for (const lang of manifest.targetLangs) {
       const translations: Array<string | undefined> = [];
       const pieces = new Map<number, Array<{ partIndex: number; text: string }>>();
-      for (let i = 0; i < manifest.lots.length; i++) {
-        const bytes = await deps.objects.get(ctx.tenantId, lotResultKey(ctx.tenantId, event.job_id, lang, i));
-        if (!bytes) throw Object.assign(new Error(`Missing translated lot ${i} (${lang}).`), { name: 'MissingTranslatedLot' });
-        const value = jsonValue<{ translations: Record<string, string>; sources?: Record<string, { sourceId: number; partIndex: number }>; warnings?: JobWarning[] }>(bytes);
+      await processObjectPages(manifest.lots, async (_, index) => {
+        const bytes = await deps.objects.get(ctx.tenantId, lotResultKey(ctx.tenantId, event.job_id, lang, index));
+        if (!bytes) throw Object.assign(new Error(`Missing translated lot ${index} (${lang}).`), { name: 'MissingTranslatedLot' });
+        return jsonValue<{ translations: Record<string, string>; sources?: Record<string, { sourceId: number; partIndex: number }>; warnings?: JobWarning[] }>(bytes);
+      }, (value) => {
         for (const [id, text] of Object.entries(value.translations)) {
           const source = value.sources?.[id];
           if (!source) translations[Number(id)] = text;
@@ -359,8 +430,18 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
             pieces.set(source.sourceId, sourcePieces);
           }
         }
-        if (Array.isArray(value.warnings)) warnings.push(...value.warnings);
-      }
+        if (Array.isArray(value.warnings)) {
+          for (const warning of value.warnings) {
+            if (!event.distributed) {
+              warnings.push(warning);
+              continue;
+            }
+            const current = groupedWarnings.get(warning.code);
+            if (current) current.count += warning.count;
+            else groupedWarnings.set(warning.code, { ...warning, where: 'batch-lots' });
+          }
+        }
+      });
       for (const [sourceId, sourcePieces] of pieces) {
         translations[sourceId] = sourcePieces.sort((a, b) => a.partIndex - b.partIndex).map(({ text }) => text).join('');
       }
@@ -370,6 +451,7 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
       await deps.objects.put(ctx.tenantId, key, rebuilt, manifest.format === 'TXT' ? 'text/plain; charset=utf-8' : manifest.format === 'HTML' ? 'text/html; charset=utf-8' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
       resultFiles[lang] = key;
     }
+    warnings.push(...groupedWarnings.values());
     await deps.jobs.update(ctx, {
       Key: jobKey(ctx, event.job_id),
       UpdateExpression: 'SET #resultFiles = :resultFiles, #warnings = :warnings, #updatedAt = :at',
@@ -427,9 +509,8 @@ export function createBatchWorkflowHandler(deps: BatchWorkflowDeps) {
     let job = await loadJob(ctx, event.job_id);
     let reason = typeof job.reason === 'string' ? job.reason : String(event.error?.Error ?? 'BATCH_FAILED').slice(0, 128);
     if (job.status !== 'FAILED' && job.status !== 'SUCCEEDED') {
-      const remaining = Math.max(0, Number(job.total ?? 0) - Number(job.done ?? 0) - Number(job.failed ?? 0));
       try {
-        await jobs.finish(ctx, event.job_id, { status: 'FAILED', reason, failedRemaining: remaining });
+        await jobs.finish(ctx, event.job_id, { status: 'FAILED', reason, markUnfinishedFailed: true });
       } catch (error) {
         // The state machine may retry after the JOB update succeeded but the Lambda response was lost.
         job = await loadJob(ctx, event.job_id);
@@ -481,17 +562,41 @@ function tenantS3(tenantId: string): S3Client {
   return client;
 }
 
-export const handler = async (event: BatchTaskEvent) => {
+interface ExecutionStatusEvent {
+  source: 'aws.states';
+  'detail-type': 'Step Functions Execution Status Change';
+  detail: { status?: string; input?: string; executionArn?: string };
+}
+
+export function failedExecutionTask(event: ExecutionStatusEvent): BatchTaskEvent | null {
+  const { detail } = event;
+  if (event.source !== 'aws.states' || event['detail-type'] !== 'Step Functions Execution Status Change' ||
+      !detail || !['FAILED', 'TIMED_OUT', 'ABORTED'].includes(detail.status ?? '') || !detail.input) return null;
+  let input: { tenant_id?: unknown; job_id?: unknown } | null;
+  try { input = JSON.parse(detail.input); }
+  catch { return null; }
+  if (!input) return null;
+  const { tenant_id, job_id } = input;
+  if (typeof tenant_id !== 'string' || !/^t_[A-Za-z0-9_-]{1,64}$/.test(tenant_id) ||
+      typeof job_id !== 'string' || !JOB_ID_RE.test(job_id) ||
+      !detail.executionArn?.endsWith(`:${job_id}`)) return null;
+  return { mode: 'MARK_FAILED', tenant_id, job_id, error: { Error: `WORKFLOW_${detail.status}` } };
+}
+
+export const handler = async (event: BatchTaskEvent | ExecutionStatusEvent) => {
+  const task = 'detail-type' in event ? failedExecutionTask(event) : event;
+  if (!task) return;
   const workflow = createBatchWorkflowHandler({
     jobs: {
       get: (ctx, key, opts) => import('../../../libs/common/db.js').then(({ db }) => db.get(ctx, key, opts)),
       put: (ctx, item, condition) => import('../../../libs/common/db.js').then(({ db }) => db.put(ctx, item, condition)),
       update: (ctx, input) => import('../../../libs/common/db.js').then(({ db }) => db.update(ctx, input)),
+      transact: (ctx, ops) => import('../../../libs/common/db.js').then(({ db }) => db.transact(ctx, ops)),
     },
     objects: {
-      async get(tenantId, key) {
+      async get(tenantId, key, versionId) {
         try {
-          const res = await tenantS3(tenantId).send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+          const res = await tenantS3(tenantId).send(new GetObjectCommand({ Bucket: bucket, Key: key, VersionId: versionId }));
           return res.Body ? res.Body.transformToByteArray() : null;
         } catch (error) {
           if ((error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 404 || (error as { name?: string })?.name === 'NoSuchKey') return null;
@@ -513,5 +618,5 @@ export const handler = async (event: BatchTaskEvent) => {
       return { language: top?.LanguageCode, confidence: top?.Score };
     },
   });
-  return workflow(event);
+  return workflow(task);
 };
