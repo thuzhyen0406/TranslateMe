@@ -16,6 +16,8 @@ import { WebsitePage } from './WebsitePage.js';
 import { ApiKeysPage } from './ApiKeysPage.js';
 import { PlaygroundPage } from './PlaygroundPage.js';
 import { BatchTranslatePage } from './BatchTranslatePage.js';
+import { UsagePage } from './UsagePage.js';
+import { PlatformAdminPage } from './PlatformAdminPage.js';
 
 const PLAN_DISPLAY_LABEL: Readonly<Record<AuthenticatedSession['plan'], string>> = {
   FREE: 'Free',
@@ -265,6 +267,12 @@ export const ConsoleLayout: React.FC<ConsoleLayoutProps> = ({ session, onUpdateS
             session={effectiveSession}
             onTenantStatusDetected={handleTenantStatusDetected}
           />
+        ) : activeMenu === 'usage' ? (
+          <UsagePage session={effectiveSession} />
+        ) : activeMenu === 'platform-tenants' ? (
+          <PlatformAdminPage session={effectiveSession} mode="tenants" />
+        ) : activeMenu === 'platform-pricing' ? (
+          <PlatformAdminPage session={effectiveSession} mode="pricing" />
         ) : (
           <div className="p-8 max-w-4xl">
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
